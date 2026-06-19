@@ -1,0 +1,6 @@
+/build
+/dist
+/plugin.dylib
+/plugin.so
+/plugin.dll
+.DS_Store

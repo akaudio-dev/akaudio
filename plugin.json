@@ -1,0 +1,29 @@
+{
+  "slug": "akozlov",
+  "name": "Akozlov",
+  "version": "2.0.0",
+  "license": "GPL-3.0-or-later",
+  "brand": "Akozlov",
+  "author": "Andrey Kozlov",
+  "authorEmail": "andrei@akaudio.dev",
+  "authorUrl": "",
+  "pluginUrl": "",
+  "manualUrl": "",
+  "sourceUrl": "",
+  "donateUrl": "",
+  "changelogUrl": "",
+  "modules": [
+    {
+      "slug": "Ninjam",
+      "name": "Ninjam",
+      "description": "NINJAM online jamming client. Streams collaborative audio from a NINJAM server into Rack.",
+      "tags": ["External"]
+    },
+    {
+      "slug": "Radio",
+      "name": "Radio",
+      "description": "Streaming internet radio source (Icecast/HTTP) feeding audio into a patch.",
+      "tags": ["External"]
+    }
+  ]
+}
