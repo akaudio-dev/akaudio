@@ -13,6 +13,7 @@
 #include "../dep/dr_mp3.h"
 #include "Tls.hpp"
 #include "AacDecoder.hpp"
+#include "Http.hpp"
 
 namespace akozlov {
 
@@ -56,6 +57,55 @@ Url parseUrl(const std::string& url) {
 	}
 	u.ok = !u.host.empty();
 	return u;
+}
+
+bool endsWithCI(const std::string& s, const std::string& suffix) {
+	if (s.size() < suffix.size())
+		return false;
+	for (size_t i = 0; i < suffix.size(); i++) {
+		char a = (char) std::tolower((unsigned char) s[s.size() - suffix.size() + i]);
+		char b = (char) std::tolower((unsigned char) suffix[i]);
+		if (a != b)
+			return false;
+	}
+	return true;
+}
+
+// Path part of a URL, without the query string (for extension checks).
+std::string pathNoQuery(const std::string& url) {
+	std::string p = parseUrl(url).path;
+	size_t q = p.find('?');
+	return q == std::string::npos ? p : p.substr(0, q);
+}
+
+// True if the URL points at a .pls or .m3u playlist (NOT .m3u8, which is HLS).
+bool isPlaylistUrl(const std::string& url) {
+	std::string p = pathNoQuery(url);
+	return endsWithCI(p, ".pls") || endsWithCI(p, ".m3u");
+}
+
+// Extract the first http(s) media URL from a .pls or .m3u body. Works for both:
+// PLS "FileN=http://…" lines and M3U bare-URL lines; '#' comment lines and the
+// PLS "File1=" prefix are handled by scanning for the first http(s) token.
+std::string firstPlaylistUrl(const std::string& body) {
+	size_t i = 0, n = body.size();
+	while (i < n) {
+		size_t e = body.find('\n', i);
+		std::string line = body.substr(i, (e == std::string::npos ? n : e) - i);
+		i = (e == std::string::npos ? n : e + 1);
+
+		size_t h = line.find("http://");
+		if (h == std::string::npos)
+			h = line.find("https://");
+		if (h == std::string::npos)
+			continue;
+		std::string u = line.substr(h);
+		while (!u.empty() && (u.back() == '\r' || u.back() == ' ' || u.back() == '\t'))
+			u.pop_back();
+		if (!u.empty())
+			return u;
+	}
+	return "";
 }
 
 // Context handed to dr_mp3's read callback: serves the post-header leftover bytes
@@ -128,6 +178,22 @@ void StreamClient::stop() {
 }
 
 void StreamClient::run(std::string url) {
+	// Resolve .pls / .m3u playlists to the actual stream URL (a few hops, in case
+	// a playlist points at another). Blocking httpGet is fine on this background
+	// thread. Leaves `url` unchanged for direct streams.
+	for (int hop = 0; hop < 4 && isPlaylistUrl(url); hop++) {
+		if (abort.load(std::memory_order_acquire))
+			break;
+		setStatus(State::Connecting, "Reading playlist\xe2\x80\xa6");
+		std::string body;
+		if (!httpGet(url, body))
+			break;
+		std::string next = firstPlaylistUrl(body);
+		if (next.empty() || next == url)
+			break;
+		url = next;
+	}
+
 	Url u = parseUrl(url);
 	if (!u.ok) {
 		setStatus(State::Error, "Bad URL (need http:// or https://)");

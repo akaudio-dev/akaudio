@@ -5,7 +5,7 @@
 // Build + run (from the plugin root; R = your RACK_DIR):
 //   c++ -std=c++11 -I src -I "$R/dep/include" \
 //     test/play_test.cpp src/net/Stream.cpp src/net/Tls.cpp \
-//     src/net/AacDecoder.cpp src/dep/dr_mp3_impl.cpp \
+//     src/net/AacDecoder.cpp src/net/Http.cpp src/dep/dr_mp3_impl.cpp \
 //     "$R/dep/lib/libssl.a" "$R/dep/lib/libcrypto.a" \
 //     -framework AudioToolbox -framework CoreFoundation -framework AudioUnit \
 //     -o build/play_test
@@ -13,7 +13,7 @@
 //
 // Links the net layer + dr_mp3 + OpenSSL (https) + AudioToolbox (AAC) — no Rack,
 // no jansson — so it isolates "can we play this stream?" from the whole plugin.
-// Works for http/https and MP3/AAC.
+// Works for http/https, MP3/AAC, and .pls/.m3u playlist URLs.
 
 #include "../src/net/Stream.hpp"
 

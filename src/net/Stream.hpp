@@ -16,7 +16,8 @@
 // Scope / limitations:
 //   - http:// and https:// (TLS via the OpenSSL libRack exports; SNI on, but
 //     certificate verification is not enforced — see net/Tls.hpp).
-//   - MP3 streams only (the common Icecast case; no AAC/OGG yet).
+//   - .pls / .m3u playlist URLs are auto-resolved to the first stream URL.
+//   - MP3 always; AAC on macOS (AudioToolbox). No OGG/Vorbis or HLS yet.
 //   - linear resampling from the stream rate to the engine rate.
 
 namespace akozlov {
