@@ -62,4 +62,8 @@ Current limitations (future work): **no OGG/Vorbis** yet; AAC is macOS-only (oth
 
 ## Persistence
 
-Module state is saved per-instance via `dataToJson`/`dataFromJson` (Radio persists `url` and `playing`, and auto-resumes playback on patch load). The slug strings in `plugin.json` and `createModel(...)` are the permanent identity — don't rename them once patches reference them.
+Module state is saved per-instance via `dataToJson`/`dataFromJson` (Radio persists `url`, `stationName`, `playing`; auto-resumes playback on patch load). The slug strings in `plugin.json` and `createModel(...)` are the permanent identity — don't rename them once patches reference them.
+
+## Stations = factory presets (Radio)
+
+Radio's "stations" are **curated factory presets**, not a bespoke database — we lean on Rack's native preset system. Each `presets/Radio/NN_<Name>.vcvm` is a module `toJson()` (`plugin`/`model`/`version`/`params`/`data`) whose `data` is `dataToJson` (`url`, `stationName`, `playing:true`). Rack lists them under right-click → **Preset → (factory presets)**; we also surface them on-panel via a `StationChoice` (LedDisplayChoice) and a context-menu **Stations** submenu, both loading the chosen file through the public `ModuleWidget::loadAction` (so it's the real preset loader, with undo). The factory dir is `Model::getFactoryPresetDirectory()` = `<plugin>/presets/<ModuleSlug>`; the Makefile already ships `presets/`. **Add a station = drop a verified `.vcvm` in `presets/Radio/`** (liveness matters — see `TODO.md`; the bundled set is the reliable SomaFM family, all confirmed `audio/mpeg`). Picking a station calls `loadAction` → `dataFromJson`, which stops any current stream and starts the new URL.

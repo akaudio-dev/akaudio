@@ -34,6 +34,16 @@ keep it fresh automatically. **Reuse existing public lists rather than hand-roll
   with the editable URL field as the manual fallback (already implemented).
 - Persist the selected station; keep the manual-URL path working.
 
+### DONE 2026-06-20 — stations as factory presets (first cut)
+Radio now ships curated **factory presets** (`presets/Radio/NN_*.vcvm`, the reliable SomaFM
+family, all verified `audio/mpeg`) instead of needing a hand-typed URL. Implemented via Rack's
+native preset system: `data` carries `url`/`stationName`/`playing`; an on-panel `StationChoice`
++ a context-menu **Stations** submenu load the chosen file through `ModuleWidget::loadAction`.
+`stationName` is persisted and shown on the panel; manual URL edits set it to "Custom". See
+CLAUDE.md "Stations = factory presets". This is the simple, idiomatic baseline; the big
+radio-browser.info live/curated database above remains the richer future step (and would
+generate `.vcvm` presets and/or a `res/stations.json`).
+
 ### Open questions
 - Ship the full DB vs. fetch/update it at runtime from radio-browser (network at launch
   vs. offline-friendly bundled snapshot — likely bundle a snapshot + optional refresh).
