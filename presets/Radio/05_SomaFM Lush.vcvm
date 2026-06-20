@@ -6,6 +6,7 @@
   "data": {
     "url": "http://ice1.somafm.com/lush-128-mp3",
     "stationName": "SomaFM Lush",
+    "icon": "stations/lush.png",
     "playing": true
   }
 }

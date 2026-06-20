@@ -44,6 +44,13 @@ CLAUDE.md "Stations = factory presets". This is the simple, idiomatic baseline; 
 radio-browser.info live/curated database above remains the richer future step (and would
 generate `.vcvm` presets and/or a `res/stations.json`).
 
+**Station artwork (DONE 2026-06-20, bundle-now half of the hybrid):** each preset carries an
+`icon` PNG (`res/stations/<id>.png`, SomaFM 256² logos fetched at build time). Rendered on the
+panel (`StationArt`) and as right-aligned thumbnails in the picker (`StationItem`, green ring =
+current). NanoVG can't decode `.ico`, so icons must be PNG/JPG. **Deferred (fetch-later half):**
+runtime favicon download + cache for arbitrary stations (radio-browser's `favicon` field), via
+`httpGet` off-thread → `nvgCreateImageMem` on the UI thread → disk cache; filter to PNG/JPG.
+
 ### Open questions
 - Ship the full DB vs. fetch/update it at runtime from radio-browser (network at launch
   vs. offline-friendly bundled snapshot — likely bundle a snapshot + optional refresh).

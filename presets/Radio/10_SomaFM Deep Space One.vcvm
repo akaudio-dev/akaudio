@@ -6,6 +6,7 @@
   "data": {
     "url": "http://ice1.somafm.com/deepspaceone-128-mp3",
     "stationName": "SomaFM Deep Space One",
+    "icon": "stations/deepspaceone.png",
     "playing": true
   }
 }

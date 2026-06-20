@@ -6,6 +6,7 @@
   "data": {
     "url": "http://ice1.somafm.com/u80s-128-mp3",
     "stationName": "SomaFM Underground 80s",
+    "icon": "stations/u80s.png",
     "playing": true
   }
 }

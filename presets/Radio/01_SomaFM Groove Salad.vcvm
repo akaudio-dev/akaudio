@@ -6,6 +6,7 @@
   "data": {
     "url": "http://ice1.somafm.com/groovesalad-128-mp3",
     "stationName": "SomaFM Groove Salad",
+    "icon": "stations/groovesalad.png",
     "playing": true
   }
 }

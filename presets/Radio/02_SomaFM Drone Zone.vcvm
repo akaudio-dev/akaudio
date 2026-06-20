@@ -6,6 +6,7 @@
   "data": {
     "url": "http://ice1.somafm.com/dronezone-128-mp3",
     "stationName": "SomaFM Drone Zone",
+    "icon": "stations/dronezone.png",
     "playing": true
   }
 }

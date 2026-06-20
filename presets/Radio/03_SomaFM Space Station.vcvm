@@ -6,6 +6,7 @@
   "data": {
     "url": "http://ice1.somafm.com/spacestation-128-mp3",
     "stationName": "SomaFM Space Station",
+    "icon": "stations/spacestation.png",
     "playing": true
   }
 }

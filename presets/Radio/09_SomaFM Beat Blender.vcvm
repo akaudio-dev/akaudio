@@ -6,6 +6,7 @@
   "data": {
     "url": "http://ice1.somafm.com/beatblender-128-mp3",
     "stationName": "SomaFM Beat Blender",
+    "icon": "stations/beatblender.png",
     "playing": true
   }
 }
