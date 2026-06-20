@@ -1,0 +1,12 @@
+{
+  "plugin": "akozlov",
+  "model": "Radio",
+  "version": "2.0.0",
+  "params": [],
+  "data": {
+    "url": "https://maggie.torontocast.com:2020/stream/natureradiorain",
+    "stationName": "Nature Radio Rain",
+    "icon": "",
+    "playing": true
+  }
+}

@@ -25,13 +25,15 @@ struct Radio : Module {
 	};
 
 	akozlov::StreamClient stream;
-	std::string url = "http://ice1.somafm.com/groovesalad-128-mp3";
+	// Default to a calm ambient bed; "stations" are curated factory presets
+	// (sound sources for soundscapes — nature, scanners, space — not music).
+	std::string url = "https://nature-rex.radioca.st/stream";
 	// Human label for the current station (shown on the panel, persisted in
-	// presets). "Stations" are just curated factory presets — see presets/Radio/.
-	std::string stationName = "SomaFM Groove Salad";
+	// presets). See presets/Radio/ for the grouped set.
+	std::string stationName = "Ambi Nature Radio";
 	// Plugin-relative path to the station's bundled artwork (e.g.
-	// "stations/groovesalad.png"), shown on the panel. Empty = no art.
-	std::string icon = "stations/groovesalad.png";
+	// "stations/ambinature.png"), shown on the panel. Empty = ♪ placeholder.
+	std::string icon = "stations/ambinature.png";
 	bool playing = false;
 
 	Radio() {
@@ -193,19 +195,27 @@ static void readStationPreset(const std::string& path, std::string& name, std::s
 	json_decref(root);
 }
 
-// Populate a menu with the bundled stations (= factory presets in
-// presets/Radio/), loading the chosen one through Rack's own preset loader.
-static void appendStationMenu(Menu* menu, ModuleWidget* mw) {
-	std::string dir = mw->model->getFactoryPresetDirectory();
-	if (!system::isDirectory(dir)) {
-		menu->addChild(createMenuLabel("No stations bundled"));
-		return;
-	}
+// Recursively populate a menu from a station directory: subfolders (= a
+// provider/category, e.g. "Nature") become submenus, .vcvm files become
+// station rows. Mirrors Rack's own factory-preset folder convention, so the
+// native Preset menu groups identically.
+static void appendStationDir(Menu* menu, ModuleWidget* mw, const std::string& dir) {
+	Radio* module = dynamic_cast<Radio*>(mw->module);
 	std::vector<std::string> entries = system::getEntries(dir);
 	std::sort(entries.begin(), entries.end());
-
-	Radio* module = dynamic_cast<Radio*>(mw->module);
 	int count = 0;
+
+	// Folders first, as submenus.
+	for (const std::string& path : entries) {
+		if (!system::isDirectory(path))
+			continue;
+		std::string label = prettyPresetName(system::getFilename(path));
+		menu->addChild(createSubmenuItem(label, "", [mw, path](Menu* sub) {
+			appendStationDir(sub, mw, path);
+		}));
+		count++;
+	}
+	// Then station presets.
 	for (const std::string& path : entries) {
 		if (system::getExtension(path) != ".vcvm")
 			continue;
@@ -224,7 +234,17 @@ static void appendStationMenu(Menu* menu, ModuleWidget* mw) {
 		count++;
 	}
 	if (count == 0)
+		menu->addChild(createMenuLabel("No stations"));
+}
+
+// Bundled stations = factory presets in presets/Radio/, grouped by subfolder.
+static void appendStationMenu(Menu* menu, ModuleWidget* mw) {
+	std::string dir = mw->model->getFactoryPresetDirectory();
+	if (!system::isDirectory(dir)) {
 		menu->addChild(createMenuLabel("No stations bundled"));
+		return;
+	}
+	appendStationDir(menu, mw, dir);
 }
 
 // On-panel station artwork (the current station's bundled logo).

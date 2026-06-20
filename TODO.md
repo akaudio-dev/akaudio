@@ -34,7 +34,25 @@ keep it fresh automatically. **Reuse existing public lists rather than hand-roll
   with the editable URL field as the manual fallback (already implemented).
 - Persist the selected station; keep the manual-URL path working.
 
-### DONE 2026-06-20 — stations as factory presets (first cut)
+### Pivot 2026-06-20 — ambient/utility sources, grouped by category
+The curated set is **not music** (a song fights the patch). It is sound *material* for
+soundscapes, grouped into category subfolders (recursive submenus via `appendStationDir`):
+**Nature** (Ambi Nature Radio, MyNoise Pure Nature, Nature Radio Rain), **Space** (Blue Mars /
+Cryosleep / Voices From Within), **Scanners** (5 Broadcastify police/fire/EMS feeds). All
+verified live `audio/mpeg`. Per-station favicons fetched from radio-browser where available
+(ambinature, mynoise, broadcastify); Blue Mars/rain fall back to the ♪ placeholder.
+
+Still wanted (next):
+- **HLS support** → unlocks **BBC Radio 4** (Shipping Forecast!) + most modern spoken/public
+  radio (they're HLS-only now). Plan: detect `#EXTM3U`/`.m3u8` → poll the media playlist →
+  minimal **MPEG-TS demux** → existing `AacDecoder` (so **macOS-only**, like our AAC). User
+  chose to ship the non-HLS ambient set first; HLS is the next focused build.
+  Example URL (BBC R4): `http://as-hls-ww-live.akamaized.net/pool_55057080/live/ww/bbc_radio_fourfm/...norewind.m3u8`.
+- **ATC** (LiveATC): real URL is inside a `.pls`; hotlinking is ToS-gray and feed hosts rotate.
+  Needs `.pls` parsing + a fixed-UA; lower priority.
+- More spoken/world (shortwave WBCQ works as plain MP3), more nature/scanner feeds.
+
+### Superseded 2026-06-20 — stations as factory presets (first cut, was SomaFM music)
 Radio now ships curated **factory presets** (`presets/Radio/NN_*.vcvm`, the reliable SomaFM
 family, all verified `audio/mpeg`) instead of needing a hand-typed URL. Implemented via Rack's
 native preset system: `data` carries `url`/`stationName`/`playing`; an on-panel `StationChoice`
