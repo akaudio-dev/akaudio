@@ -16,7 +16,7 @@
     {
       "slug": "Ninjam",
       "name": "Ninjam",
-      "description": "NINJAM online jamming client. Streams collaborative audio from a NINJAM server into Rack.",
+      "description": "Listen to a public NINJAM jam via its Icecast/HTTP stream (no joining).",
       "tags": ["External"]
     },
     {

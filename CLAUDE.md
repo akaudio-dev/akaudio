@@ -8,7 +8,7 @@ A single VCV Rack **plugin** (slug `akozlov`) containing multiple **modules** �
 
 Modules:
 - **Radio** (`src/Radio.cpp`) — streaming internet radio (Icecast/HTTP MP3) source. Implemented (v1).
-- **Ninjam** (`src/Ninjam.cpp`) — NINJAM online-jamming client. Skeleton; to be ported from the `~/work/jamauv3` AUv3 project (NINJAM protocol + OGG Vorbis). Outputs silence for now.
+- **Ninjam** (`src/Ninjam.cpp`) — NINJAM jam **listener**. Listening does NOT use the NINJAM protocol and does not join the server: public NINJAM communities publish a live Icecast/HTTP stream of each room's mix, so this reuses `StreamClient` (same as Radio) pointed at a room's stream URL. Joining as a (silent) protocol participant — connect/auth-anonymous/subscribe/decode-OGG-intervals, as in `~/work/jamauv3` — remains a separate, much larger future feature.
 
 Both are "network audio → Rack engine" and share `src/net/`.
 
