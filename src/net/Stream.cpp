@@ -75,9 +75,6 @@ size_t onRead(void* pUserData, void* pBufferOut, size_t bytesToRead) {
 	return n > 0 ? static_cast<size_t>(n) : 0;
 }
 
-drmp3_bool32 onSeek(void*, int, drmp3_seek_origin) { return DRMP3_FALSE; }
-drmp3_bool32 onTell(void*, drmp3_int64*) { return DRMP3_FALSE; }
-
 } // namespace
 
 StreamClient::~StreamClient() {
@@ -201,8 +198,12 @@ void StreamClient::run(std::string url) {
 		size_t bodyStart = headerEnd + 4;
 		ctx.leftover.assign(head.begin() + bodyStart, head.end());
 
+		// Pass NULL seek/tell: this is a non-seekable live socket. With a seek
+		// callback dr_mp3 tries to rewind the first 10 bytes after its ID3v2
+		// probe and aborts init when the rewind fails (DRMP3_FALSE); with NULL
+		// it falls through and lets the decoder re-sync to the next frame.
 		drmp3 mp3;
-		if (!drmp3_init(&mp3, onRead, onSeek, onTell, nullptr, &ctx, nullptr)) {
+		if (!drmp3_init(&mp3, onRead, nullptr, nullptr, nullptr, &ctx, nullptr)) {
 			setStatus(State::Error, "Not an MP3 stream");
 			goto cleanup;
 		}
