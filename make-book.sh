@@ -11,6 +11,8 @@ mkdir -p "$HERE/build"
 go build -C "$TW" -o "$HERE/build/trusty_weaver" .
 
 cd "$HERE"
+# Files in deliberate reading order: identity -> realtime bridge -> streaming
+# core -> transport/codec layers -> room directory -> the two modules.
 build/trusty_weaver \
   -title "Akozlov" \
   -subtitle "A VCV Rack plugin" \
@@ -19,8 +21,16 @@ build/trusty_weaver \
   -o build/akozlov.epub \
   src/plugin.hpp \
   src/plugin.cpp \
-  src/Radio.cpp \
-  src/Ninjam.cpp \
   src/net/RingBuffer.hpp \
   src/net/Stream.hpp \
-  src/net/Stream.cpp
+  src/net/Stream.cpp \
+  src/net/Tls.hpp \
+  src/net/Tls.cpp \
+  src/net/Http.hpp \
+  src/net/Http.cpp \
+  src/net/AacDecoder.hpp \
+  src/net/AacDecoder.cpp \
+  src/net/RoomDirectory.hpp \
+  src/net/RoomDirectory.cpp \
+  src/Radio.cpp \
+  src/Ninjam.cpp
