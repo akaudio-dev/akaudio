@@ -74,10 +74,15 @@ thread fetches+parses into a mutex-guarded `vector<Room>`; the menu is built fro
 *instantly* (never block the UI thread on the network). Refresh on load, on menu-open (background),
 and via a manual "Refresh".
 
-- **Phase 1 — simple (do first):** an on-panel `LedDisplayChoice` label (current room) → dynamic
-  context menu from the cache, sorted by user count, each row `name · N/max · BPM`, ✓ on current,
-  plus "Refresh rooms" and "Custom URL…". Pick → set `stream` URL → `StreamClient`. Needs:
-  `httpGet(url)→string` in `net/`, the `RoomDirectory` cache thread, the label+menu. No new deps.
+- **Phase 1 — simple (DONE 2026-06-20):** on-panel `LedDisplayChoice` (`NinjamRoomChoice`) shows the
+  current room and opens a dynamic menu built from the cache, sorted by user count, each row
+  `name   N/max · BPM`, ✓ on current, plus a status line, "Refresh rooms", and the existing
+  "Custom URL…" field; same picker is also a "Public rooms" submenu in the context menu. Pick →
+  `selectRoom()` sets `stream` URL + starts listening. Implemented: `net/Http.{hpp,cpp}`
+  (`httpGet(url, out)`), `net/RoomDirectory.{hpp,cpp}` (background fetch+parse of
+  `ninbot.com/app/servers.php`, mutex-guarded cache, sorted snapshot, `?t=` cache-bust), wired into
+  `Ninjam.cpp`. No new deps (jansson already linked). Verified live: 19 rooms, `stream` mounts serve
+  `audio/mpeg` 128k that `StreamClient` plays directly. `roomLabel` persisted alongside `url`.
 - **Phase 2 — deluxe (later):** a wider panel with an in-panel `ScrollWidget` browser: scrollable,
   searchable (`TextField` filter) room list with live status (users, BPM, country, who's playing),
   per-row Listen button, maybe a level meter. The "nicest possible" experience.
