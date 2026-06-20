@@ -1,5 +1,6 @@
 #include "Stream.hpp"
 
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <vector>
@@ -11,6 +12,7 @@
 
 #include "../dep/dr_mp3.h"
 #include "Tls.hpp"
+#include "AacDecoder.hpp"
 
 namespace akozlov {
 
@@ -214,84 +216,170 @@ void StreamClient::run(std::string url) {
 			goto cleanup;
 		}
 
-		ReadCtx ctx;
-		ctx.self = this;
-		ctx.fd = fd;
-		ctx.tls = &tls;
-		ctx.abort = &abort;
-		size_t bodyStart = headerEnd + 4;
-		ctx.leftover.assign(head.begin() + bodyStart, head.end());
+		// Pick the decoder dynamically from the response headers. Icecast sends a
+		// Content-Type (audio/mpeg, audio/aac, …); default to MP3 when unspecified.
+		std::string hl = head.substr(0, headerEnd);
+		for (char& c : hl)
+			c = (char) std::tolower((unsigned char) c);
+		const bool isAac = hl.find("audio/aac") != std::string::npos
+			|| hl.find("audio/aacp") != std::string::npos
+			|| hl.find("application/aac") != std::string::npos;
 
-		// Pass NULL seek/tell: this is a non-seekable live socket. With a seek
-		// callback dr_mp3 tries to rewind the first 10 bytes after its ID3v2
-		// probe and aborts init when the rewind fails (DRMP3_FALSE); with NULL
-		// it falls through and lets the decoder re-sync to the next frame.
-		drmp3 mp3;
-		if (!drmp3_init(&mp3, onRead, nullptr, nullptr, nullptr, &ctx, nullptr)) {
-			setStatus(State::Error, "Not an MP3 stream");
-			goto cleanup;
-		}
+		const size_t bodyStart = headerEnd + 4;
+		std::vector<char> leftover(head.begin() + bodyStart, head.end());
 
-		const drmp3_uint32 channels = mp3.channels;
-		const double srcRate = mp3.sampleRate > 0 ? (double) mp3.sampleRate : 44100.0;
-		setStatus(State::Playing, "Playing " + u.host);
+		// Push one resampled stereo frame, blocking briefly under backpressure so
+		// we drain the socket at playback speed and never drop audio. Returns false
+		// when we should stop. Shared by both decoders' resamplers.
+		auto pushFrame = [&](float l, float r) -> bool {
+			while (!ring.push(l, r)) {
+				if (!running.load(std::memory_order_acquire) || abort.load(std::memory_order_acquire))
+					return false;
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			}
+			return true;
+		};
 
-		// Linear resampler state (source -> engine rate).
-		double phase = 0.0;
-		float prevL = 0.f, prevR = 0.f;
-		bool havePrev = false;
-
-		const drmp3_uint64 framesPerRead = 1152;
-		std::vector<float> pcm(framesPerRead * (channels ? channels : 2));
-
-		while (running.load(std::memory_order_acquire) && !abort.load(std::memory_order_acquire)) {
-			drmp3_uint64 got = drmp3_read_pcm_frames_f32(&mp3, framesPerRead, pcm.data());
-			if (got == 0)
-				break; // stream ended
-
-			double engineRate = sampleRate.load(std::memory_order_relaxed);
-			if (engineRate < 1.0)
-				engineRate = 44100.0;
-			const double step = srcRate / engineRate; // source advance per output frame
-
-			for (drmp3_uint64 i = 0; i < got; i++) {
-				float curL, curR;
-				if (channels >= 2) {
-					curL = pcm[i * channels + 0];
-					curR = pcm[i * channels + 1];
-				}
-				else {
-					curL = curR = pcm[i];
-				}
-
-				if (!havePrev) {
+		if (isAac) {
+#if defined(__APPLE__)
+			// AAC via the system AudioToolbox (macOS). The decoder pushes decoded
+			// PCM through onPCM; we linear-resample to the engine rate here.
+			AacDecoder dec;
+			double phase = 0.0;
+			float prevL = 0.f, prevR = 0.f;
+			bool havePrev = false;
+			bool aborted = false;
+			dec.onPCM = [&](const float* pcm, int frames, double srcRate) {
+				double engineRate = sampleRate.load(std::memory_order_relaxed);
+				if (engineRate < 1.0)
+					engineRate = 44100.0;
+				const double step = srcRate / engineRate;
+				for (int i = 0; i < frames; i++) {
+					float curL = pcm[2 * i + 0];
+					float curR = pcm[2 * i + 1];
+					if (!havePrev) {
+						prevL = curL;
+						prevR = curR;
+						havePrev = true;
+						continue;
+					}
+					while (phase < 1.0) {
+						float outL = prevL + (curL - prevL) * (float) phase;
+						float outR = prevR + (curR - prevR) * (float) phase;
+						if (!pushFrame(outL, outR)) {
+							aborted = true;
+							return;
+						}
+						phase += step;
+					}
+					phase -= 1.0;
 					prevL = curL;
 					prevR = curR;
-					havePrev = true;
-					continue;
 				}
+			};
 
-				while (phase < 1.0) {
-					float outL = prevL + (curL - prevL) * (float) phase;
-					float outR = prevR + (curR - prevR) * (float) phase;
-					// Backpressure: block (briefly) when the ring is full so we
-					// read from the socket at playback speed and never drop audio.
-					while (!ring.push(outL, outR)) {
-						if (!running.load(std::memory_order_acquire) || abort.load(std::memory_order_acquire))
-							break;
-						std::this_thread::sleep_for(std::chrono::milliseconds(2));
-					}
-					phase += step;
-				}
-				phase -= 1.0;
-				prevL = curL;
-				prevR = curR;
+			if (!dec.init()) {
+				setStatus(State::Error, "AAC init failed");
+				goto cleanup;
 			}
-		}
+			setStatus(State::Playing, "Playing " + u.host);
 
-		drmp3_uninit(&mp3);
-		if (!abort.load(std::memory_order_acquire))
-			setStatus(State::Stopped, "Stream ended");
+			if (!leftover.empty())
+				dec.feed(reinterpret_cast<const uint8_t*>(leftover.data()), leftover.size());
+
+			char buf[4096];
+			while (!aborted && running.load(std::memory_order_acquire) && !abort.load(std::memory_order_acquire)) {
+				long n = tlsRead(tls, fd, buf, sizeof(buf));
+				if (n <= 0)
+					break;
+				if (!dec.feed(reinterpret_cast<const uint8_t*>(buf), (size_t) n))
+					break;
+			}
+			dec.close();
+			if (!abort.load(std::memory_order_acquire))
+				setStatus(State::Stopped, "Stream ended");
+#else
+			setStatus(State::Error, "AAC needs macOS");
+			goto cleanup;
+#endif
+		}
+		else {
+			ReadCtx ctx;
+			ctx.self = this;
+			ctx.fd = fd;
+			ctx.tls = &tls;
+			ctx.abort = &abort;
+			ctx.leftover.assign(leftover.begin(), leftover.end());
+
+			// Pass NULL seek/tell: this is a non-seekable live socket. With a seek
+			// callback dr_mp3 tries to rewind the first 10 bytes after its ID3v2
+			// probe and aborts init when the rewind fails (DRMP3_FALSE); with NULL
+			// it falls through and lets the decoder re-sync to the next frame.
+			drmp3 mp3;
+			if (!drmp3_init(&mp3, onRead, nullptr, nullptr, nullptr, &ctx, nullptr)) {
+				setStatus(State::Error, "Not an MP3 stream");
+				goto cleanup;
+			}
+
+			const drmp3_uint32 channels = mp3.channels;
+			const double srcRate = mp3.sampleRate > 0 ? (double) mp3.sampleRate : 44100.0;
+			setStatus(State::Playing, "Playing " + u.host);
+
+			// Linear resampler state (source -> engine rate).
+			double phase = 0.0;
+			float prevL = 0.f, prevR = 0.f;
+			bool havePrev = false;
+
+			const drmp3_uint64 framesPerRead = 1152;
+			std::vector<float> pcm(framesPerRead * (channels ? channels : 2));
+
+			bool stop = false;
+			while (!stop && running.load(std::memory_order_acquire) && !abort.load(std::memory_order_acquire)) {
+				drmp3_uint64 got = drmp3_read_pcm_frames_f32(&mp3, framesPerRead, pcm.data());
+				if (got == 0)
+					break; // stream ended
+
+				double engineRate = sampleRate.load(std::memory_order_relaxed);
+				if (engineRate < 1.0)
+					engineRate = 44100.0;
+				const double step = srcRate / engineRate; // source advance per output frame
+
+				for (drmp3_uint64 i = 0; i < got && !stop; i++) {
+					float curL, curR;
+					if (channels >= 2) {
+						curL = pcm[i * channels + 0];
+						curR = pcm[i * channels + 1];
+					}
+					else {
+						curL = curR = pcm[i];
+					}
+
+					if (!havePrev) {
+						prevL = curL;
+						prevR = curR;
+						havePrev = true;
+						continue;
+					}
+
+					while (phase < 1.0) {
+						float outL = prevL + (curL - prevL) * (float) phase;
+						float outR = prevR + (curR - prevR) * (float) phase;
+						if (!pushFrame(outL, outR)) {
+							stop = true;
+							break;
+						}
+						phase += step;
+					}
+					phase -= 1.0;
+					prevL = curL;
+					prevR = curR;
+				}
+			}
+
+			drmp3_uninit(&mp3);
+			if (!abort.load(std::memory_order_acquire))
+				setStatus(State::Stopped, "Stream ended");
+		}
 	}
 
 cleanup:

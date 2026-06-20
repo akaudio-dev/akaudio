@@ -19,3 +19,11 @@ DISTRIBUTABLES += presets
 
 # Include the Rack plugin Makefile framework
 include $(RACK_DIR)/plugin.mk
+
+# macOS-only: the AAC decoder (src/net/AacDecoder.cpp) uses the system
+# AudioToolbox. ARCH_MAC is defined by arch.mk (pulled in via plugin.mk above),
+# so this block must come after the include. Appended LDFLAGS still reach the
+# link recipe (make expands recipe variables at build time).
+ifdef ARCH_MAC
+	LDFLAGS += -framework AudioToolbox -framework CoreFoundation
+endif

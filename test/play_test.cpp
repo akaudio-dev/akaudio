@@ -2,13 +2,18 @@
 // live HTTP/Icecast MP3 stream (default: a ninbot NINJAM room) and confirm we
 // actually decode non-silent audio at roughly real-time.
 //
-// Build + run (from the plugin root):
-//   c++ -std=c++11 -I src test/play_test.cpp src/net/Stream.cpp \
-//       src/dep/dr_mp3_impl.cpp -o build/play_test
+// Build + run (from the plugin root; R = your RACK_DIR):
+//   c++ -std=c++11 -I src -I "$R/dep/include" \
+//     test/play_test.cpp src/net/Stream.cpp src/net/Tls.cpp \
+//     src/net/AacDecoder.cpp src/dep/dr_mp3_impl.cpp \
+//     "$R/dep/lib/libssl.a" "$R/dep/lib/libcrypto.a" \
+//     -framework AudioToolbox -framework CoreFoundation -framework AudioUnit \
+//     -o build/play_test
 //   build/play_test [url] [seconds]
 //
-// This links only the net layer + dr_mp3 — no Rack, no jansson — so it isolates
-// "can we play an Icecast stream?" from the whole plugin.
+// Links the net layer + dr_mp3 + OpenSSL (https) + AudioToolbox (AAC) — no Rack,
+// no jansson — so it isolates "can we play this stream?" from the whole plugin.
+// Works for http/https and MP3/AAC.
 
 #include "../src/net/Stream.hpp"
 

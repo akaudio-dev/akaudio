@@ -48,7 +48,10 @@ Control flow rules:
 
 - `Tls.hpp` / `Tls.cpp` — minimal TLS client over an already-connected fd, using the **OpenSSL that `libRack` exports** (535 SSL symbols; resolved at load via `-undefined dynamic_lookup`, no new dep). `tlsHandshake` does the handshake with **SNI**; `tlsRead`/`tlsWrite` fall back to plain `recv`/`send` when TLS is inactive, so the http and https paths share one code path. Certificate verification is **not enforced** (`SSL_VERIFY_NONE`, no bundled CA store) — adequate for public audio streams; tighten later if we ship a CA bundle. Both `StreamClient` and `httpGet` accept `https://`.
 
-Current limitations (future work): **MP3 only** (no AAC/OGG yet), blocking connect (cancelled only via socket shutdown / OS timeout), linear (not band-limited) resampling.
+- `AacDecoder.hpp` / `AacDecoder.cpp` — streaming ADTS-AAC decoder, **macOS only** (uses the system `AudioToolbox`: `AudioFileStream` parses ADTS into packets, `AudioConverter` → Float32 stereo). `#if defined(__APPLE__)`-gated; on other platforms `available()`/`init()` return false and the caller reports "AAC needs macOS". Push model: `feed()` raw bytes, decoded PCM arrives via `onPCM`. The Makefile links `-framework AudioToolbox -framework CoreFoundation` under `ifdef ARCH_MAC` (after `include plugin.mk`, where `ARCH_MAC` is defined).
+- **Codec is chosen at runtime** in `StreamClient::run` from the response `Content-Type` (`audio/aac`/`aacp`/`application/aac` → AAC; otherwise MP3 via dr_mp3). Both decoders feed the same linear resampler + backpressure push (`pushFrame` lambda).
+
+Current limitations (future work): **no OGG/Vorbis** yet; AAC is macOS-only (other platforms fall back to an error); blocking connect (cancelled only via socket shutdown / OS timeout); linear (not band-limited) resampling.
 
 ## Adding a module
 
