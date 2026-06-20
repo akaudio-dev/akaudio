@@ -54,6 +54,10 @@ public:
 	bool loading() const { return loading_.load(std::memory_order_acquire); }
 	std::string status();
 
+	// Bumped on every successful fetch+parse. The UI compares it against a
+	// remembered value to know when to rebuild its view (cheap, no locking).
+	unsigned generation() const { return generation_.load(std::memory_order_acquire); }
+
 private:
 	void fetch(unsigned bust);
 
@@ -63,7 +67,8 @@ private:
 
 	std::thread thread;
 	std::atomic<bool> loading_{false};
-	std::atomic<unsigned> bust_{0}; // cache-bust counter for ?t=
+	std::atomic<unsigned> bust_{0};       // cache-bust counter for ?t=
+	std::atomic<unsigned> generation_{0}; // bumped on each successful parse
 };
 
 } // namespace akozlov

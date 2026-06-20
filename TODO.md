@@ -83,6 +83,17 @@ and via a manual "Refresh".
   `ninbot.com/app/servers.php`, mutex-guarded cache, sorted snapshot, `?t=` cache-bust), wired into
   `Ninjam.cpp`. No new deps (jansson already linked). Verified live: 19 rooms, `stream` mounts serve
   `audio/mpeg` 128k that `StreamClient` plays directly. `roomLabel` persisted alongside `url`.
-- **Phase 2 — deluxe (later):** a wider panel with an in-panel `ScrollWidget` browser: scrollable,
-  searchable (`TextField` filter) room list with live status (users, BPM, country, who's playing),
-  per-row Listen button, maybe a level meter. The "nicest possible" experience.
+- **Phase 2 — deluxe (DONE 2026-06-20):** widened the panel to **20 HP** (101.6 mm) and built an
+  in-panel browser in `Ninjam.cpp`: header (title + accent rule + connected light), a `SearchField`
+  (`ui::TextField`) that live-filters by room name or player, a `RefreshButton` (↻), a `StatusLabel`
+  (directory status), a scrollable `RoomBrowser` (`ui::ScrollWidget`) of `RoomRow`s — each showing
+  name, `BPM · BPI · N/max here`, the players list, hover highlight, green accent + ▶/■ glyph on the
+  active room; click a row to listen/stop (`Module::toggleRoom`). Footer has a peak level `MeterWidget`
+  (atomic `peak`, fast-attack/150 ms release, green→amber→red) and the L/R outputs. The list rebuilds
+  only when the directory `generation()` or filter changes; a background refresh fires ~every 30 s
+  while visible. The old context-menu picker (`appendRoomMenu`, Custom URL field) is kept as a fallback.
+  Verified: clean build/install, model symbol + packaged SVG present. GUI not visually tested here
+  (headless: dev Rack aborts at `glfwGetVideoMode`, no monitor) — needs an eyeball pass in Rack.
+
+  Possible polish next: per-row tooltips (country/city from `users[]`), keyboard nav, persist scroll/
+  filter, dim non-playable (TLS-only) rooms instead of hiding them, "now playing" marquee.

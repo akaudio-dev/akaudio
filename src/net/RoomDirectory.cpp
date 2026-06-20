@@ -138,6 +138,8 @@ void RoomDirectory::fetch(unsigned bust) {
 			rooms_ = std::move(parsed);
 		status_ = status;
 	}
+	if (ok)
+		generation_.fetch_add(1, std::memory_order_acq_rel);
 	loading_.store(false, std::memory_order_release);
 }
 

@@ -8,7 +8,7 @@ A single VCV Rack **plugin** (slug `akozlov`) containing multiple **modules** �
 
 Modules:
 - **Radio** (`src/Radio.cpp`) — streaming internet radio (Icecast/HTTP MP3) source. Implemented (v1).
-- **Ninjam** (`src/Ninjam.cpp`) — NINJAM jam **listener**. Listening does NOT use the NINJAM protocol and does not join the server: public NINJAM communities publish a live Icecast/HTTP stream of each room's mix, so this reuses `StreamClient` (same as Radio) pointed at a room's stream URL. Joining as a (silent) protocol participant — connect/auth-anonymous/subscribe/decode-OGG-intervals, as in `~/work/jamauv3` — remains a separate, much larger future feature.
+- **Ninjam** (`src/Ninjam.cpp`) — NINJAM jam **listener**. Listening does NOT use the NINJAM protocol and does not join the server: public NINJAM communities publish a live Icecast/HTTP stream of each room's mix, so this reuses `StreamClient` (same as Radio) pointed at a room's stream URL. Joining as a (silent) protocol participant — connect/auth-anonymous/subscribe/decode-OGG-intervals, as in `~/work/jamauv3` — remains a separate, much larger future feature. The panel is **20 HP** and hosts an in-panel browser of public rooms (search, scrollable list, per-row click-to-listen, peak meter) fed by `net/RoomDirectory` (background fetch of ninbot's directory); the room data and list never block the UI thread. See `TODO.md` ("Ninjam: server picker") for the design.
 
 Both are "network audio → Rack engine" and share `src/net/`.
 
