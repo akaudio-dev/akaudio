@@ -48,8 +48,12 @@ Still wanted (next):
   minimal **MPEG-TS demux** → existing `AacDecoder` (so **macOS-only**, like our AAC). User
   chose to ship the non-HLS ambient set first; HLS is the next focused build.
   Example URL (BBC R4): `http://as-hls-ww-live.akamaized.net/pool_55057080/live/ww/bbc_radio_fourfm/...norewind.m3u8`.
-- **ATC** (LiveATC): real URL is inside a `.pls`; hotlinking is ToS-gray and feed hosts rotate.
-  Needs `.pls` parsing + a fixed-UA; lower priority.
+- **ATC** — partly solved via **Broadcastify** aviation feeds (plain MP3, same infra as the
+  scanner feeds). Shipped `ATC/`: Anchorage Center (ARTCC, feed 31716) + Aeroparque Tower (45890),
+  both verified playing (ATC is push-to-talk, so confirm over a ~30 s window — short windows hit
+  silent gaps). **LiveATC stays out**: their `.pls` resolves but the feed blocks non-browser
+  clients (would need UA-spoofing). To add more ATC, find a Broadcastify feed id
+  (`broadcastify.cdnstream1.com/<id>`) and drop a `.vcvm` in `presets/Radio/ATC/`.
 - More spoken/world (shortwave WBCQ works as plain MP3), more nature/scanner feeds.
 
 ### Superseded 2026-06-20 — stations as factory presets (first cut, was SomaFM music)
