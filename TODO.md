@@ -58,3 +58,26 @@ Conclusions:
   periodically and drop dead entries. Do NOT ship a list verbatim from any of these sources.
 - **Vendor-baked defaults are a good high-trust seed** for the curated/featured set (SomaFM family
   in particular shows up as a reliable default across both AUs and our own Radio module).
+
+## Ninjam: server picker (staged — start simple, then deluxe)
+
+The Ninjam module listens to a jam's Icecast stream. It needs a UI to pick the room.
+
+**Data source (settled, verified):** `http://ninbot.com/app/servers.php` — JSON `{servers:[…]}`, each
+with `host/port/bpm/bpi/name/pri/user_count/user_max/users[]` **and the Icecast `stream` (http MP3)
++ `ssl_stream` (https) URLs** (same endpoint jamauv3's ServerBrowser uses). Verified: serves over
+plain http (no TLS needed), `stream` is a plain-http `audio/mpeg` mount our `StreamClient` plays
+directly. Refresh ~every 60s, cache-bust with `?t=<epoch>`. Parse with jansson (already linked).
+
+**Architecture (non-negotiable): fetch off-thread, show from cache.** A background `RoomDirectory`
+thread fetches+parses into a mutex-guarded `vector<Room>`; the menu is built from the cache
+*instantly* (never block the UI thread on the network). Refresh on load, on menu-open (background),
+and via a manual "Refresh".
+
+- **Phase 1 — simple (do first):** an on-panel `LedDisplayChoice` label (current room) → dynamic
+  context menu from the cache, sorted by user count, each row `name · N/max · BPM`, ✓ on current,
+  plus "Refresh rooms" and "Custom URL…". Pick → set `stream` URL → `StreamClient`. Needs:
+  `httpGet(url)→string` in `net/`, the `RoomDirectory` cache thread, the label+menu. No new deps.
+- **Phase 2 — deluxe (later):** a wider panel with an in-panel `ScrollWidget` browser: scrollable,
+  searchable (`TextField` filter) room list with live status (users, BPM, country, who's playing),
+  per-row Listen button, maybe a level meter. The "nicest possible" experience.
