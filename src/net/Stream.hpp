@@ -13,8 +13,10 @@
 // ring buffer. Module::process() (audio thread) pulls one stereo frame at a time
 // via pull() and must never block — all networking/decoding happens off-thread.
 //
-// v1 scope / limitations:
-//   - plain http:// only (no TLS); MP3 streams only (the common Icecast case).
+// Scope / limitations:
+//   - http:// and https:// (TLS via the OpenSSL libRack exports; SNI on, but
+//     certificate verification is not enforced — see net/Tls.hpp).
+//   - MP3 streams only (the common Icecast case; no AAC/OGG yet).
 //   - linear resampling from the stream rate to the engine rate.
 
 namespace akozlov {

@@ -46,7 +46,9 @@ Control flow rules:
 - `RoomDirectory.hpp` / `RoomDirectory.cpp` — background directory of public NINJAM rooms. `refresh()` fetches+parses `http://ninbot.com/app/servers.php` (jansson) on a worker thread into a mutex-guarded `vector<Room>`; the UI reads `rooms()` (sorted snapshot) and `status()` instantly, never blocking on the network. `Room.playUrl()` is the http MP3 mount `StreamClient` plays (ssl_stream is ignored in v1: no TLS).
 - `dep/dr_mp3.h` — vendored single-header MP3 decoder (public domain / MIT-0). `dep/dr_mp3_impl.cpp` is the one TU that defines `DR_MP3_IMPLEMENTATION`.
 
-v1 limitations (intentional, future work): **http:// only** (no TLS), **MP3 only** (no AAC/OGG), blocking connect (cancelled only via socket shutdown / OS timeout), linear (not band-limited) resampling.
+- `Tls.hpp` / `Tls.cpp` — minimal TLS client over an already-connected fd, using the **OpenSSL that `libRack` exports** (535 SSL symbols; resolved at load via `-undefined dynamic_lookup`, no new dep). `tlsHandshake` does the handshake with **SNI**; `tlsRead`/`tlsWrite` fall back to plain `recv`/`send` when TLS is inactive, so the http and https paths share one code path. Certificate verification is **not enforced** (`SSL_VERIFY_NONE`, no bundled CA store) — adequate for public audio streams; tighten later if we ship a CA bundle. Both `StreamClient` and `httpGet` accept `https://`.
+
+Current limitations (future work): **MP3 only** (no AAC/OGG yet), blocking connect (cancelled only via socket shutdown / OS timeout), linear (not band-limited) resampling.
 
 ## Adding a module
 

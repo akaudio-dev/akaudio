@@ -10,26 +10,35 @@
 #include <netinet/in.h>
 
 #include "../dep/dr_mp3.h"
+#include "Tls.hpp"
 
 namespace akozlov {
 
 namespace {
 
-// Parsed http://host[:port][/path]
+// Parsed http(s)://host[:port][/path]
 struct Url {
 	std::string host;
 	std::string port = "80";
 	std::string path = "/";
+	bool tls = false;
 	bool ok = false;
 };
 
 Url parseUrl(const std::string& url) {
 	Url u;
 	std::string s = url;
-	const std::string scheme = "http://";
-	if (s.rfind(scheme, 0) != 0)
-		return u; // only plain http:// supported in v1
-	s = s.substr(scheme.size());
+	if (s.rfind("https://", 0) == 0) {
+		u.tls = true;
+		u.port = "443";
+		s = s.substr(8);
+	}
+	else if (s.rfind("http://", 0) == 0) {
+		s = s.substr(7);
+	}
+	else {
+		return u; // unsupported scheme
+	}
 
 	size_t slash = s.find('/');
 	std::string authority = (slash == std::string::npos) ? s : s.substr(0, slash);
@@ -52,6 +61,7 @@ Url parseUrl(const std::string& url) {
 struct ReadCtx {
 	StreamClient* self;
 	int fd;
+	const Tls* tls;
 	std::vector<char> leftover;
 	size_t leftoverPos = 0;
 	const std::atomic<bool>* abort;
@@ -71,7 +81,7 @@ size_t onRead(void* pUserData, void* pBufferOut, size_t bytesToRead) {
 		return n;
 	}
 
-	ssize_t n = ::recv(ctx->fd, pBufferOut, bytesToRead, 0);
+	long n = tlsRead(*ctx->tls, ctx->fd, pBufferOut, bytesToRead);
 	return n > 0 ? static_cast<size_t>(n) : 0;
 }
 
@@ -118,7 +128,7 @@ void StreamClient::stop() {
 void StreamClient::run(std::string url) {
 	Url u = parseUrl(url);
 	if (!u.ok) {
-		setStatus(State::Error, "Bad URL (only http:// supported)");
+		setStatus(State::Error, "Bad URL (need http:// or https://)");
 		running.store(false, std::memory_order_release);
 		return;
 	}
@@ -153,17 +163,30 @@ void StreamClient::run(std::string url) {
 	}
 	sock.store(fd, std::memory_order_release);
 
-	// Send the request. Icy-MetaData:0 keeps the MP3 body free of interleaved metadata.
-	std::string req =
-		"GET " + u.path + " HTTP/1.0\r\n"
-		"Host: " + u.host + "\r\n"
-		"User-Agent: Akozlov-VCVRack/2.0\r\n"
-		"Icy-MetaData: 0\r\n"
-		"Connection: close\r\n"
-		"\r\n";
-	if (::send(fd, req.data(), req.size(), 0) < 0) {
-		setStatus(State::Error, "Send failed");
+	// For https, wrap the socket in TLS before any HTTP I/O. Declared here (before
+	// the first `goto cleanup`) so it's in scope at the cleanup label, which frees
+	// it. tlsRead/tlsWrite fall back to plain recv/send when tls is inactive (http).
+	Tls tls;
+	if (u.tls && !tlsHandshake(tls, fd, u.host)) {
+		setStatus(State::Error, "TLS handshake failed");
 		goto cleanup;
+	}
+
+	// Send the request. Icy-MetaData:0 keeps the MP3 body free of interleaved
+	// metadata. Scoped in its own block so `req` isn't live at the cleanup label
+	// (the goto above would otherwise bypass its initialization).
+	{
+		std::string req =
+			"GET " + u.path + " HTTP/1.0\r\n"
+			"Host: " + u.host + "\r\n"
+			"User-Agent: Akozlov-VCVRack/2.0\r\n"
+			"Icy-MetaData: 0\r\n"
+			"Connection: close\r\n"
+			"\r\n";
+		if (tlsWrite(tls, fd, req.data(), req.size()) < 0) {
+			setStatus(State::Error, "Send failed");
+			goto cleanup;
+		}
 	}
 
 	{
@@ -172,7 +195,7 @@ void StreamClient::run(std::string url) {
 		char tmp[2048];
 		size_t headerEnd = std::string::npos;
 		while (!abort.load(std::memory_order_acquire) && head.size() < (1 << 16)) {
-			ssize_t n = ::recv(fd, tmp, sizeof(tmp), 0);
+			long n = tlsRead(tls, fd, tmp, sizeof(tmp));
 			if (n <= 0)
 				break;
 			head.append(tmp, n);
@@ -194,6 +217,7 @@ void StreamClient::run(std::string url) {
 		ReadCtx ctx;
 		ctx.self = this;
 		ctx.fd = fd;
+		ctx.tls = &tls;
 		ctx.abort = &abort;
 		size_t bodyStart = headerEnd + 4;
 		ctx.leftover.assign(head.begin() + bodyStart, head.end());
@@ -271,6 +295,7 @@ void StreamClient::run(std::string url) {
 	}
 
 cleanup:
+	tlsFree(tls);
 	{
 		int f = sock.exchange(-1, std::memory_order_acq_rel);
 		if (f >= 0)

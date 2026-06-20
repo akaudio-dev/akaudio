@@ -27,13 +27,14 @@ struct Room {
 	int userCount = 0; // active players in the room
 	int userMax = 0;   // capacity (0 = unknown)
 	int pri = 999;     // listing priority (lower = more prominent)
-	std::string stream;    // http:// Icecast MP3 mount — playable by StreamClient
-	std::string sslStream; // https:// variant (not playable in v1: no TLS)
+	std::string stream;    // http:// Icecast MP3 mount
+	std::string sslStream; // https:// variant (StreamClient does TLS now)
 	std::vector<std::string> users; // player display names
 
-	// The URL StreamClient can actually play (http only); empty if none.
-	const std::string& playUrl() const { return stream; }
-	bool playable() const { return !stream.empty(); }
+	// The URL StreamClient should play: prefer the plain-http mount (slightly
+	// cheaper), fall back to the https one. Empty if the room has neither.
+	const std::string& playUrl() const { return !stream.empty() ? stream : sslStream; }
+	bool playable() const { return !stream.empty() || !sslStream.empty(); }
 };
 
 class RoomDirectory {
