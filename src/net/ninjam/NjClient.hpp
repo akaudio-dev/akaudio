@@ -53,8 +53,12 @@ public:
 
 	// Engine sample rate for the interval mixer (UI/any thread).
 	void setSampleRate(double sr) { audio.setSampleRate(sr); }
-	// Audio thread: next stereo frame of the decoded multi-user mix (false on underrun).
+	// Audio thread: pull one wide frame (RING_CH per-slot-stereo floats). false on underrun.
+	bool pullFrame(float* out) { return audio.pullFrame(out); }
+	// Convenience stereo master pull (sum of slots) — used by the standalone harness.
 	bool pull(float& l, float& r) { return audio.pull(l, r); }
+	// Poly channel count currently in use (= number of active players on the bundle).
+	int polyChannels() const { return audio.polyChannels(); }
 
 	// Diagnostics.
 	long intervalsDecoded() const { return audio.intervalsDecoded(); }

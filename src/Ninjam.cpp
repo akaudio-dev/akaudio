@@ -31,9 +31,15 @@ struct Ninjam : Module {
 		INPUTS_LEN
 	};
 	enum OutputId {
-		LEFT_OUTPUT,
-		RIGHT_OUTPUT,
-		CLICK_OUTPUT,
+		LEFT_OUTPUT,   // MAIN L (full mix)
+		RIGHT_OUTPUT,  // MAIN R
+		POLY_L_OUTPUT, // per-player bundle, left  (channel n = player n)
+		POLY_R_OUTPUT, // per-player bundle, right
+		CLICK_OUTPUT,  // metronome click
+		CLOCK_OUTPUT,  // gate per beat
+		RESET_OUTPUT,  // trigger at interval downbeat
+		RUN_OUTPUT,    // high while playing
+		PHASE_OUTPUT,  // 0-10V ramp across the interval
 		OUTPUTS_LEN
 	};
 	enum LightId {
@@ -68,6 +74,7 @@ struct Ninjam : Module {
 	// ---- Beat clock + metronome (meaningful only when joined to a tempo) ----
 	bool clickEnabled = false;            // metronome audible-click toggle (persisted)
 	std::atomic<int> currentBeat{-1};     // UI reads this; -1 = idle
+	std::atomic<float> jamPhase{0.f};     // 0..1 interval progress (UI progress bar)
 	std::atomic<bool> resyncBeat{false};  // set on join / tempo change to reset the clock
 	// process()-thread only beat/click state:
 	double beatPhase = 0.0;
@@ -94,9 +101,15 @@ struct Ninjam : Module {
 
 	Ninjam() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
-		configOutput(LEFT_OUTPUT, "Left");
-		configOutput(RIGHT_OUTPUT, "Right");
+		configOutput(LEFT_OUTPUT, "Main mix L");
+		configOutput(RIGHT_OUTPUT, "Main mix R");
+		configOutput(POLY_L_OUTPUT, "Players L (poly: channel = player)");
+		configOutput(POLY_R_OUTPUT, "Players R (poly: channel = player)");
 		configOutput(CLICK_OUTPUT, "Metronome click");
+		configOutput(CLOCK_OUTPUT, "Clock (per beat)");
+		configOutput(RESET_OUTPUT, "Reset (interval downbeat)");
+		configOutput(RUN_OUTPUT, "Run (high while playing)");
+		configOutput(PHASE_OUTPUT, "Interval phase (0-10V ramp)");
 		float sr = APP->engine->getSampleRate();
 		stream.setSampleRate(sr);
 		njclient.setSampleRate(sr);
@@ -266,18 +279,47 @@ struct Ninjam : Module {
 		return std::string(sn) + "\xe2\x80\xa6";
 	}
 
+	// Comma-joined list of players currently in the room (UI thread).
+	std::string rosterText() {
+		std::lock_guard<std::mutex> lock(rosterMutex);
+		std::string s;
+		for (size_t i = 0; i < roster.size(); i++) {
+			if (i) s += ", ";
+			s += roster[i];
+		}
+		return s;
+	}
+
 	void onSampleRateChange(const SampleRateChangeEvent& e) override {
 		stream.setSampleRate(e.sampleRate);
 		njclient.setSampleRate(e.sampleRate);
 	}
 
 	void process(const ProcessArgs& args) override {
-		float l = 0.f, r = 0.f;
-		if (mode == MODE_JOIN)
-			njclient.pull(l, r); // leaves l/r at 0 on underrun
-		else
-			stream.pull(l, r);
-		// Audio in Rack is ±5V line level.
+		float l = 0.f, r = 0.f; // main mix (= sum of players in JOIN, or the Icecast stream)
+		if (mode == MODE_JOIN) {
+			// Pull one wide frame (per-player stereo); fan out to the poly bundle and sum
+			// to the main mix. Audio in Rack is ±5V line level.
+			float frame[akaudio::nj::RING_CH];
+			bool got = njclient.pullFrame(frame);
+			int np = njclient.polyChannels();
+			outputs[POLY_L_OUTPUT].setChannels(np);
+			outputs[POLY_R_OUTPUT].setChannels(np);
+			for (int i = 0; i < akaudio::nj::MAX_PLAYERS; i++) {
+				float pl = got ? frame[i * 2] : 0.f;
+				float pr = got ? frame[i * 2 + 1] : 0.f;
+				if (i < np) {
+					outputs[POLY_L_OUTPUT].setVoltage(pl * 5.f, i);
+					outputs[POLY_R_OUTPUT].setVoltage(pr * 5.f, i);
+				}
+				l += pl;
+				r += pr;
+			}
+		} else {
+			outputs[POLY_L_OUTPUT].setChannels(0);
+			outputs[POLY_R_OUTPUT].setChannels(0);
+			stream.pull(l, r); // leaves l/r at 0 on underrun
+		}
 		outputs[LEFT_OUTPUT].setVoltage(l * 5.f);
 		outputs[RIGHT_OUTPUT].setVoltage(r * 5.f);
 
@@ -290,7 +332,7 @@ struct Ninjam : Module {
 		// ---- Beat clock + metronome (only when joined to a tempo) ----
 		int bpmL = jamBpm.load(std::memory_order_relaxed);
 		int bpiL = jamBpi.load(std::memory_order_relaxed);
-		float click = 0.f;
+		float click = 0.f, clockG = 0.f, resetG = 0.f, runG = 0.f, phaseV = 0.f;
 		if (bpmL > 0 && bpiL > 0) {
 			if (resyncBeat.exchange(false, std::memory_order_acq_rel)) {
 				beatPhase = 0.0;
@@ -320,13 +362,27 @@ struct Ninjam : Module {
 				clickEnv -= args.sampleTime / 0.035f; // ~35 ms decay
 				if (clickEnv < 0.f) clickEnv = 0.f;
 			}
+			// CV sync outs: CLOCK = 50%-duty gate per beat; RESET = same pulse but only on
+			// the downbeat; RUN high while playing; PHASE = 0-10V ramp across the interval.
+			float beatFrac = (float) (beatPhase / spb);                 // 0..1 within beat
+			float intervalPhase = ((float) beatIndex + beatFrac) / (float) bpiL; // 0..1
+			clockG = (beatFrac < 0.5f) ? 10.f : 0.f;
+			resetG = (beatIndex == 0 && beatFrac < 0.5f) ? 10.f : 0.f;
+			runG = 10.f;
+			phaseV = intervalPhase * 10.f;
+			jamPhase.store(intervalPhase, std::memory_order_relaxed);
 		} else {
 			currentBeat.store(-1, std::memory_order_relaxed);
+			jamPhase.store(0.f, std::memory_order_relaxed);
 			beatPhase = 0.0;
 			beatIndex = 0;
 			clickEnv = 0.f;
 		}
 		outputs[CLICK_OUTPUT].setVoltage(click * 5.f);
+		outputs[CLOCK_OUTPUT].setVoltage(clockG);
+		outputs[RESET_OUTPUT].setVoltage(resetG);
+		outputs[RUN_OUTPUT].setVoltage(runG);
+		outputs[PHASE_OUTPUT].setVoltage(phaseV);
 	}
 
 	json_t* dataToJson() override {
@@ -800,6 +856,8 @@ struct MetronomeToggle : OpaqueWidget {
 
 // Top transport block: connection/tempo status (or directory status), with a row of
 // per-beat ticks under it when joined (elapsed lit, current brightest, downbeat accented).
+// Top status bar (always visible): connection/tempo line; metronome toggle + LED sit on
+// its right (separate widgets). Single line, vertically centered.
 struct TransportBlock : Widget {
 	Ninjam* module = nullptr;
 	void draw(const DrawArgs& args) override {
@@ -807,37 +865,80 @@ struct TransportBlock : Widget {
 			return;
 		NVGcontext* vg = args.vg;
 		const float w = box.size.x, h = box.size.y;
-
 		nvgBeginPath(vg);
 		nvgRoundedRect(vg, 0, 0, w, h, 4);
 		nvgFillColor(vg, nvgRGBA(0, 0, 0, 0x40));
 		nvgFill(vg);
-
 		std::string jam = module->jamStatusText();
 		const bool joined = !jam.empty();
-		// Line 1: status text (leave room on the right for the metronome + LED).
-		drawTxt(vg, FONT_REG, 8, 13, 9.5f,
+		drawTxt(vg, FONT_REG, 8, h / 2, 9.5f,
 			joined ? NINJAM_GREEN : nvgRGB(0x7a, 0x86, 0x92),
 			joined ? jam : module->directory.status(), NVG_ALIGN_LEFT, w - 8 - 44);
+	}
+};
 
-		// Line 2: beat ticks (only when joined to a tempo).
+// The connected "jam view" (replaces the server-selection UI once joined): big beat-tick
+// row, an interval progress bar, and the roster of who's in the room.
+struct JamView : Widget {
+	Ninjam* module = nullptr;
+	void draw(const DrawArgs& args) override {
+		if (!module)
+			return;
+		NVGcontext* vg = args.vg;
+		const float w = box.size.x, pad = 12.f, avail = w - 2 * pad;
 		int bpi = module->jamBpi.load(std::memory_order_relaxed);
 		int cur = module->currentBeat.load(std::memory_order_relaxed);
-		if (joined && bpi > 0) {
-			const float pad = 8.f, ty = h - 11.f, th = 7.f, gap = 2.f;
-			float avail = w - 2 * pad;
+		float phase = module->jamPhase.load(std::memory_order_relaxed);
+
+		// Big beat ticks.
+		if (bpi > 0) {
+			const float ty = 16.f, th = 30.f, gap = 3.f;
 			float tw = (avail - (bpi - 1) * gap) / bpi;
 			if (tw < 1.f) tw = 1.f;
 			for (int b = 0; b < bpi; b++) {
 				float x = pad + b * (tw + gap);
-				NVGcolor c = (b == cur) ? nvgRGB(0x7a, 0xf0, 0xa0)               // current: brightest
-				           : (cur >= 0 && b < cur) ? NINJAM_GREEN                // elapsed: green
-				           : (b == 0) ? nvgRGB(0xc8, 0x9a, 0x3a)                 // downbeat (upcoming): amber
-				           : nvgRGBA(0xff, 0xff, 0xff, 0x22);                     // upcoming: dim
+				NVGcolor c = (b == cur) ? nvgRGB(0x7a, 0xf0, 0xa0)
+				           : (cur >= 0 && b < cur) ? NINJAM_GREEN
+				           : (b == 0) ? nvgRGB(0xc8, 0x9a, 0x3a)
+				           : nvgRGBA(0xff, 0xff, 0xff, 0x22);
 				nvgBeginPath(vg);
-				nvgRoundedRect(vg, x, ty, tw, th, 1.5f);
+				nvgRoundedRect(vg, x, ty, tw, th, 2.f);
 				nvgFillColor(vg, c);
 				nvgFill(vg);
+			}
+			if (cur >= 0)
+				drawTxt(vg, FONT_REG, pad, 58, 9.f, nvgRGB(0x8a, 0x97, 0xa3),
+					string::f("beat %d / %d", cur + 1, bpi), NVG_ALIGN_LEFT);
+		}
+
+		// Interval progress bar.
+		const float by = 70.f, bh = 12.f;
+		nvgBeginPath(vg);
+		nvgRoundedRect(vg, pad, by, avail, bh, 3.f);
+		nvgFillColor(vg, nvgRGBA(0, 0, 0, 0x55));
+		nvgFill(vg);
+		if (phase > 0.f) {
+			nvgBeginPath(vg);
+			nvgRoundedRect(vg, pad, by, avail * phase, bh, 3.f);
+			nvgFillColor(vg, NINJAM_GREEN);
+			nvgFill(vg);
+		}
+
+		// Roster (who's here), one per line.
+		drawTxt(vg, FONT_BOLD, pad, 100, 9.f, nvgRGB(0xb6, 0xc0, 0xca), "IN THE ROOM", NVG_ALIGN_LEFT);
+		std::string who = module->rosterText();
+		if (who.empty()) {
+			drawTxt(vg, FONT_REG, pad, 116, 9.f, nvgRGB(0x6a, 0x77, 0x83), "(just you)", NVG_ALIGN_LEFT);
+		} else {
+			float y = 116.f;
+			size_t start = 0;
+			while (start < who.size() && y < box.size.y - 6) {
+				size_t comma = who.find(", ", start);
+				std::string name = who.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+				drawTxt(vg, FONT_REG, pad, y, 9.5f, nvgRGB(0x9f, 0xd0, 0xb0), name, NVG_ALIGN_LEFT, avail);
+				y += 14.f;
+				if (comma == std::string::npos) break;
+				start = comma + 2;
 			}
 		}
 	}
@@ -989,23 +1090,24 @@ struct JoinCard : Widget {
 };
 
 // Footer output level meter (peak with fast release) + divider.
-struct MeterWidget : Widget {
+// Output section: peak meter bar + labels for the two jack rows. The jacks themselves
+// are added on top by NinjamWidget at matching x fractions / row y's (see kRowA/kRowB).
+struct OutputSection : Widget {
 	Ninjam* module = nullptr;
+	// Jack x positions (fractions of width) — kept in sync with NinjamWidget's addOutput.
+	static constexpr float xMainL = 0.16f, xMainR = 0.38f, xPolyL = 0.62f, xPolyR = 0.84f;
+	static constexpr float xClick = 0.12f, xClock = 0.30f, xReset = 0.50f, xRun = 0.70f, xPhase = 0.88f;
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
 		const float w = box.size.x;
-		nvgBeginPath(vg);
-		nvgMoveTo(vg, 10, 0.5f);
-		nvgLineTo(vg, w - 10, 0.5f);
-		nvgStrokeColor(vg, nvgRGBA(0xff, 0xff, 0xff, 0x18));
-		nvgStroke(vg);
+		const NVGcolor lab = nvgRGB(0x8a, 0x97, 0xa3);
 
-		const float bx = 12, by = 8, bw = w - 24, bh = 7;
+		// Peak meter bar (top of the section).
+		const float bx = 12, by = 4, bw = w - 24, bh = 6;
 		nvgBeginPath(vg);
 		nvgRoundedRect(vg, bx, by, bw, bh, 3);
 		nvgFillColor(vg, nvgRGBA(0, 0, 0, 0x66));
 		nvgFill(vg);
-
 		float p = module ? module->peak.load(std::memory_order_relaxed) : 0.f;
 		p = std::max(0.f, std::min(1.f, p));
 		if (p > 0.001f) {
@@ -1017,18 +1119,36 @@ struct MeterWidget : Widget {
 			nvgFillColor(vg, c);
 			nvgFill(vg);
 		}
-		drawTxt(vg, FONT_REG, bx, by + bh + 9, 7.5f, nvgRGB(0x6a, 0x77, 0x83), "OUTPUT", NVG_ALIGN_LEFT);
 
-		// Labels under the L / R / CLICK jacks (jacks are centered at these x, drawn on top).
-		const float ly = box.size.y - 3.f;
-		drawTxt(vg, FONT_REG, w * 0.28f, ly, 7.5f, nvgRGB(0x8a, 0x97, 0xa3), "L", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_REG, w * 0.50f, ly, 7.5f, nvgRGB(0x8a, 0x97, 0xa3), "R", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_REG, w * 0.72f, ly, 7.5f, nvgRGB(0x8a, 0x97, 0xa3), "CLICK", NVG_ALIGN_CENTER);
+		// Row A: MAIN / PLAYERS group headers + per-jack L/R labels (jacks at local y=40).
+		drawTxt(vg, FONT_REG, w * 0.27f, 20, 8.f, lab, "MAIN", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_REG, w * 0.73f, 20, 8.f, lab, "PLAYERS (poly)", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_REG, w * xMainL, 30, 7.5f, lab, "L", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_REG, w * xMainR, 30, 7.5f, lab, "R", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_REG, w * xPolyL, 30, 7.5f, lab, "L", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_REG, w * xPolyR, 30, 7.5f, lab, "R", NVG_ALIGN_CENTER);
+
+		// Row B: sync out labels (jacks at local y=78).
+		drawTxt(vg, FONT_REG, w * xClick, 67, 7.f, lab, "CLICK", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_REG, w * xClock, 67, 7.f, lab, "CLOCK", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_REG, w * xReset, 67, 7.f, lab, "RESET", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_REG, w * xRun, 67, 7.f, lab, "RUN", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_REG, w * xPhase, 67, 7.f, lab, "PHASE", NVG_ALIGN_CENTER);
 	}
 };
 
 struct NinjamWidget : ModuleWidget {
+	Ninjam* nj = nullptr;
+	// State-dependent widgets: connect UI (shown when disconnected) vs jam view (connected).
+	Widget* joinCard = nullptr;
+	Widget* search = nullptr;
+	Widget* refresh = nullptr;
+	Widget* browser = nullptr;
+	Widget* jamView = nullptr;
+	Widget* metro = nullptr;
+
 	NinjamWidget(Ninjam* module) {
+		nj = module;
 		setModule(module);
 		setPanel(createPanel(asset::plugin(pluginInstance, "res/Ninjam.svg")));
 
@@ -1039,16 +1159,14 @@ struct NinjamWidget : ModuleWidget {
 
 		const float W = box.size.x;
 
-		// Top transport block: status + beat ticks. Metronome toggle + LED sit on its
-		// top-right, drawn over the block.
+		// Always-on top status bar.
 		TransportBlock* transport = new TransportBlock;
 		transport->module = module;
 		transport->box.pos = Vec(6, 16);
-		transport->box.size = Vec(W - 12, 40);
+		transport->box.size = Vec(W - 12, 26);
 		addChild(transport);
 
 		// Clickable status LED (top-right): green=live, amber=connecting, red=stopped.
-		// Click stops the active source.
 		ClickableLed* led = new ClickableLed;
 		led->box.size = Vec(13, 13);
 		led->box.pos = Vec(W - 6 - 4 - 13, 22);
@@ -1057,47 +1175,79 @@ struct NinjamWidget : ModuleWidget {
 		led->onToggle = [module]() { if (module && module->isActive()) module->stopAll(); };
 		addChild(led);
 
-		// Metronome click toggle, just left of the LED.
-		MetronomeToggle* metro = new MetronomeToggle;
-		metro->module = module;
-		metro->box.size = Vec(16, 16);
-		metro->box.pos = Vec(W - 6 - 4 - 13 - 6 - 16, 20);
-		addChild(metro);
+		// Metronome toggle (left of the LED) — shown only when joined.
+		MetronomeToggle* m = new MetronomeToggle;
+		m->module = module;
+		m->box.size = Vec(16, 16);
+		m->box.pos = Vec(W - 6 - 4 - 13 - 6 - 16, 21);
+		addChild(m);
+		metro = m;
 
-		// Private-server direct-join card.
-		JoinCard* joinCard = new JoinCard(module, W - 12);
-		joinCard->box.pos = Vec(6, 62);
-		addChild(joinCard);
+		// ---- Disconnected: server-selection UI ----
+		JoinCard* card = new JoinCard(module, W - 12);
+		card->box.pos = Vec(6, 50);
+		addChild(card);
+		joinCard = card;
 
-		// Filter + refresh, right above the room list.
-		SearchField* search = new SearchField;
-		search->box.pos = Vec(8, 140);
-		search->box.size = Vec(W - 8 - 40, 20);
-		addChild(search);
+		SearchField* s = new SearchField;
+		s->box.pos = Vec(8, 128);
+		s->box.size = Vec(W - 8 - 40, 20);
+		addChild(s);
+		search = s;
 
-		RefreshButton* refresh = new RefreshButton;
-		refresh->module = module;
-		refresh->box.pos = Vec(W - 36, 140);
-		refresh->box.size = Vec(28, 20);
-		addChild(refresh);
+		RefreshButton* rb = new RefreshButton;
+		rb->module = module;
+		rb->box.pos = Vec(W - 36, 128);
+		rb->box.size = Vec(28, 20);
+		addChild(rb);
+		refresh = rb;
 
-		RoomBrowser* browser = new RoomBrowser;
-		browser->module = module;
-		browser->search = search;
-		browser->box.pos = Vec(6, 164);
-		browser->box.size = Vec(W - 12, 160);
-		addChild(browser);
+		RoomBrowser* b = new RoomBrowser;
+		b->module = module;
+		b->search = s;
+		b->box.pos = Vec(6, 152);
+		b->box.size = Vec(W - 12, 100);
+		addChild(b);
+		browser = b;
 
-		MeterWidget* meter = new MeterWidget;
-		meter->module = module;
-		meter->box.pos = Vec(0, 326);
-		meter->box.size = Vec(W, 54); // spans down past the jacks so labels sit under them
-		addChild(meter);
+		// ---- Connected: jam view (same region; replaces the connect UI) ----
+		JamView* jv = new JamView;
+		jv->module = module;
+		jv->box.pos = Vec(6, 50);
+		jv->box.size = Vec(W - 12, 202);
+		addChild(jv);
+		jamView = jv;
 
-		// Outputs: L, R, CLICK.
-		addOutput(createOutputCentered<PJ301MPort>(Vec(W * 0.28f, 360), module, Ninjam::LEFT_OUTPUT));
-		addOutput(createOutputCentered<PJ301MPort>(Vec(W * 0.50f, 360), module, Ninjam::RIGHT_OUTPUT));
-		addOutput(createOutputCentered<PJ301MPort>(Vec(W * 0.72f, 360), module, Ninjam::CLICK_OUTPUT));
+		// Output section (always): meter + labels; jacks on top.
+		const float oy = 255;
+		OutputSection* out = new OutputSection;
+		out->module = module;
+		out->box.pos = Vec(0, oy);
+		out->box.size = Vec(W, 96);
+		addChild(out);
+
+		const float rowA = oy + 43, rowB = oy + 81; // ~y=298 (audio), ~y=336 (CV) -> Fundamental-like bottom margin
+		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xMainL, rowA), module, Ninjam::LEFT_OUTPUT));
+		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xMainR, rowA), module, Ninjam::RIGHT_OUTPUT));
+		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xPolyL, rowA), module, Ninjam::POLY_L_OUTPUT));
+		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xPolyR, rowA), module, Ninjam::POLY_R_OUTPUT));
+		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xClick, rowB), module, Ninjam::CLICK_OUTPUT));
+		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xClock, rowB), module, Ninjam::CLOCK_OUTPUT));
+		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xReset, rowB), module, Ninjam::RESET_OUTPUT));
+		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xRun, rowB), module, Ninjam::RUN_OUTPUT));
+		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xPhase, rowB), module, Ninjam::PHASE_OUTPUT));
+	}
+
+	// Swap between the connect UI (disconnected) and the jam view (connected) each frame.
+	void step() override {
+		bool joined = nj && nj->joined;
+		if (joinCard) joinCard->visible = !joined;
+		if (search) search->visible = !joined;
+		if (refresh) refresh->visible = !joined;
+		if (browser) browser->visible = !joined;
+		if (jamView) jamView->visible = joined;
+		if (metro) metro->visible = joined;
+		ModuleWidget::step();
 	}
 
 	void appendContextMenu(Menu* menu) override {

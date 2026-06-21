@@ -56,9 +56,43 @@ void NjAudio::onUserChannel(const std::string& user, int chidx, bool active, int
 
 	std::lock_guard<std::mutex> lock(mu);
 	Channel& ch = channels[chanKey(user, chidx)];
+	ch.user = user;
 	ch.active = active;
 	ch.gainL = gl;
 	ch.gainR = gr;
+}
+
+int NjAudio::assignSlot(const std::string& user) {
+	auto it = userSlot.find(user);
+	if (it != userSlot.end())
+		return it->second;
+	for (int i = 0; i < MAX_PLAYERS; i++) {
+		if (!slotUsed[i]) {
+			slotUsed[i] = true;
+			userSlot[user] = i;
+			return i;
+		}
+	}
+	return -1; // more than MAX_PLAYERS users -> this one is off the poly bundle
+}
+
+void NjAudio::refreshSlots() {
+	// Free slots whose user no longer has any channel; recompute the poly channel count.
+	for (auto it = userSlot.begin(); it != userSlot.end();) {
+		bool present = false;
+		for (auto& kv : channels)
+			if (kv.second.user == it->first) { present = true; break; }
+		if (!present) {
+			slotUsed[it->second] = false;
+			it = userSlot.erase(it);
+		} else {
+			++it;
+		}
+	}
+	int hi = 0;
+	for (int i = 0; i < MAX_PLAYERS; i++)
+		if (slotUsed[i]) hi = i + 1;
+	nPoly.store(hi, std::memory_order_relaxed);
 }
 
 void NjAudio::beginInterval(const std::string& user, int chidx, const uint8_t guid[16], uint32_t fourcc) {
@@ -106,6 +140,8 @@ void NjAudio::writeInterval(const uint8_t guid[16], const uint8_t* data, size_t 
 void NjAudio::enqueue(const std::string& key, std::vector<float>&& interval) {
 	std::lock_guard<std::mutex> lock(mu);
 	Channel& ch = channels[key];
+	if (ch.user.empty()) // interval may arrive before USERINFO; derive user from the key
+		ch.user = key.substr(0, key.rfind('\n'));
 	if (ch.ready.size() >= kMaxReady)
 		ch.ready.pop_front(); // mixer fell behind; drop oldest to bound latency/memory
 	ch.ready.push_back(std::move(interval));
@@ -172,6 +208,9 @@ void NjAudio::stop() {
 	std::lock_guard<std::mutex> lock(mu);
 	channels.clear();
 	transfers.clear();
+	userSlot.clear();
+	for (int i = 0; i < MAX_PLAYERS; i++) slotUsed[i] = false;
+	nPoly.store(0, std::memory_order_relaxed);
 	ring.clear();
 }
 
@@ -179,6 +218,7 @@ void NjAudio::mixLoop() {
 	struct Src {
 		std::vector<float> buf; // empty = silence
 		float gl, gr;
+		int slot; // poly channel, or -1 (overflow / off-bundle)
 	};
 	bool started = false;
 	bool sawReady = false;
@@ -238,6 +278,7 @@ void NjAudio::mixLoop() {
 				Src s;
 				s.gl = ch.gainL;
 				s.gr = ch.gainR;
+				s.slot = assignSlot(ch.user); // stable poly channel for this user
 				if (!ch.ready.empty()) {
 					s.buf = std::move(ch.ready.front());
 					ch.ready.pop_front();
@@ -248,19 +289,21 @@ void NjAudio::mixLoop() {
 				srcs.push_back(std::move(s));
 				++it;
 			}
+			refreshSlots(); // free departed users' slots; update poly channel count
 		}
 		nActive.store(active, std::memory_order_relaxed);
 
-		// Mix this interval and push frame-by-frame; ring backpressure paces to realtime.
+		// Mix this interval into per-slot stereo wide frames; ring backpressure paces realtime.
+		float frame[RING_CH];
 		for (int i = 0; i < N; i++) {
-			float l = 0.f, r = 0.f;
+			std::memset(frame, 0, sizeof(frame));
 			for (const Src& s : srcs) {
-				if (s.buf.empty())
+				if (s.buf.empty() || s.slot < 0)
 					continue;
-				l += s.buf[(size_t)i * 2] * s.gl;
-				r += s.buf[(size_t)i * 2 + 1] * s.gr;
+				frame[s.slot * 2] += s.buf[(size_t)i * 2] * s.gl;
+				frame[s.slot * 2 + 1] += s.buf[(size_t)i * 2 + 1] * s.gr;
 			}
-			while (!ring.push(l, r)) {
+			while (!ring.push(frame)) {
 				if (abort.load(std::memory_order_acquire))
 					return;
 				std::this_thread::sleep_for(std::chrono::milliseconds(2));
