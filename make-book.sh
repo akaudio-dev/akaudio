@@ -30,7 +30,10 @@ build/trusty_weaver \
   src/net/Http.cpp \
   src/net/AacDecoder.hpp \
   src/net/AacDecoder.cpp \
+  src/net/Hls.hpp \
+  src/net/Hls.cpp \
   src/net/RoomDirectory.hpp \
   src/net/RoomDirectory.cpp \
+  src/ClickableLed.hpp \
   src/Radio.cpp \
   src/Ninjam.cpp
