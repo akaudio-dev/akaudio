@@ -81,6 +81,28 @@ bool parseUserInfo(const uint8_t* data, size_t len, std::vector<UserChannel>& ou
 	return true;
 }
 
+bool parseDownloadBegin(const uint8_t* data, size_t len, DownloadBegin& out) {
+	// guid[16] + estsize u32 + fourcc u32 + chidx u8 + username\0  (>= 25 + 1)
+	if (len < 25 + 1) return false;
+	ByteReader r(data, len);
+	r.bytes(out.guid, 16);
+	out.estSize = r.u32();
+	out.fourcc = r.u32();
+	out.chidx = r.u8();
+	out.user = r.cstr();
+	return r.ok;
+}
+
+bool parseDownloadWrite(const uint8_t* data, size_t len, DownloadWrite& out) {
+	// guid[16] + flags u8 + audio bytes (rest)
+	if (len < 17) return false;
+	std::memcpy(out.guid, data, 16);
+	out.flags = data[16];
+	out.data = data + 17;
+	out.len = len - 17;
+	return true;
+}
+
 // ---- Builders --------------------------------------------------------------------
 
 std::vector<uint8_t> frame(uint8_t type, const std::vector<uint8_t>& payload) {
@@ -118,6 +140,15 @@ std::vector<uint8_t> buildSetChannelInfoListenOnly() {
 	p.push_back(0);                 // pan = 0
 	p.push_back(0x80);              // flags = 0x80 (filler / inactive)
 	return frame(MSG_CLIENT_SET_CHANNEL_INFO, p);
+}
+
+std::vector<uint8_t> buildSetUserMask(const std::string& user, uint32_t channelMask) {
+	// One record: username\0 + channelMask u32 LE.
+	std::vector<uint8_t> p;
+	p.insert(p.end(), user.begin(), user.end());
+	p.push_back(0);
+	for (int i = 0; i < 4; i++) p.push_back((channelMask >> (8 * i)) & 0xff);
+	return frame(MSG_CLIENT_SET_USERMASK, p);
 }
 
 std::vector<uint8_t> buildKeepAlive() {

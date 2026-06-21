@@ -109,6 +109,7 @@ int NjClient::recvFrame(uint8_t& type, std::vector<uint8_t>& payload) {
 }
 
 void NjClient::run(std::string host, int port, std::string user, std::string pass) {
+	subMask.clear();
 	setState(State::Connecting, host + ":" + std::to_string(port));
 
 	// Resolve + connect (blocking), same pattern as StreamClient.
@@ -163,19 +164,19 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 	uint8_t type = 0;
 	std::vector<uint8_t> payload;
 	while (!abort.load(std::memory_order_acquire)) {
-		int r = recvFrame(type, payload);
-		if (r == 0) break; // closed / error
-		if (r == -2) {
-			// Idle: send keepalive if due.
-			time_t now = ::time(nullptr);
-			int interval = keepAliveSecs > 0 ? keepAliveSecs : 3;
-			if (now - lastSend >= interval) {
-				if (!sendAll(buildKeepAlive())) break;
-				lastSend = now;
-			}
-			continue;
+		// Send keepalive on a timer regardless of traffic. (When audio is flowing the
+		// recv loop never goes idle, so this must NOT live only in the idle branch — else
+		// we stop sending keepalives and the server drops us mid-stream.)
+		time_t now = ::time(nullptr);
+		int interval = keepAliveSecs > 0 ? keepAliveSecs : 3;
+		if (now - lastSend >= interval) {
+			if (!sendAll(buildKeepAlive())) break;
+			lastSend = now;
 		}
 
+		int r = recvFrame(type, payload);
+		if (r == 0) break;  // closed / error
+		if (r == -2) continue; // idle (recv timed out); loop services keepalive above
 		switch (type) {
 			case MSG_SERVER_AUTH_CHALLENGE: {
 				AuthChallenge ch;
@@ -186,7 +187,7 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 				if (ch.protoVer < PROTO_VER_MIN || ch.protoVer >= PROTO_VER_MAX)
 					log("warning: server protocol version 0x" + std::to_string(ch.protoVer));
 				keepAliveSecs = ch.keepAliveSecs();
-				log("challenge: caps=0x" + std::to_string(ch.serverCaps) +
+				log("challenge: caps=" + std::to_string(ch.serverCaps) +
 				    " keepalive=" + std::to_string(keepAliveSecs) + "s" +
 				    (ch.hasLicense ? " (license agreement present)" : ""));
 
@@ -218,22 +219,51 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 					goto done;
 				}
 				lastSend = ::time(nullptr);
+				audio.start(); // launch the interval mixer
 				setState(State::Connected);
 				break;
 			}
 			case MSG_SERVER_CONFIG_CHANGE: {
 				ConfigChange cc;
-				if (parseConfigChange(payload.data(), payload.size(), cc) && cb.onConfig)
-					cb.onConfig(cc.bpm, cc.bpi);
+				if (parseConfigChange(payload.data(), payload.size(), cc)) {
+					audio.setTempo(cc.bpm, cc.bpi);
+					if (cb.onConfig) cb.onConfig(cc.bpm, cc.bpi);
+				}
 				break;
 			}
 			case MSG_SERVER_USERINFO_CHANGE: {
 				std::vector<UserChannel> users;
-				if (parseUserInfo(payload.data(), payload.size(), users) && cb.onUserInfo)
-					cb.onUserInfo(users);
+				if (parseUserInfo(payload.data(), payload.size(), users)) {
+					for (const auto& u : users) {
+						audio.onUserChannel(u.user, u.channelIdx, u.active, u.volumeDb10, u.pan);
+						// Subscribe to this user's active channels (SET_USERMASK); many
+						// servers don't auto-subscribe, so without this we get no audio.
+						uint32_t& mask = subMask[u.user];
+						uint32_t before = mask;
+						if (u.active) mask |= (1u << u.channelIdx);
+						else mask &= ~(1u << u.channelIdx);
+						if (mask != before) {
+							log("subscribe " + u.user + " chanmask=" + std::to_string(mask));
+							sendAll(buildSetUserMask(u.user, mask));
+							lastSend = ::time(nullptr);
+						}
+					}
+					if (cb.onUserInfo) cb.onUserInfo(users);
+				}
 				break;
 			}
-			// Phase 3 will handle DOWNLOAD_BEGIN/WRITE (interval audio); ignore for now.
+			case MSG_SERVER_DOWNLOAD_BEGIN: {
+				DownloadBegin db;
+				if (parseDownloadBegin(payload.data(), payload.size(), db))
+					audio.beginInterval(db.user, db.chidx, db.guid, db.fourcc);
+				break;
+			}
+			case MSG_SERVER_DOWNLOAD_WRITE: {
+				DownloadWrite dw;
+				if (parseDownloadWrite(payload.data(), payload.size(), dw))
+					audio.writeInterval(dw.guid, dw.data, dw.len, dw.last());
+				break;
+			}
 			default:
 				break;
 		}
@@ -241,6 +271,7 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 
 done:
 	(void)authed;
+	audio.stop();
 	int f = sock.exchange(-1, std::memory_order_acq_rel);
 	if (f >= 0) ::close(f);
 	if (st.load(std::memory_order_acquire) != State::Error)

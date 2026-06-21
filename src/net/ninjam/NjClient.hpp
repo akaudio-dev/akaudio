@@ -11,12 +11,15 @@
 // the background thread; callbacks fire on that thread (the caller must marshal to the
 // UI thread / use atomics as needed). stop() aborts via socket shutdown then joins.
 #include <atomic>
+#include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "NjProtocol.hpp"
+#include "NjAudio.hpp"
 
 namespace akaudio {
 namespace nj {
@@ -48,6 +51,15 @@ public:
 	State state() const { return st.load(std::memory_order_acquire); }
 	bool isRunning() const { return running.load(std::memory_order_acquire); }
 
+	// Engine sample rate for the interval mixer (UI/any thread).
+	void setSampleRate(double sr) { audio.setSampleRate(sr); }
+	// Audio thread: next stereo frame of the decoded multi-user mix (false on underrun).
+	bool pull(float& l, float& r) { return audio.pull(l, r); }
+
+	// Diagnostics.
+	long intervalsDecoded() const { return audio.intervalsDecoded(); }
+	long decodeErrors() const { return audio.decodeErrors(); }
+
 private:
 	void run(std::string host, int port, std::string user, std::string pass);
 	void setState(State s, const std::string& msg = "");
@@ -68,6 +80,8 @@ private:
 	std::atomic<State> st{State::Idle};
 
 	Callbacks cb;
+	NjAudio audio;
+	std::map<std::string, uint32_t> subMask; // per-user subscribed-channel bitmask (SET_USERMASK)
 	int keepAliveSecs = 3; // from server caps; refreshed after the challenge
 };
 

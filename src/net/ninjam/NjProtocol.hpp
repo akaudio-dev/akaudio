@@ -118,6 +118,27 @@ struct UserChannel {
 };
 bool parseUserInfo(const uint8_t* data, size_t len, std::vector<UserChannel>& out);
 
+// DOWNLOAD_INTERVAL_BEGIN: announces a new (user, channel) interval transfer.
+struct DownloadBegin {
+	unsigned char guid[16] = {0};
+	uint32_t estSize = 0;
+	uint32_t fourcc = 0; // 'OGGv' etc.; all-zero guid = silence
+	int chidx = 0;
+	std::string user;
+};
+bool parseDownloadBegin(const uint8_t* data, size_t len, DownloadBegin& out);
+
+// DOWNLOAD_INTERVAL_WRITE: one chunk of an interval's encoded audio. `data`/`len`
+// alias the caller's payload buffer (valid only during dispatch). flag bit0 = last.
+struct DownloadWrite {
+	unsigned char guid[16] = {0};
+	uint8_t flags = 0;
+	const uint8_t* data = nullptr;
+	size_t len = 0;
+	bool last() const { return flags & 1; }
+};
+bool parseDownloadWrite(const uint8_t* data, size_t len, DownloadWrite& out);
+
 // ---- Builders: return a fully framed message ([type][size LE][payload]) ----------
 
 std::vector<uint8_t> frame(uint8_t type, const std::vector<uint8_t>& payload);
@@ -129,6 +150,10 @@ std::vector<uint8_t> buildAuthUser(const std::string& username,
 // SET_CHANNEL_INFO with a single inactive "filler" channel (listen-only: we
 // broadcast nothing but still announce ourselves). Matches njclient's filler rec.
 std::vector<uint8_t> buildSetChannelInfoListenOnly();
+
+// SET_USERMASK: subscribe to a user's channels (bit N = channel N). Required to
+// receive their interval audio on servers that don't auto-subscribe.
+std::vector<uint8_t> buildSetUserMask(const std::string& user, uint32_t channelMask);
 
 std::vector<uint8_t> buildKeepAlive();
 

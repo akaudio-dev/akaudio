@@ -17,6 +17,7 @@
 #include "../src/net/ninjam/NjClient.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <thread>
@@ -58,16 +59,49 @@ int main(int argc, char** argv) {
 		}
 	};
 
+	const double sr = 48000.0;
+	client.setSampleRate(sr);
 	client.start(host, port, user, pass, cb);
+
+	// Consume the decoded mix at ~realtime (10 ms blocks), like the audio thread would,
+	// so the mixer's ring backpressure behaves correctly. Track peak/RMS + underruns.
+	const int blockMs = 10;
+	const int blockFrames = (int)(sr * blockMs / 1000.0);
+	double peak = 0.0, sumSq = 0.0;
+	long long heard = 0, underruns = 0;
+	double nextReport = 2.0, elapsed = 0.0;
 
 	auto deadline = std::chrono::steady_clock::now() +
 	                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
 	                    std::chrono::duration<double>(seconds));
-	while (std::chrono::steady_clock::now() < deadline && client.isRunning())
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	while (std::chrono::steady_clock::now() < deadline && client.isRunning()) {
+		for (int i = 0; i < blockFrames; i++) {
+			float l = 0.f, r = 0.f;
+			if (client.pull(l, r)) {
+				double a = std::fabs((double)l), b = std::fabs((double)r);
+				if (a > peak) peak = a;
+				if (b > peak) peak = b;
+				sumSq += (double)l * l + (double)r * r;
+				heard++;
+			} else {
+				underruns++;
+			}
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(blockMs));
+		elapsed += blockMs / 1000.0;
+		if (elapsed >= nextReport) {
+			nextReport += 2.0;
+			std::printf("[audio] t=%4.1fs intervals=%ld errors=%ld peak=%.3f heardFrames=%lld underruns=%lld\n",
+			            elapsed, client.intervalsDecoded(), client.decodeErrors(),
+			            peak, heard, underruns);
+		}
+	}
 
 	std::printf("\nStopping...\n");
 	client.stop();
+	double rms = heard > 0 ? std::sqrt(sumSq / (2.0 * heard)) : 0.0;
 	std::printf("Final state: %s\n", stateName(client.state()));
+	std::printf("Audio: intervals=%ld errors=%ld peak=%.4f rms=%.4f heardFrames=%lld underruns=%lld\n",
+	            client.intervalsDecoded(), client.decodeErrors(), peak, rms, heard, underruns);
 	return 0;
 }

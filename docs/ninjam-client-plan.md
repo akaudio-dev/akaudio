@@ -111,10 +111,27 @@ control, more complexity. Not needed to "hear the jam."
   (per-rec roster) → `onConfig`/`onUserInfo` callbacks. **Verified:** harness printed live tempo
   (80 BPM / 16 BPI) from the test server. Roster path in place but not yet exercised with a 2nd
   user (empty test room) — re-check against a populated public room (ninbot) when convenient.
-- **Phase 3 — decode the mix (the meat).** Interval reassembly by GUID, `stb_vorbis` decode,
-  per-user resample + mix, interval-paced push to the ring. **Milestone:** hear the real
-  multi-user jam in Rack; A/B against the Icecast mix of the same room. Harness verifies decoded
-  PCM stats over several intervals.
+- **Phase 3 — decode the mix (the meat). DONE 2026-06-21.** `src/net/ninjam/NjAudio.{hpp,cpp}`:
+  reassemble each interval by 16-byte GUID (BEGIN→WRITE chunks→last flag; zero GUID = silence to
+  keep cadence); each completed interval is a **self-contained OGG** (njclient opens a fresh
+  decoder per interval — confirmed) so we `stb_vorbis_open_memory` it, downmix to stereo, and
+  resample to exactly `intervalSamples` (= `BPI*60*sr/BPM`; this also does source→engine rate
+  conversion since every client's interval is the same musical length). A **mix thread** pops one
+  interval per channel per boundary, applies per-channel vol/pan (from USERINFO), and pushes to
+  the ring; ring backpressure paces to realtime and yields the natural 1-interval latency. Audio
+  thread just `pull()`s (same contract as Radio/Stream).
+  **Two findings that correct/extend the plan & TODO:**
+  1. **SET_USERMASK is required** on at least some servers (our test server does NOT auto-subscribe):
+     on each active USERINFO channel we send `SET_USERMASK(user, mask|=1<<chidx)` (matches njclient's
+     `config_autosubscribe`). Without it we get the roster but zero DOWNLOAD audio.
+  2. **Keepalive must be sent on a timer regardless of traffic.** Sending it only when the recv loop
+     goes idle works until audio flows — then the loop never idles, keepalives stop, and the server
+     drops us mid-stream (~1 keepalive-timeout in). Moved the keepalive check to every loop iteration.
+  **Verified** against the private test server (user "mini" playing): intervals decoded climbing,
+  0 decode errors, peak 0.49 / rms 0.044 (real audio), no underruns after the lead-in, stable for
+  40 s, mixing two users (mini + akozlov). Harness `test/njclient_test.cpp` consumes the mix at
+  realtime and reports peak/rms/intervals/underruns. *Still TODO: A/B against the Icecast mix; ear
+  test in Rack (Phase 4).*
 - **Phase 4 — module UX.** "Join (protocol)" mode beside Icecast listen; pick room via
   `RoomDirectory` (host/port); panel shows tempo / roster / interval progress; clickable LED
   stop; persist mode + room. Keep Icecast as fallback.
