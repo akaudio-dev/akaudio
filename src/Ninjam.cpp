@@ -113,7 +113,45 @@ struct Ninjam : Module {
 		float sr = APP->engine->getSampleRate();
 		stream.setSampleRate(sr);
 		njclient.setSampleRate(sr);
+		loadGlobal(); // prefill a fresh module from the last-used server/creds/history
 		directory.refresh();
+	}
+
+	// Global (cross-instance) recall of the last server/credentials/history, so a brand-new
+	// module is prefilled. Stored in the Rack user dir. dataFromJson (a saved patch) still
+	// overrides these per-instance. Note: the password is stored here in plaintext (local).
+	static std::string globalConfigPath() { return asset::user("akaudio-ninjam.json"); }
+
+	void loadGlobal() {
+		json_error_t err;
+		json_t* root = json_load_file(globalConfigPath().c_str(), 0, &err);
+		if (!root)
+			return;
+		if (json_t* j = json_object_get(root, "joinUser")) joinUser = json_string_value(j);
+		if (json_t* j = json_object_get(root, "joinPass")) joinPass = json_string_value(j);
+		if (json_t* j = json_object_get(root, "joinHost")) joinHost = json_string_value(j);
+		if (json_t* j = json_object_get(root, "joinPort")) joinPort = (int) json_integer_value(j);
+		if (json_t* hist = json_object_get(root, "serverHistory")) {
+			serverHistory.clear();
+			size_t i; json_t* v;
+			json_array_foreach(hist, i, v)
+				if (const char* s = json_string_value(v)) serverHistory.push_back(s);
+		}
+		json_decref(root);
+	}
+
+	void saveGlobal() {
+		json_t* root = json_object();
+		json_object_set_new(root, "joinUser", json_string(joinUser.c_str()));
+		json_object_set_new(root, "joinPass", json_string(joinPass.c_str()));
+		json_object_set_new(root, "joinHost", json_string(joinHost.c_str()));
+		json_object_set_new(root, "joinPort", json_integer(joinPort));
+		json_t* hist = json_array();
+		for (const std::string& s : serverHistory)
+			json_array_append_new(hist, json_string(s.c_str()));
+		json_object_set_new(root, "serverHistory", hist);
+		json_dump_file(root, globalConfigPath().c_str(), JSON_INDENT(2));
+		json_decref(root);
 	}
 
 	// NjClient callbacks (fire on its background thread). Keep them light.
@@ -220,6 +258,7 @@ struct Ninjam : Module {
 		njclient.start(joinHost, joinPort, joinUser, joinPass, jamCallbacks());
 		joined = true;
 		addServerHistory(joinHost + ":" + std::to_string(joinPort));
+		saveGlobal(); // remember this server/creds for the next fresh module
 	}
 
 	void addServerHistory(const std::string& hp) {
