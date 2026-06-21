@@ -5,7 +5,7 @@
 
 #include <jansson.h>
 
-namespace akozlov {
+namespace akaudio {
 
 namespace {
 
@@ -143,4 +143,4 @@ void RoomDirectory::fetch(unsigned bust) {
 	loading_.store(false, std::memory_order_release);
 }
 
-} // namespace akozlov
+} // namespace akaudio

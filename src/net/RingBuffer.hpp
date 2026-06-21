@@ -3,7 +3,7 @@
 #include <vector>
 #include <cstddef>
 
-namespace akozlov {
+namespace akaudio {
 
 // Lock-free single-producer / single-consumer ring buffer of stereo float frames.
 //
@@ -68,4 +68,4 @@ private:
 	std::atomic<size_t> readIdx{0};
 };
 
-} // namespace akozlov
+} // namespace akaudio

@@ -16,7 +16,7 @@
 // never blocks on the network. The UI reads the cached room list instantly via
 // rooms(). All public methods are meant for the UI thread.
 
-namespace akozlov {
+namespace akaudio {
 
 struct Room {
 	std::string name;
@@ -72,4 +72,4 @@ private:
 	std::atomic<unsigned> generation_{0}; // bumped on each successful parse
 };
 
-} // namespace akozlov
+} // namespace akaudio

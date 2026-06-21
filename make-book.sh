@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Weave this plugin's source into a book with trusty_weaver.
-#   ./make-book.sh            -> build/akozlov.epub
+#   ./make-book.sh            -> build/akaudio.epub
 # Override the weaver location with TRUSTY_WEAVER=/path/to/trusty_weaver.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -14,11 +14,11 @@ cd "$HERE"
 # Files in deliberate reading order: identity -> realtime bridge -> streaming
 # core -> transport/codec layers -> room directory -> the two modules.
 build/trusty_weaver \
-  -title "Akozlov" \
+  -title "AK Audio" \
   -subtitle "A VCV Rack plugin" \
   -author "Andrei Kozlov" \
   -preface README.md \
-  -o build/akozlov.epub \
+  -o build/akaudio.epub \
   src/plugin.hpp \
   src/plugin.cpp \
   src/net/RingBuffer.hpp \

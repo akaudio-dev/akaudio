@@ -7,7 +7,7 @@
 #include <cstring>
 #include <vector>
 
-namespace akozlov {
+namespace akaudio {
 
 struct AacDecoder::Impl {
 	AudioFileStreamID stream = nullptr;
@@ -154,16 +154,16 @@ void AacDecoder::close() {
 	impl = nullptr;
 }
 
-} // namespace akozlov
+} // namespace akaudio
 
 #else // !__APPLE__
 
-namespace akozlov {
+namespace akaudio {
 AacDecoder::~AacDecoder() {}
 bool AacDecoder::available() { return false; }
 bool AacDecoder::init() { return false; }
 bool AacDecoder::feed(const uint8_t*, size_t) { return false; }
 void AacDecoder::close() {}
-} // namespace akozlov
+} // namespace akaudio
 
 #endif

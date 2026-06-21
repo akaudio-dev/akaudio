@@ -9,7 +9,7 @@
 #include <unistd.h>
 #include <netinet/in.h>
 
-namespace akozlov {
+namespace akaudio {
 
 namespace {
 
@@ -93,7 +93,7 @@ bool httpGet(const std::string& url, std::string& out) {
 	std::string req =
 		"GET " + u.path + " HTTP/1.0\r\n"
 		"Host: " + u.host + "\r\n"
-		"User-Agent: Akozlov-VCVRack/2.0\r\n"
+		"User-Agent: AKAudio-VCVRack/2.0\r\n"
 		"Accept: application/json\r\n"
 		"Connection: close\r\n"
 		"\r\n";
@@ -130,4 +130,4 @@ bool httpGet(const std::string& url, std::string& out) {
 	return true;
 }
 
-} // namespace akozlov
+} // namespace akaudio

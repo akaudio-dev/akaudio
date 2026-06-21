@@ -12,7 +12,7 @@
 // fetches in sequence (re-reading the playlist for new ones on a live feed).
 // Modern broadcasters (e.g. BBC) are HLS-only, with AAC inside MPEG-TS segments.
 
-namespace akozlov {
+namespace akaudio {
 
 struct HlsPlaylist {
 	bool isMaster = false;            // a master (variant) playlist vs a media playlist
@@ -37,4 +37,4 @@ bool looksLikeHls(const std::string& url, const std::string& body);
 // concatenates its payload (which is ADTS) — no PAT/PMT needed for our feeds.
 void tsExtractAdts(const uint8_t* data, size_t n, std::string& out);
 
-} // namespace akozlov
+} // namespace akaudio

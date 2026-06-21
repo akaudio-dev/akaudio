@@ -31,7 +31,7 @@ int main(int argc, char** argv) {
 	std::printf("Stream: %s\n", url.c_str());
 	std::printf("Target: %.0f Hz for %.1f s\n\n", sr, seconds);
 
-	akozlov::StreamClient s;
+	akaudio::StreamClient s;
 	s.setSampleRate((float) sr);
 	s.start(url);
 

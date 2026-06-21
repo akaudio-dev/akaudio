@@ -25,7 +25,7 @@ struct Radio : Module {
 		LIGHTS_LEN
 	};
 
-	akozlov::StreamClient stream;
+	akaudio::StreamClient stream;
 	// Default to a calm ambient bed; "stations" are curated factory presets
 	// (sound sources for soundscapes — nature, scanners, space — not music).
 	std::string url = "https://nature-rex.radioca.st/stream";
@@ -322,8 +322,8 @@ struct RadioWidget : ModuleWidget {
 		ClickableLed* led = new ClickableLed;
 		led->box.size = mm2px(Vec(5.5, 5.5));
 		led->box.pos = mm2px(Vec(20.32, 56.0)).minus(led->box.size.div(2));
-		led->isLive = [module]() { return module && module->stream.getState() == akozlov::StreamClient::State::Playing; };
-		led->isPending = [module]() { return module && module->playing && module->stream.getState() != akozlov::StreamClient::State::Playing; };
+		led->isLive = [module]() { return module && module->stream.getState() == akaudio::StreamClient::State::Playing; };
+		led->isPending = [module]() { return module && module->playing && module->stream.getState() != akaudio::StreamClient::State::Playing; };
 		led->onToggle = [module]() { if (module) module->togglePlay(); };
 		addChild(led);
 

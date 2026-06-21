@@ -15,7 +15,7 @@
 // Float32 PCM is delivered through onPCM at the stream's native sample rate (the
 // caller resamples to the engine rate, same as the MP3 path).
 
-namespace akozlov {
+namespace akaudio {
 
 class AacDecoder {
 public:
@@ -43,4 +43,4 @@ private:
 	Impl* impl = nullptr;
 };
 
-} // namespace akozlov
+} // namespace akaudio

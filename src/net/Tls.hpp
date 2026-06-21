@@ -8,7 +8,7 @@
 // store here, and these are public audio streams, not authenticated endpoints.
 // Tighten to real verification later if we ship a CA bundle.
 
-namespace akozlov {
+namespace akaudio {
 
 struct Tls {
 	void* ssl = nullptr; // SSL*
@@ -28,4 +28,4 @@ void tlsFree(Tls& t);
 long tlsRead(const Tls& t, int fd, void* buf, size_t n);
 long tlsWrite(const Tls& t, int fd, const void* buf, size_t n);
 
-} // namespace akozlov
+} // namespace akaudio

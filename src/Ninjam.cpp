@@ -31,10 +31,10 @@ struct Ninjam : Module {
 		LIGHTS_LEN
 	};
 
-	akozlov::StreamClient stream;
+	akaudio::StreamClient stream;
 	// Background directory of public jam rooms (ninbot). Fetched off-thread; the
 	// UI reads its cache instantly. Not persisted — rooms come and go.
-	akozlov::RoomDirectory directory;
+	akaudio::RoomDirectory directory;
 	// The jam's Icecast/HTTP listen-stream URL (MP3). Set by picking a room or
 	// typing one; empty by default since rooms come and go.
 	std::string url = "";
@@ -55,7 +55,7 @@ struct Ninjam : Module {
 	}
 
 	// Point at a room's stream and start listening (an explicit pick = listen).
-	void selectRoom(const akozlov::Room& room) {
+	void selectRoom(const akaudio::Room& room) {
 		if (listening)
 			stopListening();
 		url = room.playUrl();
@@ -80,11 +80,11 @@ struct Ninjam : Module {
 			listen();
 	}
 	// True if we're currently listening to this exact room.
-	bool isListeningTo(const akozlov::Room& room) const {
+	bool isListeningTo(const akaudio::Room& room) const {
 		return listening && url == room.playUrl();
 	}
 	// Row click: stop if it's the active room, otherwise switch to it.
-	void toggleRoom(const akozlov::Room& room) {
+	void toggleRoom(const akaudio::Room& room) {
 		if (isListeningTo(room))
 			stopListening();
 		else
@@ -153,11 +153,11 @@ static void appendRoomMenu(Menu* menu, Ninjam* module) {
 		module->directory.refresh();
 	}));
 
-	std::vector<akozlov::Room> rooms = module->directory.rooms();
+	std::vector<akaudio::Room> rooms = module->directory.rooms();
 	menu->addChild(new MenuSeparator);
 
 	int shown = 0;
-	for (const akozlov::Room& room : rooms) {
+	for (const akaudio::Room& room : rooms) {
 		if (!room.playable())
 			continue; // http MP3 stream only (no TLS in v1)
 		std::string cap = room.userMax > 0
@@ -192,7 +192,7 @@ static std::string lower(std::string s) {
 	return s;
 }
 
-static bool roomMatches(const akozlov::Room& r, const std::string& f) {
+static bool roomMatches(const akaudio::Room& r, const std::string& f) {
 	if (lower(r.name).find(f) != std::string::npos)
 		return true;
 	for (const std::string& u : r.users)
@@ -235,7 +235,7 @@ static void drawTxt(NVGcontext* vg, const char* fontRes, float x, float y, float
 // One room in the list. Click toggles listening to it.
 struct RoomRow : OpaqueWidget {
 	Ninjam* module = nullptr;
-	akozlov::Room room;
+	akaudio::Room room;
 	bool hovered = false;
 
 	void onEnter(const EnterEvent& e) override {
@@ -317,9 +317,9 @@ struct RoomBrowser : ui::ScrollWidget {
 			return;
 		const float w = box.size.x;
 		const std::string filter = search ? lower(search->text) : "";
-		std::vector<akozlov::Room> rooms = module->directory.rooms();
+		std::vector<akaudio::Room> rooms = module->directory.rooms();
 		float y = 0;
-		for (const akozlov::Room& room : rooms) {
+		for (const akaudio::Room& room : rooms) {
 			if (!room.playable())
 				continue; // http MP3 only (no TLS in v1)
 			if (!filter.empty() && !roomMatches(room, filter))
@@ -485,8 +485,8 @@ struct NinjamWidget : ModuleWidget {
 		ClickableLed* led = new ClickableLed;
 		led->box.size = Vec(13, 13);
 		led->box.pos = Vec(W - 13, 24).minus(led->box.size.div(2));
-		led->isLive = [module]() { return module && module->stream.getState() == akozlov::StreamClient::State::Playing; };
-		led->isPending = [module]() { return module && module->listening && module->stream.getState() != akozlov::StreamClient::State::Playing; };
+		led->isLive = [module]() { return module && module->stream.getState() == akaudio::StreamClient::State::Playing; };
+		led->isPending = [module]() { return module && module->listening && module->stream.getState() != akaudio::StreamClient::State::Playing; };
 		led->onToggle = [module]() { if (module) module->toggleListen(); };
 		addChild(led);
 

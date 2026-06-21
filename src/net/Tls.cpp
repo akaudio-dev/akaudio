@@ -4,7 +4,7 @@
 
 #include <openssl/ssl.h>
 
-namespace akozlov {
+namespace akaudio {
 
 bool tlsHandshake(Tls& t, int fd, const std::string& host) {
 	// OpenSSL 1.1+ self-initializes on first use, so no explicit init needed.
@@ -58,4 +58,4 @@ long tlsWrite(const Tls& t, int fd, const void* buf, size_t n) {
 	return (long) ::send(fd, buf, n, 0);
 }
 
-} // namespace akozlov
+} // namespace akaudio

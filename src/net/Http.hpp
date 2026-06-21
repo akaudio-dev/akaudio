@@ -7,10 +7,10 @@
 // NOT for audio streams (those go through StreamClient). MUST be called off the
 // UI/audio thread: it blocks on connect/recv.
 
-namespace akozlov {
+namespace akaudio {
 
 // GET the url; on success returns true and fills out with the response body.
 // On any failure returns false (out is cleared). Follows no redirects.
 bool httpGet(const std::string& url, std::string& out);
 
-} // namespace akozlov
+} // namespace akaudio

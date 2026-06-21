@@ -1,4 +1,4 @@
-# Akozlov
+# AK Audio
 
 A personal VCV Rack plugin (collection of modules) by Andrey Kozlov.
 

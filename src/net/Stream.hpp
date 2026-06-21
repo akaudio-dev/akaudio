@@ -6,7 +6,7 @@
 
 #include "RingBuffer.hpp"
 
-// Shared networked-audio layer for Akozlov modules (Ninjam, Radio, future modules).
+// Shared networked-audio layer for AK Audio modules (Ninjam, Radio, future modules).
 //
 // StreamClient connects to an HTTP/Icecast MP3 stream on a background thread,
 // decodes it (dr_mp3), resamples to the engine sample rate, and feeds a lock-free
@@ -21,7 +21,7 @@
 //   - MP3 always; AAC + HLS on macOS (AudioToolbox). No OGG/Vorbis yet.
 //   - linear resampling from the stream rate to the engine rate.
 
-namespace akozlov {
+namespace akaudio {
 
 class StreamClient {
 public:
@@ -66,4 +66,4 @@ private:
 	std::string statusText;
 };
 
-} // namespace akozlov
+} // namespace akaudio

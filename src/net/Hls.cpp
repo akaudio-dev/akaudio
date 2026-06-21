@@ -3,7 +3,7 @@
 #include <cctype>
 #include <cstdlib>
 
-namespace akozlov {
+namespace akaudio {
 
 namespace {
 
@@ -145,4 +145,4 @@ void tsExtractAdts(const uint8_t* d, size_t n, std::string& out) {
 	}
 }
 
-} // namespace akozlov
+} // namespace akaudio

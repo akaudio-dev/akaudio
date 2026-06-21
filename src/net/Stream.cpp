@@ -16,7 +16,7 @@
 #include "Http.hpp"
 #include "Hls.hpp"
 
-namespace akozlov {
+namespace akaudio {
 
 namespace {
 
@@ -255,7 +255,7 @@ void StreamClient::run(std::string url) {
 		std::string req =
 			"GET " + u.path + " HTTP/1.0\r\n"
 			"Host: " + u.host + "\r\n"
-			"User-Agent: Akozlov-VCVRack/2.0\r\n"
+			"User-Agent: AKAudio-VCVRack/2.0\r\n"
 			"Icy-MetaData: 0\r\n"
 			"Connection: close\r\n"
 			"\r\n";
@@ -584,4 +584,4 @@ void StreamClient::runHls(std::string url) {
 		setStatus(State::Stopped, "Stream ended");
 }
 
-} // namespace akozlov
+} // namespace akaudio

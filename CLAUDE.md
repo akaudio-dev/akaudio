@@ -1,10 +1,10 @@
-# CLAUDE.md — Akozlov VCV Rack plugin
+# CLAUDE.md — AK Audio VCV Rack plugin
 
 This file provides guidance to Claude Code (claude.ai/code) when working in this repository.
 
 ## What this is
 
-A single VCV Rack **plugin** (slug `akozlov`) containing multiple **modules** — the Bidoo model: one slug, one shared library, one VCV Library page, many modules. See `../CLAUDE.md` for the surrounding workspace (the source-built Rack SDK at `../Rack`, and the rule to never touch the user's Rack Pro app in `/Applications`).
+A single VCV Rack **plugin** (slug `akaudio`) containing multiple **modules** — the Bidoo model: one slug, one shared library, one VCV Library page, many modules. See `../CLAUDE.md` for the surrounding workspace (the source-built Rack SDK at `../Rack`, and the rule to never touch the user's Rack Pro app in `/Applications`).
 
 Modules:
 - **Radio** (`src/Radio.cpp`) — streaming internet radio (Icecast/HTTP MP3) source. Implemented (v1).
@@ -28,8 +28,8 @@ make clean
 Rack runs `Module::process(args)` on the **audio thread**, once per sample frame (tens of thousands of times per second). In `process()` and anything it calls:
 
 - **Never block, allocate, take a lock, or do I/O.** No `new`/`malloc`, no `std::mutex`, no syscalls, no network, no file access, no logging. Doing so causes audio dropouts/xruns.
-- All networking and decoding happens on a **background thread** (`akozlov::StreamClient`, `src/net/Stream.cpp`).
-- The two threads communicate **only** through a lock-free single-producer/single-consumer ring buffer (`akozlov::StereoRingBuffer`, `src/net/RingBuffer.hpp`): the net thread `push()`es decoded frames, `process()` `pull()`s one frame. `pull()` returns false on underrun → output silence, never wait.
+- All networking and decoding happens on a **background thread** (`akaudio::StreamClient`, `src/net/Stream.cpp`).
+- The two threads communicate **only** through a lock-free single-producer/single-consumer ring buffer (`akaudio::StereoRingBuffer`, `src/net/RingBuffer.hpp`): the net thread `push()`es decoded frames, `process()` `pull()`s one frame. `pull()` returns false on underrun → output silence, never wait.
 
 Control flow rules:
 - **Start/stop the stream from the UI/main thread only** (context-menu actions, `dataFromJson`), never from `process()`. `StreamClient::stop()` joins the background thread — joining on the audio thread would stall audio.
