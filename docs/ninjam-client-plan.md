@@ -112,9 +112,10 @@ control, more complexity. Not needed to "hear the jam."
 
 ## 7. Testing
 
-- **Standalone harness** (no Rack/GUI) per phase — connect to a real public server for end-to-end,
-  and to a **local private server** (build the server from `~/work/github/ninjam`) for offline,
-  no-etiquette-risk testing.
+- **Standalone harness** (no Rack/GUI) per phase — connect to a **private test server we already
+  run** (`<redacted-host>`, port `<redacted-port>`; credentials in the agent's
+  local memory, deliberately not in git) for offline, no-etiquette-risk testing, plus a real public
+  server (ninbot/ninjamer) for an end-to-end check.
 - **Byte layouts** cross-checked against JamTaba's serialization tests + wireshark captures.
 - **A/B** the protocol mix against the existing Icecast mix of the same room.
 
