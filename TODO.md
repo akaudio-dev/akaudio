@@ -137,3 +137,60 @@ and via a manual "Refresh".
 
   Possible polish next: per-row tooltips (country/city from `users[]`), keyboard nav, persist scroll/
   filter, dim non-playable (TLS-only) rooms instead of hiding them, "now playing" marquee.
+
+## Ninjam: JOIN via the NINJAM protocol (studied 2026-06-20 — not yet built)
+
+Today the module only *listens* to a room's public Icecast/MP3 mix. Real participation means
+speaking the **NINJAM protocol** (TCP, default port 2049). Studied two reference impls:
+`~/work/github/ninjam` (canonical Cockos C++, the `njclient`/`mpb`/`netmsg` spec — **GPLv2**) and
+`~/work/github/JamTaba` (mature C++/Qt client, `src/Common/ninjam/` + `NinjamController` — GPLv2).
+Both GPL → fine to port into our GPL-3 plugin (keep the protocol classes pure C++; don't drag in Qt).
+
+**Wire format** (verified in canonical source): frame = `[type u8][size u32 LE][payload]`. Strings are
+NUL-terminated UTF-8; ints little-endian. `netmsg.cpp` (framing), `mpb.cpp` (message build/parse).
+
+**Auth (verified `njclient.cpp:1069`): SHA1, NOT MD5.** `passhash = SHA1("user:pass")`,
+`response = SHA1(passhash + challenge8)`. Anonymous = username `anonymous[:displayname]`, empty pass.
+(The JamTaba study-agent wrongly said "MD5 XOR challenge" — ignore that; the Cockos source is truth.
+We already link OpenSSL via libRack, so SHA1 is free.)
+
+**Handshake:** TCP connect → recv `SERVER_AUTH_CHALLENGE(0x00)` (challenge8, server_caps [keepalive secs
+in bits 8-15], proto_ver 0x00020000, optional license) → send `CLIENT_AUTH_USER(0x80)` (response20,
+username, client_caps [bit0=accept license, bit1 must be set], ver) → recv `SERVER_AUTH_REPLY(0x01)`
+(flag bit0=success, maxchan). Then send `CLIENT_SET_CHANNEL_INFO(0x82)` with our channel list (even if
+we transmit nothing) and keepalive (`0xfd`) every server_caps interval.
+
+**Minimal LISTEN-only message subset (recv):** `CONFIG_CHANGE_NOTIFY(0x02)` (BPM u16, BPI u16),
+`USERINFO_CHANGE_NOTIFY(0x03)` (per-rec: active, chidx, vol dB*10, pan, flags, user, chname),
+`DOWNLOAD_INTERVAL_BEGIN(0x04)` (guid16, estsize, **fourcc "OGGv"**, chidx, user; guid all-zero = silence),
+`DOWNLOAD_INTERVAL_WRITE(0x05)` (guid16, flags [bit0=last], ogg bytes). Optionally
+`CLIENT_SET_USERMASK(0x81)` to subscribe (many servers auto-subscribe).
+
+**Interval audio model:** audio is chunked into intervals aligned to tempo —
+`interval_samples = BPI * 60 * sampleRate / BPM`. Per (user,channel) interval: collect the WRITE chunks
+by guid → decode **OGG Vorbis** → at the next interval boundary swap it in and mix (vol/pan). A joining
+client just syncs to the next boundary; the server enforces alignment.
+
+**Codec dep (we have none):** Rack ships no vorbis/ogg. For **listen-only**, vendor **stb_vorbis.h**
+(single-header, public-domain) to decode intervals — mirrors how `dep/dr_mp3.h` works, no build system
+changes. For **uploading** later, we'd vendor libvorbis+libogg (heavier; what WDL/JamTaba use).
+
+**Reuse from our code:** the background net thread, `StereoRingBuffer`, linear resampler, and backpressure
+in `net/Stream.cpp` all transfer. New: a `NinjamClient` (own TCP socket — NOT `StreamClient`, different
+protocol), SHA1 via OpenSSL, a tiny binary reader/writer, per-user interval decoders, and a tempo-driven
+interval clock feeding the ring. Threading contract unchanged (decode off-thread, `pull()` on audio thread).
+
+**Gotchas (from JamTaba):** keepalive or the server drops you; intervals are long (~16 s @120/32) so
+mid-interval joins wait for the next boundary; no retransmit → validate the "OGGv" header and skip
+corrupt intervals; resample remote rate→engine rate; send `SET_CHANNEL_INFO` promptly after auth.
+
+**Plan (listen-first, then transmit):** (1) `NinjamClient` connect+SHA1 auth+keepalive + message
+(de)serialize; (2) interval reassembly + stb_vorbis decode + interval-clock → ring (this gives the
+*real* multi-user mix, no Icecast needed); (3) wire into the Ninjam module as an alternative to the
+Icecast path; (4 later) OGG encode + `UPLOAD_INTERVAL_*` to actually play in the jam. Substantial,
+multi-phase. Keep the existing Icecast listening as the zero-dep fallback.
+
+Key references — canonical: `ninjam/{netmsg,mpb,njclient}.{cpp,h}`, `WDL/vorbisencdec.h`;
+JamTaba: `src/Common/ninjam/{Ninjam,client/ServerMessages,client/ClientMessages,client/Service}.*`,
+`src/Common/NinjamController.cpp`, `src/Common/audio/NinjamTrackNode.cpp`,
+and the byte-layout tests `tests/auto/ninjam/TestMessagesSerialization.cpp`.
