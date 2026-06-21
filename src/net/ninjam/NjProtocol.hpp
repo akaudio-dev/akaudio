@@ -155,6 +155,21 @@ std::vector<uint8_t> buildSetChannelInfoListenOnly();
 // receive their interval audio on servers that don't auto-subscribe.
 std::vector<uint8_t> buildSetUserMask(const std::string& user, uint32_t channelMask);
 
+// 'OGGv' fourcc (little-endian) — the codec tag NINJAM uses for our uploaded intervals.
+static const uint32_t FOURCC_OGG = (uint32_t)'O' | ((uint32_t)'G' << 8) | ((uint32_t)'G' << 16) | ((uint32_t)'v' << 24);
+
+// SET_CHANNEL_INFO declaring real (broadcasting) local channels by name (vol 0 dB, pan
+// center, flags 0 = active). This is what we send instead of the listen-only filler when
+// we transmit.
+std::vector<uint8_t> buildSetChannelInfo(const std::vector<std::string>& channelNames);
+
+// UPLOAD_INTERVAL_BEGIN (0x83): announce a new outgoing interval for a local channel.
+std::vector<uint8_t> buildUploadBegin(const unsigned char guid[16], uint32_t fourcc,
+                                      int chidx, uint32_t estSize);
+// UPLOAD_INTERVAL_WRITE (0x84): a chunk of the interval's encoded bytes (flag bit0 = last).
+std::vector<uint8_t> buildUploadWrite(const unsigned char guid[16], uint8_t flags,
+                                      const uint8_t* data, size_t len);
+
 std::vector<uint8_t> buildKeepAlive();
 
 } // namespace nj

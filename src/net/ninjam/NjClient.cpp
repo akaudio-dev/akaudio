@@ -58,7 +58,48 @@ void NjClient::stop() {
 	running.store(false, std::memory_order_release);
 }
 
+void NjClient::makeGuid(unsigned char out[16]) {
+	static std::atomic<uint64_t> ctr{0};
+	uint64_t a = ctr.fetch_add(1, std::memory_order_relaxed);
+	uint64_t b = a * 0x9E3779B97F4A7C15ULL ^ 0xD1B54A32D192ED03ULL;
+	std::memcpy(out, &a, 8);
+	std::memcpy(out + 8, &b, 8);
+}
+
+void NjClient::setTransmit(const std::vector<std::string>& channelNames, float quality) {
+	txChannels = channelNames;
+	audio.setTransmit((int) channelNames.size(), quality);
+	audio.onUploadInterval = [this](int ch, const std::vector<uint8_t>& ogg) {
+		sendUploadInterval(ch, ogg);
+	};
+	if (st.load(std::memory_order_acquire) == State::Connected)
+		sendChannelDecl(); // re-declare channels live
+}
+
+void NjClient::sendChannelDecl() {
+	if (!txChannels.empty())
+		sendAll(buildSetChannelInfo(txChannels));
+	else
+		sendAll(buildSetChannelInfoListenOnly());
+}
+
+void NjClient::sendUploadInterval(int chidx, const std::vector<uint8_t>& ogg) {
+	unsigned char guid[16];
+	makeGuid(guid);
+	sendAll(buildUploadBegin(guid, FOURCC_OGG, chidx, (uint32_t) ogg.size()));
+	const size_t CHUNK = 8192;
+	size_t off = 0;
+	do {
+		size_t n = ogg.size() - off;
+		if (n > CHUNK) n = CHUNK;
+		bool last = (off + n >= ogg.size());
+		sendAll(buildUploadWrite(guid, last ? 1 : 0, ogg.empty() ? nullptr : ogg.data() + off, n));
+		off += n;
+	} while (off < ogg.size()); // at least one WRITE (the last flag), even if ogg is empty
+}
+
 bool NjClient::sendAll(const std::vector<uint8_t>& data) {
+	std::lock_guard<std::mutex> lock(sendMutex); // whole NINJAM messages stay atomic on the wire
 	int fd = sock.load(std::memory_order_acquire);
 	if (fd < 0) return false;
 	size_t off = 0;
@@ -227,13 +268,11 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 				authed = true;
 				// log("auth ok" + (ar.errmsg.empty() ? std::string() : " as \"" + ar.errmsg + "\"") +
 				//     " maxchan=" + std::to_string(ar.maxchan)); // normal
-				// Announce ourselves with no broadcast channels (listen-only).
-				if (!sendAll(buildSetChannelInfoListenOnly())) {
-					setState(State::Error, "Send channel info failed");
-					goto done;
-				}
+				// Announce our channels (real broadcast channels if transmitting, else a
+				// listen-only filler).
+				sendChannelDecl();
 				lastSend = ::time(nullptr);
-				audio.start(); // launch the interval mixer
+				audio.start(); // launch the interval mixer + transmit thread
 				setState(State::Connected);
 				break;
 			}

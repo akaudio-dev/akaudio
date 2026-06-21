@@ -34,9 +34,11 @@ int main(int argc, char** argv) {
 	double seconds = argc > 3 ? std::atof(argv[3]) : 20.0;
 	std::string user = argc > 4 ? argv[4] : "akaudio-test";
 	std::string pass = argc > 5 ? argv[5] : "";
+	bool tx = argc > 6 && std::string(argv[6]) == "tx"; // transmit a test tone on channel 0
 
-	std::printf("Connecting to %s:%d as %s%s for %.0f s\n\n",
-	            host.c_str(), port, pass.empty() ? "anonymous:" : "", user.c_str(), seconds);
+	std::printf("Connecting to %s:%d as %s%s for %.0f s%s\n\n",
+	            host.c_str(), port, pass.empty() ? "anonymous:" : "", user.c_str(), seconds,
+	            tx ? "  [TRANSMITTING 330 Hz tone on channel \"akaudio-tx\"]" : "");
 
 	NjClient client;
 	NjClient::Callbacks cb;
@@ -61,7 +63,10 @@ int main(int argc, char** argv) {
 
 	const double sr = 48000.0;
 	client.setSampleRate(sr);
+	if (tx)
+		client.setTransmit({"akaudio-tx"}, 0.5f); // one local channel, q0.5 (~190 kbps)
 	client.start(host, port, user, pass, cb);
+	float txPhase = 0.f;
 
 	// Consume the decoded mix at ~realtime (10 ms blocks), like the audio thread would,
 	// so the mixer's ring backpressure behaves correctly. Track peak/RMS + underruns.
@@ -77,6 +82,12 @@ int main(int argc, char** argv) {
 	                    std::chrono::duration<double>(seconds));
 	while (std::chrono::steady_clock::now() < deadline && client.isRunning()) {
 		for (int i = 0; i < blockFrames; i++) {
+			if (tx) {
+				float s = 0.3f * std::sin(2.f * 3.14159265f * txPhase);
+				txPhase += 330.f / (float) sr;
+				if (txPhase >= 1.f) txPhase -= 1.f;
+				client.captureFrame(0, s, s);
+			}
 			float l = 0.f, r = 0.f;
 			if (client.pull(l, r)) {
 				double a = std::fabs((double)l), b = std::fabs((double)r);

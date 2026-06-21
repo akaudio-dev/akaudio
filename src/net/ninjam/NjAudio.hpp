@@ -24,11 +24,16 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include "../RingBuffer.hpp"
+#include "NjEncoder.hpp"
 
 namespace akaudio {
 namespace nj {
@@ -90,6 +95,19 @@ public:
 	void start();
 	void stop();
 
+	// ---- Transmit (capture local audio -> encode -> upload via the callback) ----
+	// Set the number of local channels to broadcast + VBR quality. Allocates capture
+	// buffers (call from the UI/setup thread, before start() ideally).
+	void setTransmit(int channels, float quality);
+	// Audio thread: push one captured stereo frame for local channel `ch`.
+	void captureFrame(int ch, float l, float r) {
+		if (!txActive.load(std::memory_order_acquire) || ch < 0 || ch >= nTx.load(std::memory_order_relaxed))
+			return;
+		txCapture[ch]->push(l, r); // txCapture is built once (size MAX_TX) before txActive=true
+	}
+	// Called on the TX thread once per channel per interval with the encoded OGG.
+	std::function<void(int chidx, const std::vector<uint8_t>&)> onUploadInterval;
+
 	// Audio thread: pull one wide frame (RING_CH interleaved-stereo-per-slot floats).
 	// Returns false on underrun (out untouched). out must hold RING_CH floats.
 	bool pullFrame(float* out) { return ring.pull(out); }
@@ -130,13 +148,22 @@ private:
 	void enqueue(const std::string& key, std::vector<float>&& interval);
 	std::vector<float> decodeOgg(const uint8_t* data, size_t len, int frames);
 	void mixLoop();
+	void txLoop();                            // capture -> encode -> onUploadInterval
 	int assignSlot(const std::string& user); // call under mu; -1 if no free slot
 	void refreshSlots();                      // call under mu; free slots of departed users
 
 	WideRing ring{1 << 16};
 	std::thread mixThread;
+	std::thread txThread;
 	std::atomic<bool> running{false};
 	std::atomic<bool> abort{false};
+
+	// Transmit state.
+	static const int MAX_TX = 4; // max local broadcast channels
+	std::atomic<bool> txActive{false};
+	std::atomic<int> nTx{0};
+	float txQuality = 0.5f;
+	std::vector<std::unique_ptr<StereoRingBuffer>> txCapture; // MAX_TX rings, built once
 
 	std::atomic<double> sampleRate{48000.0};
 	std::atomic<int> intervalSamples{0};

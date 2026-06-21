@@ -151,6 +151,42 @@ std::vector<uint8_t> buildSetUserMask(const std::string& user, uint32_t channelM
 	return frame(MSG_CLIENT_SET_USERMASK, p);
 }
 
+std::vector<uint8_t> buildSetChannelInfo(const std::vector<std::string>& channelNames) {
+	// mpisize u16 (=4), then per channel: name\0, volume s16 (0), pan u8 (0), flags u8 (0).
+	std::vector<uint8_t> p;
+	p.push_back(4); p.push_back(0); // mpisize = 4
+	for (const std::string& name : channelNames) {
+		p.insert(p.end(), name.begin(), name.end());
+		p.push_back(0);              // name NUL
+		p.push_back(0); p.push_back(0); // volume s16 = 0 dB
+		p.push_back(0);              // pan = center
+		p.push_back(0);              // flags = 0 (active broadcasting channel)
+	}
+	return frame(MSG_CLIENT_SET_CHANNEL_INFO, p);
+}
+
+std::vector<uint8_t> buildUploadBegin(const unsigned char guid[16], uint32_t fourcc,
+                                      int chidx, uint32_t estSize) {
+	// guid[16] + estsize u32 LE + fourcc u32 LE + chidx u8.
+	std::vector<uint8_t> p;
+	p.insert(p.end(), guid, guid + 16);
+	for (int i = 0; i < 4; i++) p.push_back((estSize >> (8 * i)) & 0xff);
+	for (int i = 0; i < 4; i++) p.push_back((fourcc >> (8 * i)) & 0xff);
+	p.push_back((uint8_t)(chidx & 0xff));
+	return frame(MSG_CLIENT_UPLOAD_BEGIN, p);
+}
+
+std::vector<uint8_t> buildUploadWrite(const unsigned char guid[16], uint8_t flags,
+                                      const uint8_t* data, size_t len) {
+	// guid[16] + flags u8 + audio bytes.
+	std::vector<uint8_t> p;
+	p.insert(p.end(), guid, guid + 16);
+	p.push_back(flags);
+	if (data && len)
+		p.insert(p.end(), data, data + len);
+	return frame(MSG_CLIENT_UPLOAD_WRITE, p);
+}
+
 std::vector<uint8_t> buildKeepAlive() {
 	return frame(MSG_KEEPALIVE, {});
 }

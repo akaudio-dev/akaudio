@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -60,6 +61,13 @@ public:
 	// Poly channel count currently in use (= number of active players on the bundle).
 	int polyChannels() const { return audio.polyChannels(); }
 
+	// ---- Transmit ----
+	// Declare local broadcast channels (by name) + encoder quality; (re)sends
+	// SET_CHANNEL_INFO if already connected. Empty list = listen-only.
+	void setTransmit(const std::vector<std::string>& channelNames, float quality);
+	// Audio thread: push one captured stereo frame for local channel `ch`.
+	void captureFrame(int ch, float l, float r) { audio.captureFrame(ch, l, r); }
+
 	// Diagnostics.
 	long intervalsDecoded() const { return audio.intervalsDecoded(); }
 	long decodeErrors() const { return audio.decodeErrors(); }
@@ -69,6 +77,9 @@ private:
 	void run(std::string host, int port, std::string user, std::string pass);
 	void setState(State s, const std::string& msg = "");
 	void log(const std::string& msg);
+	void sendChannelDecl();                               // SET_CHANNEL_INFO (real or filler)
+	void sendUploadInterval(int chidx, const std::vector<uint8_t>& ogg); // TX thread
+	static void makeGuid(unsigned char out[16]);
 
 	bool sendAll(const std::vector<uint8_t>& data);
 	// Read one framed message. Returns: 1 = got frame, 0 = closed/error/abort,
@@ -87,6 +98,8 @@ private:
 	Callbacks cb;
 	NjAudio audio;
 	std::map<std::string, uint32_t> subMask; // per-user subscribed-channel bitmask (SET_USERMASK)
+	std::vector<std::string> txChannels;     // declared local broadcast channels (names)
+	std::mutex sendMutex;                     // serialize socket sends across net + TX threads
 	int keepAliveSecs = 3; // from server caps; refreshed after the challenge
 };
 

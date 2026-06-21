@@ -193,17 +193,35 @@ std::vector<float> NjAudio::decodeOgg(const uint8_t* data, size_t len, int frame
 	return out;
 }
 
+void NjAudio::setTransmit(int channels, float quality) {
+	if (channels > MAX_TX) channels = MAX_TX;
+	txQuality = quality;
+	// One-time allocation of the capture rings (never resized afterwards, so the audio
+	// thread can index them lock-free). ~21 s @ 48 kHz headroom each.
+	if ((int) txCapture.size() < MAX_TX) {
+		txActive.store(false, std::memory_order_release);
+		txCapture.clear();
+		for (int i = 0; i < MAX_TX; i++)
+			txCapture.push_back(std::unique_ptr<StereoRingBuffer>(new StereoRingBuffer(1 << 20)));
+	}
+	nTx.store(channels, std::memory_order_release);
+	txActive.store(channels > 0, std::memory_order_release);
+}
+
 void NjAudio::start() {
 	if (running.exchange(true, std::memory_order_acq_rel))
 		return; // already running
 	abort.store(false, std::memory_order_release);
 	mixThread = std::thread(&NjAudio::mixLoop, this);
+	txThread = std::thread(&NjAudio::txLoop, this);
 }
 
 void NjAudio::stop() {
 	abort.store(true, std::memory_order_release);
 	if (mixThread.joinable())
 		mixThread.join();
+	if (txThread.joinable())
+		txThread.join();
 	running.store(false, std::memory_order_release);
 	std::lock_guard<std::mutex> lock(mu);
 	channels.clear();
@@ -212,6 +230,40 @@ void NjAudio::stop() {
 	for (int i = 0; i < MAX_PLAYERS; i++) slotUsed[i] = false;
 	nPoly.store(0, std::memory_order_relaxed);
 	ring.clear();
+	for (auto& c : txCapture) if (c) c->clear();
+}
+
+// Transmit: pull complete intervals from each channel's capture ring, encode, hand up.
+void NjAudio::txLoop() {
+	int serial = 1;
+	std::vector<float> interleaved;
+	while (!abort.load(std::memory_order_acquire)) {
+		int N = intervalSamples.load(std::memory_order_relaxed);
+		int n = nTx.load(std::memory_order_relaxed);
+		if (!txActive.load(std::memory_order_acquire) || N <= 0 || n <= 0 || N > (1 << 20)) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			continue;
+		}
+		double sr = sampleRate.load(std::memory_order_relaxed);
+		bool didAny = false;
+		for (int ch = 0; ch < n && ch < (int) txCapture.size(); ch++) {
+			if (!txCapture[ch] || txCapture[ch]->size() < (size_t) N)
+				continue; // not a full interval captured yet
+			interleaved.resize((size_t) N * 2);
+			for (int i = 0; i < N; i++) {
+				float l = 0.f, r = 0.f;
+				txCapture[ch]->pull(l, r);
+				interleaved[(size_t) i * 2] = l;
+				interleaved[(size_t) i * 2 + 1] = r;
+			}
+			std::vector<uint8_t> ogg = encodeOggInterval(interleaved.data(), N, 2, (int) sr, txQuality, serial++);
+			if (!ogg.empty() && onUploadInterval)
+				onUploadInterval(ch, ogg);
+			didAny = true;
+		}
+		if (!didAny)
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
 }
 
 void NjAudio::mixLoop() {
