@@ -1,6 +1,7 @@
 #include "plugin.hpp"
 #include "net/Stream.hpp"
 #include "net/RoomDirectory.hpp"
+#include "ClickableLed.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -106,9 +107,7 @@ struct Ninjam : Module {
 		float p = peak.load(std::memory_order_relaxed);
 		p = amp > p ? amp : p * std::exp(-args.sampleTime / 0.15f);
 		peak.store(p, std::memory_order_relaxed);
-
-		bool live = stream.getState() == akozlov::StreamClient::State::Playing;
-		lights[CONNECTED_LIGHT].setBrightnessSmooth(live ? 1.f : 0.f, args.sampleTime);
+		// The connected state is shown by the clickable LED (reads stream state).
 	}
 
 	json_t* dataToJson() override {
@@ -481,7 +480,15 @@ struct NinjamWidget : ModuleWidget {
 		header->box.size = Vec(W, 30);
 		addChild(header);
 
-		addChild(createLightCentered<SmallLight<GreenLight>>(Vec(W - 13, 24), module, Ninjam::CONNECTED_LIGHT));
+		// Clickable status LED: green=listening, amber=connecting, red=stopped.
+		// Click toggles listening (stop → red).
+		ClickableLed* led = new ClickableLed;
+		led->box.size = Vec(13, 13);
+		led->box.pos = Vec(W - 13, 24).minus(led->box.size.div(2));
+		led->isLive = [module]() { return module && module->stream.getState() == akozlov::StreamClient::State::Playing; };
+		led->isPending = [module]() { return module && module->listening && module->stream.getState() != akozlov::StreamClient::State::Playing; };
+		led->onToggle = [module]() { if (module) module->toggleListen(); };
+		addChild(led);
 
 		SearchField* search = new SearchField;
 		search->box.pos = Vec(8, 48);

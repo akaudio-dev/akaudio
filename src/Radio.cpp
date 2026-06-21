@@ -1,5 +1,6 @@
 #include "plugin.hpp"
 #include "net/Stream.hpp"
+#include "ClickableLed.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -68,9 +69,7 @@ struct Radio : Module {
 		// Audio in Rack is ±5V line level.
 		outputs[LEFT_OUTPUT].setVoltage(l * 5.f);
 		outputs[RIGHT_OUTPUT].setVoltage(r * 5.f);
-
-		bool live = stream.getState() == akozlov::StreamClient::State::Playing;
-		lights[PLAYING_LIGHT].setBrightnessSmooth(live ? 1.f : 0.f, args.sampleTime);
+		// The playing state is shown by the clickable LED (reads stream state).
 	}
 
 	json_t* dataToJson() override {
@@ -318,7 +317,15 @@ struct RadioWidget : ModuleWidget {
 		choice->box.size = mm2px(Vec(35.64, 8.0));
 		addChild(choice);
 
-		addChild(createLightCentered<MediumLight<GreenLight>>(mm2px(Vec(20.32, 56.0)), module, Radio::PLAYING_LIGHT));
+		// Clickable status LED: green=playing, amber=connecting, red=stopped.
+		// Click toggles playback (stop → red).
+		ClickableLed* led = new ClickableLed;
+		led->box.size = mm2px(Vec(5.5, 5.5));
+		led->box.pos = mm2px(Vec(20.32, 56.0)).minus(led->box.size.div(2));
+		led->isLive = [module]() { return module && module->stream.getState() == akozlov::StreamClient::State::Playing; };
+		led->isPending = [module]() { return module && module->playing && module->stream.getState() != akozlov::StreamClient::State::Playing; };
+		led->onToggle = [module]() { if (module) module->togglePlay(); };
+		addChild(led);
 
 		addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(13.0, 100.0)), module, Radio::LEFT_OUTPUT));
 		addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(27.0, 100.0)), module, Radio::RIGHT_OUTPUT));
