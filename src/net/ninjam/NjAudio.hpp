@@ -63,6 +63,9 @@ public:
 	long intervalsDecoded() const { return nDecoded.load(std::memory_order_relaxed); }
 	long decodeErrors() const { return nErrors.load(std::memory_order_relaxed); }
 	int activeChannels() const { return nActive.load(std::memory_order_relaxed); }
+	// Active-channel boundaries where no interval was ready -> a full interval of silence
+	// (the "one-interval dropout"). Should stay 0 once the prebuffer margin is adequate.
+	long missedIntervals() const { return nMissed.load(std::memory_order_relaxed); }
 
 private:
 	struct Channel {
@@ -101,6 +104,7 @@ private:
 	std::atomic<long> nDecoded{0};
 	std::atomic<long> nErrors{0};
 	std::atomic<int> nActive{0};
+	std::atomic<long> nMissed{0};
 
 	static const size_t kMaxReady = 4; // cap per-channel backlog (drop oldest)
 };

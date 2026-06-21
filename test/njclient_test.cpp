@@ -71,7 +71,8 @@ int main(int argc, char** argv) {
 	long long heard = 0, underruns = 0;
 	double nextReport = 2.0, elapsed = 0.0;
 
-	auto deadline = std::chrono::steady_clock::now() +
+	auto start = std::chrono::steady_clock::now();
+	auto deadline = start +
 	                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
 	                    std::chrono::duration<double>(seconds));
 	while (std::chrono::steady_clock::now() < deadline && client.isRunning()) {
@@ -88,12 +89,14 @@ int main(int argc, char** argv) {
 			}
 		}
 		std::this_thread::sleep_for(std::chrono::milliseconds(blockMs));
-		elapsed += blockMs / 1000.0;
+		// Real wall-clock elapsed (not the sum of sleeps, which lags by the per-iteration
+		// pull work and makes the run look like it drops early).
+		elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 		if (elapsed >= nextReport) {
 			nextReport += 2.0;
-			std::printf("[audio] t=%4.1fs intervals=%ld errors=%ld peak=%.3f heardFrames=%lld underruns=%lld\n",
+			std::printf("[audio] t=%4.1fs intervals=%ld errors=%ld missed=%ld peak=%.3f heardFrames=%lld underruns=%lld\n",
 			            elapsed, client.intervalsDecoded(), client.decodeErrors(),
-			            peak, heard, underruns);
+			            client.missedIntervals(), peak, heard, underruns);
 		}
 	}
 

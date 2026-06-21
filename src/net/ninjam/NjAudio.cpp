@@ -1,5 +1,6 @@
 #include "NjAudio.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 
@@ -180,6 +181,8 @@ void NjAudio::mixLoop() {
 		float gl, gr;
 	};
 	bool started = false;
+	bool sawReady = false;
+	std::chrono::steady_clock::time_point firstReady;
 
 	while (!abort.load(std::memory_order_acquire)) {
 		int N = intervalSamples.load(std::memory_order_relaxed);
@@ -188,8 +191,13 @@ void NjAudio::mixLoop() {
 			continue;
 		}
 
-		// Prebuffer: don't start the cadence until at least one channel has audio ready,
-		// so we begin aligned to real interval data rather than emitting a silent interval.
+		// Prebuffer before starting the cadence. We don't begin the instant the first
+		// interval decodes — that leaves zero timing margin, so every interval's
+		// decode/network jitter races the play boundary and an occasional miss plays a
+		// full interval of silence. Holding a small margin (a fraction of an interval,
+		// capped) shifts every boundary that much later than decode-completion, so the
+		// next interval is always ready in time. Costs that much extra startup lead-in,
+		// not a whole interval. (Mirrors the canonical client's config_play_prebuffer.)
 		if (!started) {
 			bool any = false;
 			{
@@ -199,6 +207,16 @@ void NjAudio::mixLoop() {
 						if (!iv.empty()) { any = true; break; }
 			}
 			if (!any) {
+				sawReady = false; // reset margin timer until audio actually shows up
+				std::this_thread::sleep_for(std::chrono::milliseconds(15));
+				continue;
+			}
+			auto now = std::chrono::steady_clock::now();
+			if (!sawReady) { sawReady = true; firstReady = now; }
+			double sr = sampleRate.load(std::memory_order_relaxed);
+			double intervalSec = sr > 0 ? (double) N / sr : 0.0;
+			double margin = std::min(2.0, intervalSec * 0.4); // play-prebuffer headroom
+			if (std::chrono::duration<double>(now - firstReady).count() < margin) {
 				std::this_thread::sleep_for(std::chrono::milliseconds(15));
 				continue;
 			}
@@ -223,6 +241,9 @@ void NjAudio::mixLoop() {
 				if (!ch.ready.empty()) {
 					s.buf = std::move(ch.ready.front());
 					ch.ready.pop_front();
+				} else if (ch.active) {
+					// Active channel but nothing decoded in time -> a one-interval silence.
+					nMissed.fetch_add(1, std::memory_order_relaxed);
 				}
 				srcs.push_back(std::move(s));
 				++it;

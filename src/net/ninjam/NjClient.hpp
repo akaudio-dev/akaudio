@@ -59,6 +59,7 @@ public:
 	// Diagnostics.
 	long intervalsDecoded() const { return audio.intervalsDecoded(); }
 	long decodeErrors() const { return audio.decodeErrors(); }
+	long missedIntervals() const { return audio.missedIntervals(); }
 
 private:
 	void run(std::string host, int port, std::string user, std::string pass);

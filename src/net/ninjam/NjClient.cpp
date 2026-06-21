@@ -67,6 +67,8 @@ bool NjClient::sendAll(const std::vector<uint8_t>& data) {
 		ssize_t n = ::send(fd, data.data() + off, data.size() - off, 0);
 		if (n > 0) { off += (size_t)n; continue; }
 		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) continue;
+		if (!abort.load(std::memory_order_acquire))
+			log(std::string("send error: ") + std::strerror(errno));
 		return false; // closed or error
 	}
 	return true;
@@ -74,13 +76,20 @@ bool NjClient::sendAll(const std::vector<uint8_t>& data) {
 
 int NjClient::recvExact(uint8_t* buf, size_t n, bool allowIdle) {
 	int fd = sock.load(std::memory_order_acquire);
-	if (fd < 0) return 0;
+	if (fd < 0) {
+		if (!abort.load(std::memory_order_acquire)) log("recvExact: socket invalid (fd<0)");
+		return 0;
+	}
 	size_t got = 0;
 	while (got < n) {
 		if (abort.load(std::memory_order_acquire)) return 0;
 		ssize_t r = ::recv(fd, buf + got, n - got, 0);
 		if (r > 0) { got += (size_t)r; continue; }
-		if (r == 0) return 0; // peer closed
+		if (r == 0) {
+			if (!abort.load(std::memory_order_acquire))
+				log("disconnect: server closed connection (recv=0)");
+			return 0; // peer closed
+		}
 		if (errno == EAGAIN || errno == EWOULDBLOCK) {
 			// SO_RCVTIMEO fired. At a frame boundary with nothing buffered, let the
 			// caller service keepalives; mid-frame, keep waiting for the rest.
@@ -88,6 +97,8 @@ int NjClient::recvExact(uint8_t* buf, size_t n, bool allowIdle) {
 			continue;
 		}
 		if (errno == EINTR) continue;
+		if (!abort.load(std::memory_order_acquire))
+			log(std::string("disconnect: recv error: ") + std::strerror(errno));
 		return 0; // error
 	}
 	return 1;
@@ -170,12 +181,15 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 		time_t now = ::time(nullptr);
 		int interval = keepAliveSecs > 0 ? keepAliveSecs : 3;
 		if (now - lastSend >= interval) {
-			if (!sendAll(buildKeepAlive())) break;
+			if (!sendAll(buildKeepAlive())) {
+				log("disconnect: keepalive send failed");
+				break;
+			}
 			lastSend = now;
 		}
 
 		int r = recvFrame(type, payload);
-		if (r == 0) break;  // closed / error
+		if (r == 0) break;  // closed / error (recvExact logs the real reason when not aborting)
 		if (r == -2) continue; // idle (recv timed out); loop services keepalive above
 		switch (type) {
 			case MSG_SERVER_AUTH_CHALLENGE: {
@@ -187,9 +201,9 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 				if (ch.protoVer < PROTO_VER_MIN || ch.protoVer >= PROTO_VER_MAX)
 					log("warning: server protocol version 0x" + std::to_string(ch.protoVer));
 				keepAliveSecs = ch.keepAliveSecs();
-				log("challenge: caps=" + std::to_string(ch.serverCaps) +
-				    " keepalive=" + std::to_string(keepAliveSecs) + "s" +
-				    (ch.hasLicense ? " (license agreement present)" : ""));
+				// log("challenge: caps=" + std::to_string(ch.serverCaps) +
+				//     " keepalive=" + std::to_string(keepAliveSecs) + "s" +
+				//     (ch.hasLicense ? " (license agreement present)" : "")); // normal
 
 				unsigned char hash[20];
 				passHash(wireUser, pass, ch.challenge, hash);
@@ -211,8 +225,8 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 					goto done;
 				}
 				authed = true;
-				log("auth ok" + (ar.errmsg.empty() ? std::string() : " as \"" + ar.errmsg + "\"") +
-				    " maxchan=" + std::to_string(ar.maxchan));
+				// log("auth ok" + (ar.errmsg.empty() ? std::string() : " as \"" + ar.errmsg + "\"") +
+				//     " maxchan=" + std::to_string(ar.maxchan)); // normal
 				// Announce ourselves with no broadcast channels (listen-only).
 				if (!sendAll(buildSetChannelInfoListenOnly())) {
 					setState(State::Error, "Send channel info failed");
@@ -243,7 +257,7 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 						if (u.active) mask |= (1u << u.channelIdx);
 						else mask &= ~(1u << u.channelIdx);
 						if (mask != before) {
-							log("subscribe " + u.user + " chanmask=" + std::to_string(mask));
+							// log("subscribe " + u.user + " chanmask=" + std::to_string(mask)); // normal
 							sendAll(buildSetUserMask(u.user, mask));
 							lastSend = ::time(nullptr);
 						}
