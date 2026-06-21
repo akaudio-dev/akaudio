@@ -92,14 +92,25 @@ control, more complexity. Not needed to "hear the jam."
 
 ## 6. Phases & milestones
 
-- **Phase 0 — scaffolding.** Vendor `stb_vorbis.h`; create `net/ninjam/` skeleton; SHA1 helper
-  over OpenSSL; a standalone harness `test/njclient_test.cpp` (like `play_test`, links the
-  ninjam layer + stb_vorbis + OpenSSL, no Rack).
-- **Phase 1 — connect + auth.** TCP connect, challenge → SHA1 → reply, `SET_CHANNEL_INFO`,
-  keepalive. **Milestone:** stay connected to a real server (ninbot/ninjamer) without being
-  dropped; harness logs server caps. *Validate the auth bytes against a local canonical server.*
-- **Phase 2 — metadata.** Parse `CONFIG_CHANGE` + `USERINFO_CHANGE`. **Milestone:** harness
-  prints live tempo + roster matching the room's web view.
+- **Phase 0 — scaffolding. DONE 2026-06-21.** Vendored `src/dep/stb_vorbis.c` (v1.22,
+  public-domain, nothings/stb @ f056911) the same way as `dr_mp3.h` — single header +
+  `stb_vorbis_impl.cpp` (one TU, `STB_VORBIS_NO_STDIO`, pushdata API) + `stb_vorbis_impl.hpp`
+  (header-only view). Decided **vendor, not submodule** (stb is a monorepo; keeps `git clone`
+  self-contained). Created `src/net/ninjam/` (`NjProtocol.{hpp,cpp}`, `NjClient.{hpp,cpp}`),
+  SHA1 via OpenSSL **EVP** (non-deprecated; libRack exports it, harness links `dep/lib/libcrypto.a`),
+  and `test/njclient_test.cpp` (no Rack).
+- **Phase 1 — connect + auth. DONE 2026-06-21.** `NjProtocol` does framing (`[type u8][size u32 LE]`),
+  `passHash = SHA1(SHA1(user:pass)+challenge8)`, `buildAuthUser`/`buildSetChannelInfoListenOnly`
+  (one filler channel, flags 0x80)/`buildKeepAlive`. `NjClient` (own socket, background thread,
+  `SO_RCVTIMEO`-based keepalive, no 2nd thread) connects → challenge → reply → SET_CHANNEL_INFO.
+  **Corrections to TODO/§5:** client caps = **1** (bit0); **bit1 is NOT required** (stale mpb.h
+  comment; both njclient and JamTaba send caps=1). Empty password = anonymous (`anonymous[:name]`,
+  for public servers); non-empty = registered login (username as-is). **Verified:** real
+  registered login on the private test server, stayed connected, keepalive working.
+- **Phase 2 — metadata. DONE 2026-06-21.** Parse `CONFIG_CHANGE` (BPM/BPI) + `USERINFO_CHANGE`
+  (per-rec roster) → `onConfig`/`onUserInfo` callbacks. **Verified:** harness printed live tempo
+  (80 BPM / 16 BPI) from the test server. Roster path in place but not yet exercised with a 2nd
+  user (empty test room) — re-check against a populated public room (ninbot) when convenient.
 - **Phase 3 — decode the mix (the meat).** Interval reassembly by GUID, `stb_vorbis` decode,
   per-user resample + mix, interval-paced push to the ring. **Milestone:** hear the real
   multi-user jam in Rack; A/B against the Icecast mix of the same room. Harness verifies decoded
