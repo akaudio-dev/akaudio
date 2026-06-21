@@ -336,9 +336,10 @@ struct RadioWidget : ModuleWidget {
 			module->togglePlay();
 		}));
 
-		menu->addChild(createSubmenuItem("Stations", module->stationName, [this](Menu* sub) {
-			appendStationMenu(sub, this);
-		}));
+		// No "Stations" submenu here: the on-panel picker (StationChoice) is the
+		// nice one (artwork + ✓current), and Rack's native "Preset ▸" menu already
+		// lists the same factory presets grouped by category — so a context-menu
+		// copy would just duplicate "Preset ▸".
 
 		menu->addChild(createMenuLabel("Stream URL (http(s):// MP3 or AAC):"));
 		UrlField* field = new UrlField;
