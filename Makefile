@@ -12,6 +12,14 @@ LDFLAGS +=
 # Add all source files (recursively, so src/net/*.cpp etc. are included) to the build
 SOURCES += $(shell find src -name '*.cpp')
 
+# Vendored libogg + libvorbis (for OGG Vorbis ENCODING — transmit). Compiled directly
+# from source (self-contained; no separate `make dep`). stb_vorbis still handles decode.
+# Exclude the standalone tools (barkmel/psytune/tone, which have their own main()) and the
+# unused vorbisfile decode-convenience layer.
+FLAGS += -I src/dep/libogg/include -I src/dep/libvorbis/include -I src/dep/libvorbis/lib
+SOURCES += src/dep/libogg/src/bitwise.c src/dep/libogg/src/framing.c
+SOURCES += $(filter-out %barkmel.c %psytune.c %tone.c %vorbisfile.c, $(wildcard src/dep/libvorbis/lib/*.c))
+
 # Add files to the ZIP package when running `make dist`
 DISTRIBUTABLES += res
 DISTRIBUTABLES += $(wildcard LICENSE*)
