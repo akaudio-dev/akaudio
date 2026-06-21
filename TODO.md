@@ -149,10 +149,12 @@ Both GPL → fine to port into our GPL-3 plugin (keep the protocol classes pure 
 **Wire format** (verified in canonical source): frame = `[type u8][size u32 LE][payload]`. Strings are
 NUL-terminated UTF-8; ints little-endian. `netmsg.cpp` (framing), `mpb.cpp` (message build/parse).
 
-**Auth (verified `njclient.cpp:1069`): SHA1, NOT MD5.** `passhash = SHA1("user:pass")`,
-`response = SHA1(passhash + challenge8)`. Anonymous = username `anonymous[:displayname]`, empty pass.
-(The JamTaba study-agent wrongly said "MD5 XOR challenge" — ignore that; the Cockos source is truth.
-We already link OpenSSL via libRack, so SHA1 is free.)
+**Auth (SHA1): `passhash = SHA1("user:pass")`, `response = SHA1(passhash + challenge8)`.**
+Anonymous = username `anonymous[:displayname]`, empty pass. Confirmed in BOTH references — canonical
+`njclient.cpp:1069` and JamTaba `ClientMessages.cpp:47,68-76` (SHA1(user+":"+pass) then
+SHA1(that+challenge)). JamTaba is a proven, widely-used client and matches the spec exactly. (An
+earlier study-agent summary mis-stated this as "MD5 XOR challenge" — that was the agent's error, NOT
+JamTaba's code, which is correct.) We already link OpenSSL via libRack, so SHA1 is free.
 
 **Handshake:** TCP connect → recv `SERVER_AUTH_CHALLENGE(0x00)` (challenge8, server_caps [keepalive secs
 in bits 8-15], proto_ver 0x00020000, optional license) → send `CLIENT_AUTH_USER(0x80)` (response20,
