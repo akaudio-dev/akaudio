@@ -43,11 +43,12 @@ verified live `audio/mpeg`. Per-station favicons fetched from radio-browser wher
 (ambinature, mynoise, broadcastify); Blue Mars/rain fall back to the ♪ placeholder.
 
 Still wanted (next):
-- **HLS support** → unlocks **BBC Radio 4** (Shipping Forecast!) + most modern spoken/public
-  radio (they're HLS-only now). Plan: detect `#EXTM3U`/`.m3u8` → poll the media playlist →
-  minimal **MPEG-TS demux** → existing `AacDecoder` (so **macOS-only**, like our AAC). User
-  chose to ship the non-HLS ambient set first; HLS is the next focused build.
-  Example URL (BBC R4): `http://as-hls-ww-live.akamaized.net/pool_55057080/live/ww/bbc_radio_fourfm/...norewind.m3u8`.
+- **HLS support — DONE 2026-06-20** (macOS). `net/Hls.{hpp,cpp}` + `StreamClient::runHls`: poll
+  the media playlist, fetch `.ts` segments, `tsExtractAdts` (MPEG-TS → AAC-ADTS) → `AacDecoder`.
+  Shipped `BBC/`: **BBC Radio 4** + R4 Extra (verified decoding via the harness). World Service
+  uses a different HLS host/segment format (fMP4?) and FAILED the TS demux — parked. Possible
+  next: fMP4/`mp4a` segment support (for WS and others), master-playlist variant selection by
+  bitrate, and an HLS unit test.
 - **ATC** — partly solved via **Broadcastify** aviation feeds (plain MP3, same infra as the
   scanner feeds). Shipped `ATC/`: Anchorage Center (ARTCC, feed 31716) + Aeroparque Tower (45890),
   both verified playing (ATC is push-to-talk, so confirm over a ~30 s window — short windows hit

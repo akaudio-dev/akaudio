@@ -14,6 +14,7 @@
 #include "Tls.hpp"
 #include "AacDecoder.hpp"
 #include "Http.hpp"
+#include "Hls.hpp"
 
 namespace akozlov {
 
@@ -192,6 +193,13 @@ void StreamClient::run(std::string url) {
 		if (next.empty() || next == url)
 			break;
 		url = next;
+	}
+
+	// HLS (.m3u8) is segment-based, not a continuous stream — handle separately.
+	if (looksLikeHls(url, "")) {
+		runHls(url);
+		running.store(false, std::memory_order_release);
+		return;
 	}
 
 	Url u = parseUrl(url);
@@ -456,6 +464,124 @@ cleanup:
 			::close(f);
 	}
 	running.store(false, std::memory_order_release);
+}
+
+void StreamClient::runHls(std::string url) {
+	if (!AacDecoder::available()) {
+		setStatus(State::Error, "HLS needs macOS");
+		return;
+	}
+
+	// If this is a master playlist, resolve to a (the first) variant media URL.
+	std::string mediaUrl = url;
+	{
+		std::string body;
+		if (httpGet(url, body)) {
+			HlsPlaylist pl = parseHlsPlaylist(body);
+			if (pl.isMaster && !pl.variant.empty())
+				mediaUrl = urlJoin(url, pl.variant);
+		}
+	}
+
+	// AAC decoder → linear resample → ring, identical to the direct-AAC path.
+	AacDecoder dec;
+	double phase = 0.0;
+	float prevL = 0.f, prevR = 0.f;
+	bool havePrev = false;
+	bool aborted = false;
+	auto pushFrame = [&](float l, float r) -> bool {
+		while (!ring.push(l, r)) {
+			if (!running.load(std::memory_order_acquire) || abort.load(std::memory_order_acquire))
+				return false;
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+		return true;
+	};
+	dec.onPCM = [&](const float* pcm, int frames, double srcRate) {
+		double engineRate = sampleRate.load(std::memory_order_relaxed);
+		if (engineRate < 1.0)
+			engineRate = 44100.0;
+		const double step = srcRate / engineRate;
+		for (int i = 0; i < frames; i++) {
+			float curL = pcm[2 * i + 0];
+			float curR = pcm[2 * i + 1];
+			if (!havePrev) {
+				prevL = curL;
+				prevR = curR;
+				havePrev = true;
+				continue;
+			}
+			while (phase < 1.0) {
+				if (!pushFrame(prevL + (curL - prevL) * (float) phase, prevR + (curR - prevR) * (float) phase)) {
+					aborted = true;
+					return;
+				}
+				phase += step;
+			}
+			phase -= 1.0;
+			prevL = curL;
+			prevR = curR;
+		}
+	};
+	if (!dec.init()) {
+		setStatus(State::Error, "AAC init failed");
+		return;
+	}
+
+	setStatus(State::Connecting, "Buffering\xe2\x80\xa6");
+	bool playing = false;
+	bool haveLast = false;
+	uint64_t lastSeq = 0;
+
+	while (running.load(std::memory_order_acquire) && !abort.load(std::memory_order_acquire) && !aborted) {
+		std::string body;
+		if (!httpGet(mediaUrl, body)) {
+			setStatus(State::Error, "Playlist fetch failed");
+			break;
+		}
+		HlsPlaylist pl = parseHlsPlaylist(body);
+
+		int played = 0;
+		for (size_t k = 0; k < pl.segments.size(); k++) {
+			uint64_t seq = pl.mediaSequence + k;
+			if (haveLast && seq <= lastSeq)
+				continue; // already played
+			if (!running.load(std::memory_order_acquire) || abort.load(std::memory_order_acquire))
+				break;
+
+			std::string seg;
+			if (!httpGet(urlJoin(mediaUrl, pl.segments[k]), seg))
+				continue;
+			std::string adts;
+			tsExtractAdts(reinterpret_cast<const uint8_t*>(seg.data()), seg.size(), adts);
+			if (!playing) {
+				setStatus(State::Playing, "Playing (HLS)");
+				playing = true;
+			}
+			dec.feed(reinterpret_cast<const uint8_t*>(adts.data()), adts.size()); // paces via backpressure
+			lastSeq = seq;
+			haveLast = true;
+			played++;
+			if (aborted)
+				break;
+		}
+
+		if (pl.endList)
+			break; // VOD ended
+
+		if (played == 0) {
+			// No new segments yet; wait ~half a target-duration and re-poll.
+			int ms = (int) (pl.targetDuration * 500.0);
+			if (ms < 200)
+				ms = 200;
+			for (int slept = 0; slept < ms && running.load(std::memory_order_acquire) && !abort.load(std::memory_order_acquire); slept += 50)
+				std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		}
+	}
+
+	dec.close();
+	if (!abort.load(std::memory_order_acquire) && state.load(std::memory_order_acquire) != State::Error)
+		setStatus(State::Stopped, "Stream ended");
 }
 
 } // namespace akozlov

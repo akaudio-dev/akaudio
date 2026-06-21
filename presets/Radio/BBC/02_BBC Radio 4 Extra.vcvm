@@ -1,0 +1,12 @@
+{
+  "plugin": "akozlov",
+  "model": "Radio",
+  "version": "2.0.0",
+  "params": [],
+  "data": {
+    "url": "http://as-hls-ww-live.akamaized.net/pool_26173715/live/ww/bbc_radio_four_extra/bbc_radio_four_extra.isml/bbc_radio_four_extra-audio=320000.norewind.m3u8",
+    "stationName": "BBC Radio 4 Extra",
+    "icon": "stations/bbc.png",
+    "playing": true
+  }
+}
