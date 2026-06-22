@@ -28,6 +28,8 @@ struct Ninjam : Module {
 		PARAMS_LEN
 	};
 	enum InputId {
+		LEFT_INPUT,  // transmit: poly L (channel n = local instrument chain n)
+		RIGHT_INPUT, // transmit: poly R
 		INPUTS_LEN
 	};
 	enum OutputId {
@@ -95,6 +97,12 @@ struct Ninjam : Module {
 	// thread, read by the UI thread; relaxed atomics are fine for a meter.
 	std::atomic<float> peak{0.f};
 
+	// ---- Transmit ----
+	bool transmitting = false;  // TX enable (persisted)
+	float txQuality = 0.5f;     // encoder VBR quality (persisted; ~190 kbps)
+	int txDeclared = -1;        // last channel count declared to the server (UI thread)
+	std::atomic<bool> txArmed{false}; // capture armed at a downbeat (aligns intervals)
+
 	// Declared last so it is destroyed FIRST: NjClient::~ joins its threads before the
 	// state its callbacks touch (roster/atomics above) is torn down.
 	akaudio::nj::NjClient njclient;
@@ -110,6 +118,8 @@ struct Ninjam : Module {
 		configOutput(RESET_OUTPUT, "Reset (interval downbeat)");
 		configOutput(RUN_OUTPUT, "Run (high while playing)");
 		configOutput(PHASE_OUTPUT, "Interval phase (0-10V ramp)");
+		configInput(LEFT_INPUT, "Transmit L (poly: channel = your channel)");
+		configInput(RIGHT_INPUT, "Transmit R (poly: channel = your channel)");
 		float sr = APP->engine->getSampleRate();
 		stream.setSampleRate(sr);
 		njclient.setSampleRate(sr);
@@ -261,6 +271,24 @@ struct Ninjam : Module {
 		saveGlobal(); // remember this server/creds for the next fresh module
 	}
 
+	// Declare/update our broadcast channels to match the TX toggle + connected poly input.
+	// Called from the widget step() (UI thread); does no per-sample / audio-thread work.
+	void syncTransmit() {
+		int desired = 0;
+		if (transmitting && joined && inputs[LEFT_INPUT].isConnected()) {
+			int nin = inputs[LEFT_INPUT].getChannels();
+			if (nin < 1) nin = 1;
+			desired = std::min(nin, akaudio::nj::NjAudio::MAX_TX);
+		}
+		if (desired != txDeclared) {
+			std::vector<std::string> names;
+			for (int i = 0; i < desired; i++) names.push_back("ch" + std::to_string(i + 1));
+			njclient.setTransmit(names, txQuality);
+			txDeclared = desired;
+			if (desired == 0) txArmed.store(false, std::memory_order_relaxed);
+		}
+	}
+
 	void addServerHistory(const std::string& hp) {
 		if (hp.empty())
 			return;
@@ -385,6 +413,9 @@ struct Ninjam : Module {
 				beatPhase -= spb;
 				beatIndex = (beatIndex + 1) % bpiL;
 				currentBeat.store(beatIndex, std::memory_order_relaxed);
+				// Arm transmit capture on the downbeat so uploaded intervals align to the grid.
+				if (beatIndex == 0 && transmitting && joined && txDeclared > 0)
+					txArmed.store(true, std::memory_order_relaxed);
 				clickEnv = 1.f; // arm a click; accent the downbeat
 				clickPhase = 0.f;
 				clickFreq = (beatIndex == 0) ? 1760.f : 880.f;
@@ -417,6 +448,17 @@ struct Ninjam : Module {
 			beatIndex = 0;
 			clickEnv = 0.f;
 		}
+		// ---- Transmit capture: feed input frames once armed at a downbeat ----
+		if (transmitting && joined && txDeclared > 0 && txArmed.load(std::memory_order_relaxed)
+		        && inputs[LEFT_INPUT].isConnected()) {
+			bool rConn = inputs[RIGHT_INPUT].isConnected();
+			for (int ch = 0; ch < txDeclared; ch++) {
+				float il = inputs[LEFT_INPUT].getPolyVoltage(ch) * 0.2f;  // ±5V -> ±1
+				float ir = rConn ? inputs[RIGHT_INPUT].getPolyVoltage(ch) * 0.2f : il;
+				njclient.captureFrame(ch, il, ir);
+			}
+		}
+
 		outputs[CLICK_OUTPUT].setVoltage(click * 5.f);
 		outputs[CLOCK_OUTPUT].setVoltage(clockG);
 		outputs[RESET_OUTPUT].setVoltage(resetG);
@@ -436,6 +478,8 @@ struct Ninjam : Module {
 		json_object_set_new(root, "joinPass", json_string(joinPass.c_str()));
 		json_object_set_new(root, "joined", json_boolean(joined));
 		json_object_set_new(root, "clickEnabled", json_boolean(clickEnabled));
+		json_object_set_new(root, "transmitting", json_boolean(transmitting));
+		json_object_set_new(root, "txQuality", json_real(txQuality));
 		json_t* hist = json_array();
 		for (const std::string& s : serverHistory)
 			json_array_append_new(hist, json_string(s.c_str()));
@@ -464,6 +508,10 @@ struct Ninjam : Module {
 			joined = json_boolean_value(j);
 		if (json_t* j = json_object_get(root, "clickEnabled"))
 			clickEnabled = json_boolean_value(j);
+		if (json_t* j = json_object_get(root, "transmitting"))
+			transmitting = json_boolean_value(j);
+		if (json_t* j = json_object_get(root, "txQuality"))
+			txQuality = (float) json_real_value(j);
 		serverHistory.clear();
 		if (json_t* hist = json_object_get(root, "serverHistory")) {
 			size_t i;
@@ -550,7 +598,17 @@ struct ServerField : TabField {
 static const char* FONT_BOLD = "res/fonts/Nunito-Bold.ttf";
 static const char* FONT_REG = "res/fonts/DejaVuSans.ttf";
 
-static const NVGcolor NINJAM_GREEN = nvgRGB(0x3a, 0xd0, 0x6a);
+static const NVGcolor NINJAM_GREEN = nvgRGB(0x2a, 0xa8, 0x55); // accent (darker for light panel)
+
+// ---- Light "Fundamental-style" theme ----
+static const NVGcolor TH_TEXT     = nvgRGB(0x24, 0x27, 0x2b); // primary dark text
+static const NVGcolor TH_TEXT_DIM = nvgRGB(0x5c, 0x61, 0x68); // secondary text
+static const NVGcolor TH_CARD     = nvgRGB(0xd6, 0xd9, 0xdc); // card/well fill (vs panel)
+static const NVGcolor TH_CARD_BD  = nvgRGBA(0x00, 0x00, 0x00, 0x26); // card/well border
+static const NVGcolor TH_WELL     = nvgRGBA(0x00, 0x00, 0x00, 0x10); // recessed area fill
+static const NVGcolor TH_OUT_PLATE= nvgRGB(0x26, 0x29, 0x2e); // black output plate
+static const NVGcolor TH_OUT_TEXT = nvgRGB(0xe9, 0xec, 0xef); // label on a black plate
+static const NVGcolor TH_IN_BD    = nvgRGB(0x3c, 0x6f, 0xc4); // input frame stroke (blue)
 
 static std::string lower(std::string s) {
 	for (char& c : s)
@@ -699,7 +757,7 @@ struct RoomRow : OpaqueWidget {
 		if (active || hovered) {
 			nvgBeginPath(vg);
 			nvgRoundedRect(vg, 2, 1, w - 4, h - 2, 3);
-			nvgFillColor(vg, active ? nvgRGBA(0x3a, 0xd0, 0x6a, 0x2e) : nvgRGBA(0xff, 0xff, 0xff, 0x12));
+			nvgFillColor(vg, active ? nvgRGBA(0x2a, 0xa8, 0x55, 0x2e) : nvgRGBA(0x00, 0x00, 0x00, 0x0c));
 			nvgFill(vg);
 		}
 		if (active) {
@@ -710,14 +768,14 @@ struct RoomRow : OpaqueWidget {
 		}
 
 		// Name (clipped before the icons).
-		drawTxt(vg, FONT_BOLD, pad, ICON_CY, 12.5f,
-			active ? nvgRGB(0x8a, 0xf0, 0xaa) : nvgRGB(0xe6, 0xea, 0xee),
+		drawTxt(vg, FONT_BOLD, pad, ICON_CY, 14.5f,
+			active ? nvgRGB(0x1c, 0x7a, 0x3e) : TH_TEXT,
 			room.name, NVG_ALIGN_LEFT, w - pad - 52);
 
 		// Listen (speaker) + Join (enter) icons.
-		const NVGcolor dim = nvgRGBA(0xff, 0xff, 0xff, 0x44);
-		const NVGcolor off = nvgRGBA(0xff, 0xff, 0xff, 0x1c);
-		const NVGcolor bright = nvgRGB(0xe6, 0xea, 0xee);
+		const NVGcolor dim = nvgRGBA(0x00, 0x00, 0x00, 0x55);
+		const NVGcolor off = nvgRGBA(0x00, 0x00, 0x00, 0x22);
+		const NVGcolor bright = TH_TEXT;
 		NVGcolor lc = !Ninjam::roomCanListen(room) ? off
 		            : listening ? NINJAM_GREEN
 		            : hoveredIcon == 1 ? bright : dim;
@@ -731,7 +789,7 @@ struct RoomRow : OpaqueWidget {
 		std::string cap = room.userMax > 0 ? string::f("%d/%d", room.userCount, room.userMax)
 		                                    : string::f("%d", room.userCount);
 		std::string stats = string::f("%d BPM \xc2\xb7 %d BPI \xc2\xb7 ", room.bpm, room.bpi) + cap + " here";
-		drawTxt(vg, FONT_REG, pad, 26, 9.5f, nvgRGB(0x8a, 0x97, 0xa3), stats, NVG_ALIGN_LEFT, w - 2 * pad);
+		drawTxt(vg, FONT_REG, pad, 26, 11.5f, TH_TEXT_DIM, stats, NVG_ALIGN_LEFT, w - 2 * pad);
 
 		// Players line (if anyone is in the room).
 		if (!room.users.empty()) {
@@ -741,7 +799,7 @@ struct RoomRow : OpaqueWidget {
 					who += ", ";
 				who += room.users[i];
 			}
-			drawTxt(vg, FONT_REG, pad, 39, 8.5f, nvgRGB(0x5f, 0xb0, 0x77), who, NVG_ALIGN_LEFT, w - 2 * pad);
+			drawTxt(vg, FONT_REG, pad, 39, 10.f, nvgRGB(0x3a, 0x86, 0x55), who, NVG_ALIGN_LEFT, w - 2 * pad);
 		}
 	}
 };
@@ -799,15 +857,17 @@ struct RoomBrowser : ui::ScrollWidget {
 	void draw(const DrawArgs& args) override {
 		nvgBeginPath(args.vg);
 		nvgRoundedRect(args.vg, 0, 0, box.size.x, box.size.y, 4);
-		nvgFillColor(args.vg, nvgRGBA(0, 0, 0, 0x40));
+		nvgFillColor(args.vg, TH_WELL);
 		nvgFill(args.vg);
+		nvgStrokeColor(args.vg, TH_CARD_BD);
+		nvgStroke(args.vg);
 		ui::ScrollWidget::draw(args);
 		if (container->children.empty()) {
 			std::string msg = (module && module->directory.loading())
 				? "Loading rooms\xe2\x80\xa6"
 				: "No rooms \xe2\x80\x94 try Refresh";
-			drawTxt(args.vg, FONT_REG, box.size.x / 2, box.size.y / 2, 11.f,
-				nvgRGB(0x6a, 0x77, 0x83), msg, NVG_ALIGN_CENTER);
+			drawTxt(args.vg, FONT_REG, box.size.x / 2, box.size.y / 2, 13.f,
+				TH_TEXT_DIM, msg, NVG_ALIGN_CENTER);
 		}
 	}
 };
@@ -839,12 +899,41 @@ struct RefreshButton : OpaqueWidget {
 		NVGcontext* vg = args.vg;
 		nvgBeginPath(vg);
 		nvgRoundedRect(vg, 0, 0, box.size.x, box.size.y, 3);
-		nvgFillColor(vg, hovered ? nvgRGBA(0xff, 0xff, 0xff, 0x1c) : nvgRGBA(0xff, 0xff, 0xff, 0x0e));
+		nvgFillColor(vg, hovered ? nvgRGBA(0x00, 0x00, 0x00, 0x18) : TH_WELL);
 		nvgFill(vg);
+		nvgStrokeColor(vg, TH_CARD_BD);
+		nvgStroke(vg);
 		bool loading = module && module->directory.loading();
-		drawTxt(vg, FONT_REG, box.size.x / 2, box.size.y / 2, 14.f,
-			loading ? nvgRGBA(0x3a, 0xd0, 0x6a, 0x88) : nvgRGB(0xcf, 0xd8, 0xe0),
-			"\xe2\x86\xbb", NVG_ALIGN_CENTER); // ↻
+		drawTxt(vg, FONT_REG, box.size.x / 2, box.size.y / 2, 16.f,
+			loading ? NINJAM_GREEN : TH_TEXT, "\xe2\x86\xbb", NVG_ALIGN_CENTER); // ↻
+	}
+};
+
+// Transmit enable: lights green when broadcasting our input channels.
+struct TxToggle : OpaqueWidget {
+	Ninjam* module = nullptr;
+	bool hovered = false;
+	void onEnter(const EnterEvent& e) override { hovered = true; OpaqueWidget::onEnter(e); }
+	void onLeave(const LeaveEvent& e) override { hovered = false; OpaqueWidget::onLeave(e); }
+	void onButton(const ButtonEvent& e) override {
+		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT) {
+			if (module) module->transmitting = !module->transmitting;
+			e.consume(this);
+			return;
+		}
+		OpaqueWidget::onButton(e);
+	}
+	void draw(const DrawArgs& args) override {
+		bool on = module && module->transmitting;
+		nvgBeginPath(args.vg);
+		nvgRoundedRect(args.vg, 0, 0, box.size.x, box.size.y, 3);
+		nvgFillColor(args.vg, on ? (hovered ? nvgRGB(0x33, 0xbe, 0x62) : NINJAM_GREEN)
+		                         : (hovered ? nvgRGBA(0x00, 0x00, 0x00, 0x18) : TH_WELL));
+		nvgFill(args.vg);
+		nvgStrokeColor(args.vg, TH_CARD_BD);
+		nvgStroke(args.vg);
+		drawTxt(args.vg, FONT_BOLD, box.size.x / 2, box.size.y / 2, 11.f,
+			on ? nvgRGB(0xff, 0xff, 0xff) : TH_TEXT_DIM, "TX", NVG_ALIGN_CENTER);
 	}
 };
 
@@ -888,7 +977,7 @@ struct MetronomeToggle : OpaqueWidget {
 	void draw(const DrawArgs& args) override {
 		bool on = module && module->clickEnabled;
 		NVGcolor col = on ? NINJAM_GREEN
-		             : hovered ? nvgRGB(0xe6, 0xea, 0xee) : nvgRGBA(0xff, 0xff, 0xff, 0x55);
+		             : hovered ? TH_TEXT : nvgRGBA(0x00, 0x00, 0x00, 0x55);
 		drawMetronomeIcon(args.vg, box.size.x / 2, box.size.y / 2, std::min(box.size.x, box.size.y), col);
 	}
 };
@@ -906,12 +995,14 @@ struct TransportBlock : Widget {
 		const float w = box.size.x, h = box.size.y;
 		nvgBeginPath(vg);
 		nvgRoundedRect(vg, 0, 0, w, h, 4);
-		nvgFillColor(vg, nvgRGBA(0, 0, 0, 0x40));
+		nvgFillColor(vg, TH_WELL);
 		nvgFill(vg);
+		nvgStrokeColor(vg, TH_CARD_BD);
+		nvgStroke(vg);
 		std::string jam = module->jamStatusText();
 		const bool joined = !jam.empty();
-		drawTxt(vg, FONT_REG, 8, h / 2, 9.5f,
-			joined ? NINJAM_GREEN : nvgRGB(0x7a, 0x86, 0x92),
+		drawTxt(vg, FONT_BOLD, 8, h / 2, 11.5f,
+			joined ? nvgRGB(0x1c, 0x7a, 0x3e) : TH_TEXT_DIM,
 			joined ? jam : module->directory.status(), NVG_ALIGN_LEFT, w - 8 - 44);
 	}
 };
@@ -936,17 +1027,17 @@ struct JamView : Widget {
 			if (tw < 1.f) tw = 1.f;
 			for (int b = 0; b < bpi; b++) {
 				float x = pad + b * (tw + gap);
-				NVGcolor c = (b == cur) ? nvgRGB(0x7a, 0xf0, 0xa0)
+				NVGcolor c = (b == cur) ? nvgRGB(0x2a, 0xc8, 0x66)
 				           : (cur >= 0 && b < cur) ? NINJAM_GREEN
 				           : (b == 0) ? nvgRGB(0xc8, 0x9a, 0x3a)
-				           : nvgRGBA(0xff, 0xff, 0xff, 0x22);
+				           : nvgRGBA(0x00, 0x00, 0x00, 0x1a);
 				nvgBeginPath(vg);
 				nvgRoundedRect(vg, x, ty, tw, th, 2.f);
 				nvgFillColor(vg, c);
 				nvgFill(vg);
 			}
 			if (cur >= 0)
-				drawTxt(vg, FONT_REG, pad, 58, 9.f, nvgRGB(0x8a, 0x97, 0xa3),
+				drawTxt(vg, FONT_REG, pad, 58, 11.f, TH_TEXT_DIM,
 					string::f("beat %d / %d", cur + 1, bpi), NVG_ALIGN_LEFT);
 		}
 
@@ -954,7 +1045,7 @@ struct JamView : Widget {
 		const float by = 70.f, bh = 12.f;
 		nvgBeginPath(vg);
 		nvgRoundedRect(vg, pad, by, avail, bh, 3.f);
-		nvgFillColor(vg, nvgRGBA(0, 0, 0, 0x55));
+		nvgFillColor(vg, nvgRGBA(0, 0, 0, 0x1e));
 		nvgFill(vg);
 		if (phase > 0.f) {
 			nvgBeginPath(vg);
@@ -964,17 +1055,17 @@ struct JamView : Widget {
 		}
 
 		// Roster (who's here), one per line.
-		drawTxt(vg, FONT_BOLD, pad, 100, 9.f, nvgRGB(0xb6, 0xc0, 0xca), "IN THE ROOM", NVG_ALIGN_LEFT);
+		drawTxt(vg, FONT_BOLD, pad, 100, 11.f, TH_TEXT_DIM, "IN THE ROOM", NVG_ALIGN_LEFT);
 		std::string who = module->rosterText();
 		if (who.empty()) {
-			drawTxt(vg, FONT_REG, pad, 116, 9.f, nvgRGB(0x6a, 0x77, 0x83), "(just you)", NVG_ALIGN_LEFT);
+			drawTxt(vg, FONT_REG, pad, 116, 11.f, TH_TEXT_DIM, "(just you)", NVG_ALIGN_LEFT);
 		} else {
 			float y = 116.f;
 			size_t start = 0;
 			while (start < who.size() && y < box.size.y - 6) {
 				size_t comma = who.find(", ", start);
 				std::string name = who.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
-				drawTxt(vg, FONT_REG, pad, y, 9.5f, nvgRGB(0x9f, 0xd0, 0xb0), name, NVG_ALIGN_LEFT, avail);
+				drawTxt(vg, FONT_REG, pad, y, 11.5f, nvgRGB(0x1c, 0x7a, 0x3e), name, NVG_ALIGN_LEFT, avail);
 				y += 14.f;
 				if (comma == std::string::npos) break;
 				start = comma + 2;
@@ -1018,10 +1109,12 @@ struct ServerDropdownButton : OpaqueWidget {
 	void draw(const DrawArgs& args) override {
 		nvgBeginPath(args.vg);
 		nvgRoundedRect(args.vg, 0, 0, box.size.x, box.size.y, 3);
-		nvgFillColor(args.vg, hovered ? nvgRGBA(0xff, 0xff, 0xff, 0x1c) : nvgRGBA(0xff, 0xff, 0xff, 0x0e));
+		nvgFillColor(args.vg, hovered ? nvgRGBA(0x00, 0x00, 0x00, 0x18) : TH_WELL);
 		nvgFill(args.vg);
-		drawTxt(args.vg, FONT_REG, box.size.x / 2, box.size.y / 2, 11.f,
-			nvgRGB(0xcf, 0xd8, 0xe0), "\xe2\x96\xbe", NVG_ALIGN_CENTER); // ▾
+		nvgStrokeColor(args.vg, TH_CARD_BD);
+		nvgStroke(args.vg);
+		drawTxt(args.vg, FONT_REG, box.size.x / 2, box.size.y / 2, 13.f,
+			TH_TEXT, "\xe2\x96\xbe", NVG_ALIGN_CENTER); // ▾
 	}
 };
 
@@ -1049,14 +1142,13 @@ struct JoinButton : OpaqueWidget {
 		bool connected = module && module->joined;
 		nvgBeginPath(args.vg);
 		nvgRoundedRect(args.vg, 0, 0, box.size.x, box.size.y, 3);
-		// Green = JOIN (connect); amber/red = LEAVE (disconnect).
+		// Green = JOIN (connect); red/orange = LEAVE (disconnect). Solid fills on light panel.
 		nvgFillColor(args.vg, connected
-			? (hovered ? nvgRGBA(0xe0, 0x6a, 0x3a, 0x88) : nvgRGBA(0xe0, 0x6a, 0x3a, 0x55))
-			: (hovered ? nvgRGBA(0x3a, 0xd0, 0x6a, 0x66) : nvgRGBA(0x3a, 0xd0, 0x6a, 0x3a)));
+			? (hovered ? nvgRGB(0xd8, 0x5a, 0x2e) : nvgRGB(0xc8, 0x52, 0x2a))
+			: (hovered ? nvgRGB(0x33, 0xbe, 0x62) : NINJAM_GREEN));
 		nvgFill(args.vg);
-		drawTxt(args.vg, FONT_BOLD, box.size.x / 2, box.size.y / 2, 10.f,
-			connected ? nvgRGB(0xff, 0xe4, 0xd6) : nvgRGB(0xdf, 0xf6, 0xe6),
-			connected ? "LEAVE" : "JOIN", NVG_ALIGN_CENTER);
+		drawTxt(args.vg, FONT_BOLD, box.size.x / 2, box.size.y / 2, 12.f,
+			nvgRGB(0xff, 0xff, 0xff), connected ? "LEAVE" : "JOIN", NVG_ALIGN_CENTER);
 	}
 };
 
@@ -1121,31 +1213,58 @@ struct JoinCard : Widget {
 		NVGcontext* vg = args.vg;
 		nvgBeginPath(vg);
 		nvgRoundedRect(vg, 0, 0, box.size.x, box.size.y, 4);
-		nvgFillColor(vg, nvgRGBA(0xff, 0xff, 0xff, 0x08));
+		nvgFillColor(vg, TH_CARD);
 		nvgFill(vg);
-		drawTxt(vg, FONT_BOLD, 8, 11, 9.5f, nvgRGB(0xb6, 0xc0, 0xca), "Private server:", NVG_ALIGN_LEFT);
+		nvgStrokeColor(vg, TH_CARD_BD);
+		nvgStroke(vg);
+		drawTxt(vg, FONT_BOLD, 8, 11, 11.5f, TH_TEXT, "Private server:", NVG_ALIGN_LEFT);
 		Widget::draw(args);
 	}
 };
 
-// Footer output level meter (peak with fast release) + divider.
-// Output section: peak meter bar + labels for the two jack rows. The jacks themselves
-// are added on top by NinjamWidget at matching x fractions / row y's (see kRowA/kRowB).
+// Bottom I/O section: TRANSMIT IN row + peak meter + the two output rows. The jacks are
+// added on top by NinjamWidget at matching x fractions / row y's. Label rows sit ~12 px
+// above each jack row (IN ~26, audio ~68, CV ~104 in local coords).
 struct OutputSection : Widget {
 	Ninjam* module = nullptr;
-	// Jack x positions (fractions of width) — kept in sync with NinjamWidget's addOutput.
-	static constexpr float xMainL = 0.16f, xMainR = 0.38f, xPolyL = 0.62f, xPolyR = 0.84f;
+	// L/R pairs grouped close together; the two stereo groups separated by a gap.
+	static constexpr float xInL = 0.16f, xInR = 0.30f, xTx = 0.74f;          // transmit-in pair
+	static constexpr float xMainL = 0.16f, xMainR = 0.30f, xPolyL = 0.62f, xPolyR = 0.76f; // out pairs
 	static constexpr float xClick = 0.12f, xClock = 0.30f, xReset = 0.50f, xRun = 0.70f, xPhase = 0.88f;
+	// A rounded jack-group box. `plate` = solid black output plate (white labels);
+	// otherwise a light recessed well with a colored border (inputs).
+	static void groupBox(NVGcontext* vg, float w, float xL, float xR, float top, float h,
+	                     bool plate, NVGcolor border) {
+		const float jh = 13.f, pad = 5.f;
+		float x = w * xL - jh - pad, rx = w * xR + jh + pad;
+		nvgBeginPath(vg);
+		nvgRoundedRect(vg, x, top, rx - x, h, 4.f);
+		nvgFillColor(vg, plate ? TH_OUT_PLATE : TH_WELL);
+		nvgFill(vg);
+		nvgStrokeColor(vg, border);
+		nvgStrokeWidth(vg, 1.f);
+		nvgStroke(vg);
+	}
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
 		const float w = box.size.x;
-		const NVGcolor lab = nvgRGB(0x8a, 0x97, 0xa3);
+		// Plates are 44 tall: label near the top (~local+5 from plate top), jack centered
+		// lower, leaving ~9 px of dark space below. Jack rows are 52 apart (set in the widget).
 
-		// Peak meter bar (top of the section).
-		const float bx = 12, by = 4, bw = w - 24, bh = 6;
+		// Label sits high in the plate; the jack is low (only ~4 px of plate below it),
+		// matching Fundamental's OUT boxes. Jack local rows: IN 36, audio 88, CV 140.
+
+		// INPUT group: light well, blue border, dark bold labels.
+		groupBox(vg, w, xInL, xInR, 6, 46, false, TH_IN_BD);
+		drawTxt(vg, FONT_BOLD, w * xInL - 18, 15, 11.f, TH_IN_BD, "IN", NVG_ALIGN_LEFT);
+		drawTxt(vg, FONT_BOLD, w * xInL, 15, 11.f, TH_TEXT_DIM, "L", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xInR, 15, 11.f, TH_TEXT_DIM, "R", NVG_ALIGN_CENTER);
+
+		// Peak meter (thin bar in the gap between IN and OUT).
+		const float bx = 12, by = 54, bw = w - 24, bh = 4;
 		nvgBeginPath(vg);
-		nvgRoundedRect(vg, bx, by, bw, bh, 3);
-		nvgFillColor(vg, nvgRGBA(0, 0, 0, 0x66));
+		nvgRoundedRect(vg, bx, by, bw, bh, 2);
+		nvgFillColor(vg, nvgRGBA(0, 0, 0, 0x33));
 		nvgFill(vg);
 		float p = module ? module->peak.load(std::memory_order_relaxed) : 0.f;
 		p = std::max(0.f, std::min(1.f, p));
@@ -1154,25 +1273,26 @@ struct OutputSection : Widget {
 			           : p > 0.80f ? nvgRGB(0xe0, 0xc0, 0x3a)
 			                       : NINJAM_GREEN;
 			nvgBeginPath(vg);
-			nvgRoundedRect(vg, bx, by, bw * p, bh, 3);
+			nvgRoundedRect(vg, bx, by, bw * p, bh, 2);
 			nvgFillColor(vg, c);
 			nvgFill(vg);
 		}
 
-		// Row A: MAIN / PLAYERS group headers + per-jack L/R labels (jacks at local y=40).
-		drawTxt(vg, FONT_REG, w * 0.27f, 20, 8.f, lab, "MAIN", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_REG, w * 0.73f, 20, 8.f, lab, "PLAYERS (poly)", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_REG, w * xMainL, 30, 7.5f, lab, "L", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_REG, w * xMainR, 30, 7.5f, lab, "R", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_REG, w * xPolyL, 30, 7.5f, lab, "L", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_REG, w * xPolyR, 30, 7.5f, lab, "R", NVG_ALIGN_CENTER);
+		// OUTPUTS: black plates with bold white labels.
+		const NVGcolor bd = nvgRGBA(0, 0, 0, 0x55);
+		groupBox(vg, w, xMainL, xMainR, 58, 46, true, bd);
+		groupBox(vg, w, xPolyL, xPolyR, 58, 46, true, bd);
+		drawTxt(vg, FONT_BOLD, w * xMainL, 67, 11.f, TH_OUT_TEXT, "MAIN L", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xMainR, 67, 11.f, TH_OUT_TEXT, "MAIN R", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xPolyL, 67, 11.f, TH_OUT_TEXT, "PLY L", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xPolyR, 67, 11.f, TH_OUT_TEXT, "PLY R", NVG_ALIGN_CENTER);
 
-		// Row B: sync out labels (jacks at local y=78).
-		drawTxt(vg, FONT_REG, w * xClick, 67, 7.f, lab, "CLICK", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_REG, w * xClock, 67, 7.f, lab, "CLOCK", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_REG, w * xReset, 67, 7.f, lab, "RESET", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_REG, w * xRun, 67, 7.f, lab, "RUN", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_REG, w * xPhase, 67, 7.f, lab, "PHASE", NVG_ALIGN_CENTER);
+		groupBox(vg, w, xClick, xPhase, 110, 46, true, bd);
+		drawTxt(vg, FONT_BOLD, w * xClick, 119, 9.5f, TH_OUT_TEXT, "CLICK", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xClock, 119, 9.5f, TH_OUT_TEXT, "CLOCK", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xReset, 119, 9.5f, TH_OUT_TEXT, "RESET", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xRun, 119, 9.5f, TH_OUT_TEXT, "RUN", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xPhase, 119, 9.5f, TH_OUT_TEXT, "PHASE", NVG_ALIGN_CENTER);
 	}
 };
 
@@ -1244,8 +1364,8 @@ struct NinjamWidget : ModuleWidget {
 		RoomBrowser* b = new RoomBrowser;
 		b->module = module;
 		b->search = s;
-		b->box.pos = Vec(6, 152);
-		b->box.size = Vec(W - 12, 100);
+		b->box.pos = Vec(6, 150);
+		b->box.size = Vec(W - 12, 44);
 		addChild(b);
 		browser = b;
 
@@ -1253,19 +1373,28 @@ struct NinjamWidget : ModuleWidget {
 		JamView* jv = new JamView;
 		jv->module = module;
 		jv->box.pos = Vec(6, 50);
-		jv->box.size = Vec(W - 12, 202);
+		jv->box.size = Vec(W - 12, 144);
 		addChild(jv);
 		jamView = jv;
 
-		// Output section (always): meter + labels; jacks on top.
-		const float oy = 255;
+		// Bottom I/O section (always): TRANSMIT IN row + meter + output rows.
+		const float oy = 200;
 		OutputSection* out = new OutputSection;
 		out->module = module;
 		out->box.pos = Vec(0, oy);
-		out->box.size = Vec(W, 96);
+		out->box.size = Vec(W, 162);
 		addChild(out);
 
-		const float rowA = oy + 43, rowB = oy + 81; // ~y=298 (audio), ~y=336 (CV) -> Fundamental-like bottom margin
+		const float rowIn = oy + 36, rowA = oy + 88, rowB = oy + 140; // 52px apart; low in plates
+		// TRANSMIT IN (poly) + TX enable.
+		addInput(createInputCentered<PJ301MPort>(Vec(W * OutputSection::xInL, rowIn), module, Ninjam::LEFT_INPUT));
+		addInput(createInputCentered<PJ301MPort>(Vec(W * OutputSection::xInR, rowIn), module, Ninjam::RIGHT_INPUT));
+		TxToggle* txBtn = new TxToggle;
+		txBtn->module = module;
+		txBtn->box.size = Vec(40, 18);
+		txBtn->box.pos = Vec(W * OutputSection::xTx - 20, rowIn - 9);
+		addChild(txBtn);
+		// Outputs: MAIN L/R + PLAYERS poly L/R, then CLICK/CLOCK/RESET/RUN/PHASE.
 		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xMainL, rowA), module, Ninjam::LEFT_OUTPUT));
 		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xMainR, rowA), module, Ninjam::RIGHT_OUTPUT));
 		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xPolyL, rowA), module, Ninjam::POLY_L_OUTPUT));
@@ -1277,7 +1406,7 @@ struct NinjamWidget : ModuleWidget {
 		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xPhase, rowB), module, Ninjam::PHASE_OUTPUT));
 	}
 
-	// Swap between the connect UI (disconnected) and the jam view (connected) each frame.
+	// Swap connect UI <-> jam view each frame; keep our broadcast channels in sync.
 	void step() override {
 		bool joined = nj && nj->joined;
 		if (joinCard) joinCard->visible = !joined;
@@ -1286,6 +1415,7 @@ struct NinjamWidget : ModuleWidget {
 		if (browser) browser->visible = !joined;
 		if (jamView) jamView->visible = joined;
 		if (metro) metro->visible = joined;
+		if (nj) nj->syncTransmit();
 		ModuleWidget::step();
 	}
 
@@ -1301,6 +1431,18 @@ struct NinjamWidget : ModuleWidget {
 			if (module->isActive()) module->stopAll();
 		}));
 		menu->addChild(createBoolPtrMenuItem("Metronome click", "", &module->clickEnabled));
+
+		menu->addChild(new MenuSeparator);
+		menu->addChild(createMenuLabel("Transmit quality"));
+		struct QOpt { const char* label; float q; };
+		static const QOpt qopts[] = {
+			{"Low (~135 kbps)", 0.3f}, {"Medium (~190 kbps)", 0.5f}, {"High (~235 kbps)", 0.7f}};
+		for (const QOpt& o : qopts) {
+			float q = o.q;
+			menu->addChild(createCheckMenuItem(o.label, "",
+				[module, q]() { return std::fabs(module->txQuality - q) < 0.01f; },
+				[module, q]() { module->txQuality = q; module->txDeclared = -1; })); // re-declare w/ new q
+		}
 	}
 };
 

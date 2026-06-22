@@ -78,6 +78,8 @@ private:
 
 class NjAudio {
 public:
+	static const int MAX_TX = 4; // max local broadcast channels
+
 	NjAudio() = default;
 	~NjAudio();
 
@@ -159,7 +161,6 @@ private:
 	std::atomic<bool> abort{false};
 
 	// Transmit state.
-	static const int MAX_TX = 4; // max local broadcast channels
 	std::atomic<bool> txActive{false};
 	std::atomic<int> nTx{0};
 	float txQuality = 0.5f;
