@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="40.64mm" height="128.5mm" viewBox="0 0 40.64 128.5">
-  <rect width="40.64" height="128.5" fill="#3a2b1d"/>
-  <text x="20.32" y="14" fill="#efe7df" font-family="sans-serif" font-size="6" font-weight="bold" text-anchor="middle">RADIO</text>
-  <text x="20.32" y="93" fill="#c8b39f" font-family="sans-serif" font-size="3.2" text-anchor="middle">L          R</text>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f3f4f5"/>
+      <stop offset="1" stop-color="#dfe1e3"/>
+    </linearGradient>
+  </defs>
+  <rect width="40.64" height="128.5" fill="url(#bg)"/>
+  <rect width="40.64" height="14" fill="#cfd2d6"/>
 </svg>

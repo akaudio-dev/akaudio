@@ -6,6 +6,35 @@
 #include <cctype>
 #include <functional>
 
+// Fundamental-style theme (matches the Ninjam panel): silver panel, dark labels.
+static const char* RADIO_FONT_BOLD = "res/fonts/Nunito-Bold.ttf";
+static const NVGcolor RADIO_TEXT     = nvgRGB(0x24, 0x27, 0x2b); // primary dark text
+static const NVGcolor RADIO_TEXT_DIM = nvgRGB(0x6a, 0x72, 0x7a); // secondary labels
+
+static void radioText(NVGcontext* vg, const char* fontRes, float x, float y, float size,
+		NVGcolor col, const char* s) {
+	std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system(fontRes));
+	if (!font || font->handle < 0)
+		return;
+	nvgFontFaceId(vg, font->handle);
+	nvgFontSize(vg, size);
+	nvgFillColor(vg, col);
+	nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+	nvgText(vg, x, y, s, NULL);
+}
+
+// Panel title ("RADIO") in the header strip + L/R labels above the jacks. Drawn in code
+// because Rack's panel renderer (NanoSVG) ignores <text>.
+struct RadioDecor : Widget {
+	void draw(const DrawArgs& args) override {
+		NVGcontext* vg = args.vg;
+		radioText(vg, RADIO_FONT_BOLD, mm2px(20.32f), mm2px(7.2f), 13.f, RADIO_TEXT, "RADIO");
+		radioText(vg, RADIO_FONT_BOLD, mm2px(13.0f), mm2px(92.5f), 11.f, RADIO_TEXT_DIM, "L");
+		radioText(vg, RADIO_FONT_BOLD, mm2px(27.0f), mm2px(92.5f), 11.f, RADIO_TEXT_DIM, "R");
+		Widget::draw(args);
+	}
+};
+
 // Streaming internet radio (Icecast/HTTP MP3) source. Audio is fetched and decoded
 // on a background thread (net/Stream.hpp) and pulled here on the audio thread.
 struct Radio : Module {
@@ -113,21 +142,63 @@ struct UrlField : ui::TextField {
 	}
 };
 
-// Draw a bundled plugin image (png) into the rect, rounded, scaled to fill.
-// No-op if iconPath is empty or the image fails to load. Cached by Rack.
-static void drawStationArt(NVGcontext* vg, const std::string& iconPath,
+// Draw a bundled plugin image (png) into the rect, rounded, scaled to fill. Returns
+// false (drawing nothing) if iconPath is empty or the image fails to load, so callers
+// can fall back to a synthesized avatar. Cached by Rack.
+static bool drawStationArt(NVGcontext* vg, const std::string& iconPath,
 		float x, float y, float w, float h, float radius) {
 	if (iconPath.empty())
-		return;
+		return false;
 	std::shared_ptr<window::Image> img =
 		APP->window->loadImage(asset::plugin(pluginInstance, "res/" + iconPath));
 	if (!img || img->handle < 0)
-		return;
+		return false;
 	NVGpaint paint = nvgImagePattern(vg, x, y, w, h, 0.f, img->handle, 1.f);
 	nvgBeginPath(vg);
 	nvgRoundedRect(vg, x, y, w, h, radius);
 	nvgFillPaint(vg, paint);
 	nvgFill(vg);
+	return true;
+}
+
+// Synthesize an avatar from the station name: 1-2 initials on a name-hashed color.
+// Used when a station has no (usable) favicon, so we never ship hand-made art.
+static void drawSynthIcon(NVGcontext* vg, float x, float y, float w, float h,
+		const std::string& name, float radius) {
+	// Initials: first letter of up to two words.
+	std::string initials;
+	bool atWordStart = true;
+	for (char c : name) {
+		if (std::isalnum((unsigned char) c)) {
+			if (atWordStart) {
+				initials += (char) std::toupper((unsigned char) c);
+				if (initials.size() >= 2)
+					break;
+			}
+			atWordStart = false;
+		} else {
+			atWordStart = true;
+		}
+	}
+	if (initials.empty())
+		initials = "?";
+	// FNV-1a hash of the name -> palette index (stable per station).
+	unsigned hash = 2166136261u;
+	for (char c : name)
+		hash = (hash ^ (unsigned char) c) * 16777619u;
+	static const NVGcolor palette[] = {
+		nvgRGB(0x3b, 0x6f, 0xc4), nvgRGB(0xc0, 0x39, 0x2b), nvgRGB(0x2e, 0x8b, 0x57),
+		nvgRGB(0xd3, 0x7e, 0x1f), nvgRGB(0x7d, 0x3c, 0x98), nvgRGB(0x16, 0x8a, 0x7e),
+		nvgRGB(0x33, 0x4a, 0x8a), nvgRGB(0xb0, 0x3a, 0x6e), nvgRGB(0x6d, 0x4c, 0x41),
+		nvgRGB(0x44, 0x5a, 0x64), nvgRGB(0x2f, 0x7d, 0x32), nvgRGB(0xb5, 0x6a, 0x16),
+	};
+	NVGcolor bg = palette[hash % (sizeof(palette) / sizeof(palette[0]))];
+	nvgBeginPath(vg);
+	nvgRoundedRect(vg, x, y, w, h, radius);
+	nvgFillColor(vg, bg);
+	nvgFill(vg);
+	radioText(vg, RADIO_FONT_BOLD, x + w / 2, y + h / 2 + 1.f, h * 0.40f,
+		nvgRGBA(0xff, 0xff, 0xff, 0xee), initials.c_str());
 }
 
 // Strip a leading "NN_" ordering prefix (Rack's preset-sort convention).
@@ -166,7 +237,8 @@ struct StationItem : MenuItem {
 		MenuItem::draw(args); // native highlight + left-aligned text
 		const float s = box.size.y - 6.f;
 		const float ix = box.size.x - s - 5.f, iy = 3.f;
-		drawStationArt(args.vg, icon, ix, iy, s, s, 3.f);
+		if (!drawStationArt(args.vg, icon, ix, iy, s, s, 3.f))
+			drawSynthIcon(args.vg, ix, iy, s, s, text, 3.f);
 		if (current) {
 			nvgBeginPath(args.vg);
 			nvgRoundedRect(args.vg, ix - 1.f, iy - 1.f, s + 2.f, s + 2.f, 4.f);
@@ -236,15 +308,59 @@ static void appendStationDir(Menu* menu, ModuleWidget* mw, const std::string& di
 		menu->addChild(createMenuLabel("No stations"));
 }
 
-// Bundled stations = factory presets in presets/Radio/, grouped by subfolder.
+// Bundled stations = factory presets in presets/Radio/, grouped by subfolder; plus any
+// stations the user has saved (user preset dir, shown under "Your stations").
 static void appendStationMenu(Menu* menu, ModuleWidget* mw) {
 	std::string dir = mw->model->getFactoryPresetDirectory();
-	if (!system::isDirectory(dir)) {
+	if (system::isDirectory(dir))
+		appendStationDir(menu, mw, dir);
+	else
 		menu->addChild(createMenuLabel("No stations bundled"));
-		return;
+	std::string userDir = mw->model->getUserPresetDirectory();
+	if (system::isDirectory(userDir) && !system::getEntries(userDir).empty()) {
+		menu->addChild(new MenuSeparator);
+		menu->addChild(createMenuLabel("Your stations"));
+		appendStationDir(menu, mw, userDir);
 	}
-	appendStationDir(menu, mw, dir);
 }
+
+// Save the current URL as a user station (a preset in the user preset dir, so it shows
+// under "Your stations" and Rack's native Preset menu). Icon is left empty -> synthesized.
+static void saveUserStation(ModuleWidget* mw, const std::string& name, const std::string& url) {
+	if (name.empty() || url.empty())
+		return;
+	std::string dir = mw->model->getUserPresetDirectory();
+	system::createDirectories(dir);
+	json_t* root = json_object();
+	json_object_set_new(root, "plugin", json_string("akaudio"));
+	json_object_set_new(root, "model", json_string("Radio"));
+	json_object_set_new(root, "version", json_string("2.0.0"));
+	json_object_set_new(root, "params", json_array());
+	json_t* data = json_object();
+	json_object_set_new(data, "url", json_string(url.c_str()));
+	json_object_set_new(data, "stationName", json_string(name.c_str()));
+	json_object_set_new(data, "icon", json_string(""));
+	json_object_set_new(data, "playing", json_true());
+	json_object_set_new(root, "data", data);
+	std::string safe;
+	for (char c : name)
+		safe += (c == '/' || c == ':' || c == '\\') ? '-' : c;
+	json_dump_file(root, (dir + "/" + safe + ".vcvm").c_str(), JSON_INDENT(2));
+	json_decref(root);
+}
+
+// Name field in the "Add station" submenu: Enter saves the current URL under this name.
+struct StationNameField : ui::TextField {
+	ModuleWidget* mw = nullptr;
+	Radio* module = nullptr;
+	void onAction(const ActionEvent& e) override {
+		if (mw && module && !text.empty() && !module->url.empty()) {
+			saveUserStation(mw, text, module->url);
+			module->stationName = text; // reflect on panel
+		}
+		ui::TextField::onAction(e);
+	}
+};
 
 // On-panel station artwork (the current station's bundled logo).
 struct StationArt : Widget {
@@ -252,23 +368,27 @@ struct StationArt : Widget {
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
 		const float w = box.size.x, h = box.size.y;
-		// Recessed frame.
+		const std::string name = module ? module->stationName : "";
+		// Backing (shows through transparent favicons).
 		nvgBeginPath(vg);
 		nvgRoundedRect(vg, 0, 0, w, h, 5);
-		nvgFillColor(vg, nvgRGBA(0, 0, 0, 0x66));
+		nvgFillColor(vg, nvgRGBA(0, 0, 0, 0x22));
 		nvgFill(vg);
-		if (module && !module->icon.empty()) {
-			drawStationArt(vg, module->icon, 0, 0, w, h, 5);
-		}
-		else {
-			// Placeholder ♪ when there's no art (e.g. a custom URL).
-			std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system("res/fonts/DejaVuSans.ttf"));
-			if (font && font->handle >= 0) {
-				nvgFontFaceId(vg, font->handle);
-				nvgFontSize(vg, h * 0.5f);
-				nvgFillColor(vg, nvgRGBA(0xff, 0xff, 0xff, 0x33));
-				nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-				nvgText(vg, w / 2, h / 2, "\xe2\x99\xaa", NULL); // ♪
+		bool drew = module && drawStationArt(vg, module->icon, 0, 0, w, h, 5);
+		if (!drew) {
+			if (name.empty()) {
+				// No station picked yet: faint ♪ placeholder.
+				std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system("res/fonts/DejaVuSans.ttf"));
+				if (font && font->handle >= 0) {
+					nvgFontFaceId(vg, font->handle);
+					nvgFontSize(vg, h * 0.5f);
+					nvgFillColor(vg, nvgRGBA(0x24, 0x27, 0x2b, 0x55));
+					nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+					nvgText(vg, w / 2, h / 2, "\xe2\x99\xaa", NULL); // ♪
+				}
+			} else {
+				// Station with no usable favicon: synthesize an avatar from its name.
+				drawSynthIcon(vg, 0, 0, w, h, name, 5);
 			}
 		}
 	}
@@ -297,23 +417,32 @@ struct RadioWidget : ModuleWidget {
 		setModule(module);
 		setPanel(createPanel(asset::plugin(pluginInstance, "res/Radio.svg")));
 
+		// Code-drawn title + L/R labels (NanoSVG won't render <text>).
+		RadioDecor* decor = new RadioDecor;
+		decor->box.size = box.size;
+		addChild(decor);
+
 		addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
 		addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
 		addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 		addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
-		// Station artwork (visual identification).
+		// Station artwork (visual identification) — square, below the header strip.
 		StationArt* art = new StationArt;
 		art->module = module;
-		art->box.pos = mm2px(Vec(5.32, 11.0));
-		art->box.size = mm2px(Vec(30.0, 30.0));
+		art->box.pos = mm2px(Vec(6.32, 15.0));
+		art->box.size = mm2px(Vec(28.0, 28.0));
 		addChild(art);
 
-		// On-panel station picker (click to choose a bundled station).
+		// On-panel station picker (click to choose a bundled station). Dark text on a
+		// subtle recessed field, matching the silver Fundamental theme.
 		StationChoice* choice = new StationChoice;
 		choice->module = module;
 		choice->mw = this;
-		choice->box.pos = mm2px(Vec(2.5, 44.0));
+		choice->color = RADIO_TEXT;
+		choice->bgColor = nvgRGBA(0, 0, 0, 0x14);
+		choice->fontPath = asset::system("res/fonts/DejaVuSans.ttf");
+		choice->box.pos = mm2px(Vec(2.5, 45.0));
 		choice->box.size = mm2px(Vec(35.64, 8.0));
 		addChild(choice);
 
@@ -355,6 +484,27 @@ struct RadioWidget : ModuleWidget {
 		field->text = module->url;
 		field->placeholder = "http://host:port/path";
 		menu->addChild(field);
+
+		// --- Add your own stations ---
+		menu->addChild(new MenuSeparator);
+		ModuleWidget* mw = this;
+		menu->addChild(createSubmenuItem("Save current URL as a station\xe2\x80\xa6", "",
+			[mw, module](Menu* sub) {
+				if (module->url.empty()) {
+					sub->addChild(createMenuLabel("Set a stream URL first"));
+					return;
+				}
+				sub->addChild(createMenuLabel("Station name (Enter to save):"));
+				StationNameField* nf = new StationNameField;
+				nf->box.size.x = 200;
+				nf->mw = mw;
+				nf->module = module;
+				nf->text = module->stationName == "Custom" ? "" : module->stationName;
+				nf->placeholder = "My station";
+				sub->addChild(nf);
+			}));
+		menu->addChild(createMenuItem("Find more stations \xe2\x80\x94 radio-browser.info \xe2\x86\x97", "",
+			[]() { system::openBrowser("https://www.radio-browser.info/"); }));
 	}
 };
 

@@ -4,8 +4,8 @@
   "version": "2.0.0",
   "params": [],
   "data": {
-    "url": "https://broadcastify.cdnstream1.com/45890",
-    "stationName": "Aeroparque Tower (SABE)",
+    "url": "http://voa-ingest.akamaized.net/hls/live/2035206/151_124L/playlist.m3u8",
+    "stationName": "VOA Chinese Radio",
     "icon": "",
     "playing": true
   }

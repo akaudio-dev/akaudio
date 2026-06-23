@@ -4,8 +4,8 @@
   "version": "2.0.0",
   "params": [],
   "data": {
-    "url": "https://broadcastify.cdnstream1.com/45890",
-    "stationName": "Aeroparque Tower (SABE)",
+    "url": "http://pstnet6.shoutcastnet.com:60160/stream",
+    "stationName": "Radio Drama 99.1",
     "icon": "",
     "playing": true
   }

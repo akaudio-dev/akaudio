@@ -1,0 +1,12 @@
+{
+  "plugin": "akaudio",
+  "model": "Radio",
+  "version": "2.0.0",
+  "params": [],
+  "data": {
+    "url": "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service",
+    "stationName": "BBC World Service",
+    "icon": "stations/bbcworldservice.png",
+    "playing": true
+  }
+}

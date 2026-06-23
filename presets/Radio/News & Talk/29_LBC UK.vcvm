@@ -4,9 +4,9 @@
   "version": "2.0.0",
   "params": [],
   "data": {
-    "url": "https://broadcastify.cdnstream1.com/45890",
-    "stationName": "Aeroparque Tower (SABE)",
-    "icon": "",
+    "url": "http://media-ice.musicradio.com/LBCUK",
+    "stationName": "LBC UK",
+    "icon": "stations/lbcuk.png",
     "playing": true
   }
 }

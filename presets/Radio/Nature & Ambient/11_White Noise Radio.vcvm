@@ -4,8 +4,8 @@
   "version": "2.0.0",
   "params": [],
   "data": {
-    "url": "https://broadcastify.cdnstream1.com/45890",
-    "stationName": "Aeroparque Tower (SABE)",
+    "url": "http://uk1.internet-radio.com:8280/stream",
+    "stationName": "White Noise Radio",
     "icon": "",
     "playing": true
   }

@@ -4,9 +4,9 @@
   "version": "2.0.0",
   "params": [],
   "data": {
-    "url": "https://broadcastify.cdnstream1.com/45890",
-    "stationName": "Aeroparque Tower (SABE)",
-    "icon": "",
+    "url": "http://live02.rfi.fr/rfimonde-64.mp3",
+    "stationName": "RFI Monde",
+    "icon": "stations/rfimonde.png",
     "playing": true
   }
 }

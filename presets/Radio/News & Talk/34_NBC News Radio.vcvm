@@ -1,0 +1,12 @@
+{
+  "plugin": "akaudio",
+  "model": "Radio",
+  "version": "2.0.0",
+  "params": [],
+  "data": {
+    "url": "http://stream.revma.ihrhls.com/zc6043",
+    "stationName": "NBC News Radio",
+    "icon": "stations/nbcnewsradio.png",
+    "playing": true
+  }
+}

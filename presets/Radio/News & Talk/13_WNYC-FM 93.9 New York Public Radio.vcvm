@@ -4,8 +4,8 @@
   "version": "2.0.0",
   "params": [],
   "data": {
-    "url": "https://broadcastify.cdnstream1.com/45890",
-    "stationName": "Aeroparque Tower (SABE)",
+    "url": "https://fm939.wnyc.org/wnycfm",
+    "stationName": "WNYC-FM 93.9 New York Public Radio",
     "icon": "",
     "playing": true
   }

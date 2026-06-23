@@ -4,8 +4,8 @@
   "version": "2.0.0",
   "params": [],
   "data": {
-    "url": "https://broadcastify.cdnstream1.com/45890",
-    "stationName": "Aeroparque Tower (SABE)",
+    "url": "https://liveaudio.rte.ie/hls-radio/radio1/chunklist.m3u8",
+    "stationName": "RT\u00c9 Radio 1",
     "icon": "",
     "playing": true
   }

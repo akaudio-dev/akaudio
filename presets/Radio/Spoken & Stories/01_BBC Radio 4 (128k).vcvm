@@ -1,0 +1,12 @@
+{
+  "plugin": "akaudio",
+  "model": "Radio",
+  "version": "2.0.0",
+  "params": [],
+  "data": {
+    "url": "http://as-hls-ww-live.akamaized.net/pool_55057080/live/ww/bbc_radio_fourfm/bbc_radio_fourfm.isml/bbc_radio_fourfm-audio%3d128000.norewind.m3u8",
+    "stationName": "BBC Radio 4 (128k)",
+    "icon": "stations/bbcradio4128k.png",
+    "playing": true
+  }
+}

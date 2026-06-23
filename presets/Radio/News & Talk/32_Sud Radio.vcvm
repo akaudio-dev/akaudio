@@ -4,9 +4,9 @@
   "version": "2.0.0",
   "params": [],
   "data": {
-    "url": "https://broadcastify.cdnstream1.com/45890",
-    "stationName": "Aeroparque Tower (SABE)",
-    "icon": "",
+    "url": "https://ice.creacast.com/sudradio",
+    "stationName": "Sud Radio",
+    "icon": "stations/sudradio.png",
     "playing": true
   }
 }

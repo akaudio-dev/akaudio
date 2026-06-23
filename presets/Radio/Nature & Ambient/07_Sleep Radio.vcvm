@@ -4,8 +4,8 @@
   "version": "2.0.0",
   "params": [],
   "data": {
-    "url": "https://broadcastify.cdnstream1.com/45890",
-    "stationName": "Aeroparque Tower (SABE)",
+    "url": "http://65.109.81.84:9851/stream",
+    "stationName": "Sleep Radio",
     "icon": "",
     "playing": true
   }

@@ -1,0 +1,12 @@
+{
+  "plugin": "akaudio",
+  "model": "Radio",
+  "version": "2.0.0",
+  "params": [],
+  "data": {
+    "url": "https://st01.sslstream.dlf.de/dlf/01/128/mp3/stream.mp3?aggregator=web",
+    "stationName": "Deutschlandfunk | DLF | MP3 128k",
+    "icon": "stations/deutschlandfunkdlfmp3128.png",
+    "playing": true
+  }
+}

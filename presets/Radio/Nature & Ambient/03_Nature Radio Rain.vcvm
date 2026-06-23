@@ -4,8 +4,8 @@
   "version": "2.0.0",
   "params": [],
   "data": {
-    "url": "https://broadcastify.cdnstream1.com/45890",
-    "stationName": "Aeroparque Tower (SABE)",
+    "url": "https://maggie.torontocast.com:2020/stream/natureradiorain",
+    "stationName": "Nature Radio Rain",
     "icon": "",
     "playing": true
   }

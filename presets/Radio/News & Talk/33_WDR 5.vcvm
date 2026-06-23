@@ -1,0 +1,12 @@
+{
+  "plugin": "akaudio",
+  "model": "Radio",
+  "version": "2.0.0",
+  "params": [],
+  "data": {
+    "url": "http://wdr-wdr5-live.icecast.wdr.de/wdr/wdr5/live/mp3/128/stream.mp3",
+    "stationName": "WDR 5",
+    "icon": "stations/wdr5.png",
+    "playing": true
+  }
+}
