@@ -98,6 +98,30 @@ void NjClient::sendUploadInterval(int chidx, const std::vector<uint8_t>& ogg) {
 	} while (off < ogg.size()); // at least one WRITE (the last flag), even if ogg is empty
 }
 
+void NjClient::sendChat(const std::string& text) {
+	// UI thread. sendAll is mutex-guarded and no-ops if the socket is gone, so a send
+	// while disconnected is harmless. The server echoes our line back (with our name),
+	// so we don't append locally. "!vote bpi/bpm N" rides this public path too.
+	if (text.empty() || st.load(std::memory_order_acquire) != State::Connected)
+		return;
+	sendAll(buildChat({"MSG", text}));
+}
+
+void NjClient::sendAdmin(const std::string& command) {
+	// Server admin command (topic/bpm/bpi/kick). The server enacts it only if we hold
+	// admin rights; otherwise it is ignored. `command` is the text with the leading '/'
+	// already stripped (e.g. "bpm 120"), matching njclient/JamTaba.
+	if (command.empty() || st.load(std::memory_order_acquire) != State::Connected)
+		return;
+	sendAll(buildChat({"ADMIN", command}));
+}
+
+void NjClient::sendPrivate(const std::string& toUser, const std::string& text) {
+	if (toUser.empty() || text.empty() || st.load(std::memory_order_acquire) != State::Connected)
+		return;
+	sendAll(buildChat({"PRIVMSG", toUser, text}));
+}
+
 bool NjClient::sendAll(const std::vector<uint8_t>& data) {
 	std::lock_guard<std::mutex> lock(sendMutex); // whole NINJAM messages stay atomic on the wire
 	int fd = sock.load(std::memory_order_acquire);
@@ -303,6 +327,12 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 					}
 					if (cb.onUserInfo) cb.onUserInfo(users);
 				}
+				break;
+			}
+			case MSG_CHAT: {
+				ChatMessage cm;
+				if (parseChat(payload.data(), payload.size(), cm) && cb.onChat)
+					cb.onChat(cm);
 				break;
 			}
 			case MSG_SERVER_DOWNLOAD_BEGIN: {

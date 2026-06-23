@@ -103,6 +103,21 @@ bool parseDownloadWrite(const uint8_t* data, size_t len, DownloadWrite& out) {
 	return true;
 }
 
+bool parseChat(const uint8_t* data, size_t len, ChatMessage& out) {
+	// A run of NUL-terminated UTF-8 strings. The final field may lack its NUL, so read
+	// the remainder verbatim when no terminator is found rather than dropping it.
+	const uint8_t* p = data;
+	const uint8_t* end = data + len;
+	while (p < end) {
+		const uint8_t* s = p;
+		while (p < end && *p) p++;
+		out.parts.emplace_back((const char*)s, (size_t)(p - s));
+		if (p < end) p++; // skip NUL
+		else break;       // unterminated trailing field already captured
+	}
+	return !out.parts.empty();
+}
+
 // ---- Builders --------------------------------------------------------------------
 
 std::vector<uint8_t> frame(uint8_t type, const std::vector<uint8_t>& payload) {
@@ -185,6 +200,17 @@ std::vector<uint8_t> buildUploadWrite(const unsigned char guid[16], uint8_t flag
 	if (data && len)
 		p.insert(p.end(), data, data + len);
 	return frame(MSG_CLIENT_UPLOAD_WRITE, p);
+}
+
+std::vector<uint8_t> buildChat(const std::vector<std::string>& parts) {
+	// Each field NUL-terminated (matches njclient/JamTaba: the trailing field is
+	// terminated too).
+	std::vector<uint8_t> p;
+	for (const std::string& s : parts) {
+		p.insert(p.end(), s.begin(), s.end());
+		p.push_back(0);
+	}
+	return frame(MSG_CHAT, p);
 }
 
 std::vector<uint8_t> buildKeepAlive() {

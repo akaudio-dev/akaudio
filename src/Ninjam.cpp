@@ -93,6 +93,52 @@ struct Ninjam : Module {
 	std::mutex rosterMutex;
 	std::vector<std::string> roster; // "name" of active remote users (UI thread reads)
 
+	// ---- Chat ----
+	// Room chat log. The network thread (onChat) appends; the UI thread reads a snapshot.
+	// Guarded by chatMutex. Declared before njclient so it outlives its callbacks.
+	struct ChatLine {
+		enum Kind { Normal, System, Topic };
+		std::string who;
+		std::string text;
+		Kind kind;
+		ChatLine(std::string w, std::string t, Kind k = Normal) : who(std::move(w)), text(std::move(t)), kind(k) {}
+	};
+	std::mutex chatMutex;
+	std::vector<ChatLine> chatLog;
+	std::atomic<unsigned> chatGen{0}; // bumped on append so the UI can auto-scroll to newest
+	static constexpr size_t CHAT_MAX = 200;
+	void pushChat(const ChatLine& l) {
+		std::lock_guard<std::mutex> lk(chatMutex);
+		chatLog.push_back(l);
+		if (chatLog.size() > CHAT_MAX)
+			chatLog.erase(chatLog.begin(), chatLog.begin() + (chatLog.size() - CHAT_MAX));
+		chatGen.fetch_add(1, std::memory_order_release);
+	}
+	std::vector<ChatLine> chatSnapshot() {
+		std::lock_guard<std::mutex> lk(chatMutex);
+		return chatLog;
+	}
+	// Route a typed chat line the way JamTaba does:
+	//   /bpm /bpi /topic /kick  -> ADMIN command (server acts only if we're admin)
+	//   /msg <user> <text>      -> private message
+	//   !vote bpm|bpi <n>       -> ordinary public message (the public-server vote path)
+	//   anything else           -> ordinary public message
+	void sendChatLine(const std::string& text) {
+		if (text.empty())
+			return;
+		auto startsWith = [&](const char* p) { return text.rfind(p, 0) == 0; };
+		if (startsWith("/bpm") || startsWith("/bpi") || startsWith("/topic") || startsWith("/kick")) {
+			njclient.sendAdmin(text.substr(1)); // strip the leading '/'
+		} else if (startsWith("/msg ")) {
+			std::string rest = text.substr(5);
+			size_t sp = rest.find(' ');
+			if (sp != std::string::npos)
+				njclient.sendPrivate(rest.substr(0, sp), rest.substr(sp + 1));
+		} else {
+			njclient.sendChat(text); // public MSG; server echoes it back to us
+		}
+	}
+
 	// Decaying output peak [0,1] for the on-panel level meter. Written by the audio
 	// thread, read by the UI thread; relaxed atomics are fine for a meter.
 	std::atomic<float> peak{0.f};
@@ -191,6 +237,18 @@ struct Ninjam : Module {
 					roster.erase(it);
 			}
 		};
+		cb.onChat = [this](const akaudio::nj::ChatMessage& m) {
+			const std::string& c = m.cmd();
+			if (c == "MSG")          pushChat({m.arg(0), m.arg(1)});      // speaker, text
+			else if (c == "PRIVMSG") pushChat({m.arg(0) + " (pm)", m.arg(1)});
+			else if (c == "TOPIC") {
+				if (!m.arg(1).empty())
+					pushChat({"", (m.arg(0).empty() ? std::string("Topic: ") : m.arg(0) + " set topic: ") + m.arg(1), ChatLine::Topic});
+			}
+			else if (c == "JOIN")  pushChat({"", m.arg(0) + " joined", ChatLine::System});
+			else if (c == "PART")  pushChat({"", m.arg(0) + " left", ChatLine::System});
+			// USERCOUNT and others: ignored (the roster already conveys presence).
+		};
 		return cb;
 	}
 
@@ -260,6 +318,11 @@ struct Ninjam : Module {
 		{
 			std::lock_guard<std::mutex> lock(rosterMutex);
 			roster.clear();
+		}
+		{
+			std::lock_guard<std::mutex> lock(chatMutex);
+			chatLog.clear();
+			chatGen.fetch_add(1, std::memory_order_release);
 		}
 		jamBpm.store(0, std::memory_order_relaxed);
 		jamBpi.store(0, std::memory_order_relaxed);
@@ -341,6 +404,7 @@ struct Ninjam : Module {
 		int bpi = jamBpi.load(std::memory_order_relaxed);
 		size_t n;
 		{ std::lock_guard<std::mutex> lock(rosterMutex); n = roster.size(); }
+		n += 1; // the roster lists only remote players; count ourselves too
 		if (bpm > 0)
 			return string::f("%s \xc2\xb7 %d BPM \xc2\xb7 %d BPI \xc2\xb7 %d here", sn, bpm, bpi, (int) n);
 		return std::string(sn) + "\xe2\x80\xa6";
@@ -387,14 +451,6 @@ struct Ninjam : Module {
 			outputs[POLY_R_OUTPUT].setChannels(0);
 			stream.pull(l, r); // leaves l/r at 0 on underrun
 		}
-		outputs[LEFT_OUTPUT].setVoltage(l * 5.f);
-		outputs[RIGHT_OUTPUT].setVoltage(r * 5.f);
-
-		// Peak meter: fast attack, ~150 ms exponential release.
-		float amp = std::max(std::fabs(l), std::fabs(r));
-		float p = peak.load(std::memory_order_relaxed);
-		p = amp > p ? amp : p * std::exp(-args.sampleTime / 0.15f);
-		peak.store(p, std::memory_order_relaxed);
 
 		// ---- Beat clock + metronome (only when joined to a tempo) ----
 		int bpmL = jamBpm.load(std::memory_order_relaxed);
@@ -423,12 +479,13 @@ struct Ninjam : Module {
 			}
 			if (currentBeat.load(std::memory_order_relaxed) < 0)
 				currentBeat.store(beatIndex, std::memory_order_relaxed);
+			// Always synthesize the click tone (accented downbeat: higher + louder). It
+			// goes to the CLICK jack unconditionally; the metronome toggle only decides
+			// whether it is also mixed into the MAIN output (done below).
 			if (clickEnv > 0.f) {
-				if (clickEnabled) {
-					click = std::sin(2.f * (float) M_PI * clickPhase) * clickEnv * clickAmp;
-					clickPhase += clickFreq * args.sampleTime;
-					if (clickPhase >= 1.f) clickPhase -= 1.f;
-				}
+				click = std::sin(2.f * (float) M_PI * clickPhase) * clickEnv * clickAmp;
+				clickPhase += clickFreq * args.sampleTime;
+				if (clickPhase >= 1.f) clickPhase -= 1.f;
 				clickEnv -= args.sampleTime / 0.035f; // ~35 ms decay
 				if (clickEnv < 0.f) clickEnv = 0.f;
 			}
@@ -458,6 +515,19 @@ struct Ninjam : Module {
 				njclient.captureFrame(ch, il, ir);
 			}
 		}
+
+		// Main mix: fold the metronome click in when the toggle is on, so it is audible on
+		// MAIN without needing to patch the CLICK jack.
+		if (clickEnabled)
+			{ l += click; r += click; }
+		outputs[LEFT_OUTPUT].setVoltage(l * 5.f);
+		outputs[RIGHT_OUTPUT].setVoltage(r * 5.f);
+
+		// Peak meter: fast attack, ~150 ms exponential release.
+		float amp = std::max(std::fabs(l), std::fabs(r));
+		float p = peak.load(std::memory_order_relaxed);
+		p = amp > p ? amp : p * std::exp(-args.sampleTime / 0.15f);
+		peak.store(p, std::memory_order_relaxed);
 
 		outputs[CLICK_OUTPUT].setVoltage(click * 5.f);
 		outputs[CLOCK_OUTPUT].setVoltage(clockG);
@@ -597,6 +667,13 @@ struct ServerField : TabField {
 
 static const char* FONT_BOLD = "res/fonts/Nunito-Bold.ttf";
 static const char* FONT_REG = "res/fonts/DejaVuSans.ttf";
+static const char* FONT_MONO = "res/fonts/ShareTechMono-Regular.ttf"; // TTY chat console
+
+// Chat "console" palette: light monospace text on a dark recessed pane.
+static const NVGcolor TH_CON_BG    = nvgRGB(0x16, 0x1a, 0x17); // console background (near-black)
+static const NVGcolor TH_CON_TEXT  = nvgRGB(0xcf, 0xd6, 0xcd); // message text
+static const NVGcolor TH_CON_DIM   = nvgRGB(0x6f, 0x79, 0x6f); // system lines / placeholder
+static const NVGcolor TH_CON_NAME  = nvgRGB(0x5f, 0xc8, 0x86); // speaker name (green)
 
 static const NVGcolor NINJAM_GREEN = nvgRGB(0x2a, 0xa8, 0x55); // accent (darker for light panel)
 
@@ -654,6 +731,17 @@ static void drawTxt(NVGcontext* vg, const char* fontRes, float x, float y, float
 		}
 	}
 	nvgText(vg, x, y, t.c_str(), NULL);
+}
+
+// Width in px of a string for a given font/size (for caret/column math in the chat console).
+static float textWidth(NVGcontext* vg, const char* fontRes, float size, const std::string& s) {
+	std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system(fontRes));
+	if (!font || font->handle < 0)
+		return 0.f;
+	nvgFontFaceId(vg, font->handle);
+	nvgFontSize(vg, size);
+	float b[4];
+	return nvgTextBounds(vg, 0, 0, s.c_str(), NULL, b);
 }
 
 // Loudspeaker icon (listen), drawn as vector paths — the bundled fonts have no speaker
@@ -879,6 +967,56 @@ struct SearchField : ui::TextField {
 	}
 };
 
+// Chat input — Enter sends the line to the room, then clears it. The server echoes
+// our line back (with our name), so the log shows it via the normal onChat path.
+// Drawn frameless (no blendish box): a monospace prompt + text + caret on the dark
+// chat console, so it reads as the bottom line of a TTY rather than a boxed widget.
+struct ChatField : ui::TextField {
+	Ninjam* module = nullptr;
+	ChatField() { placeholder = "type a message, /bpi 16, !vote bpm 120\xe2\x80\xa6"; }
+	void onAction(const ActionEvent& e) override {
+		if (module && !text.empty()) {
+			module->sendChatLine(text);
+			setText("");
+		}
+		e.consume(this);
+	}
+	void draw(const DrawArgs& args) override {
+		NVGcontext* vg = args.vg;
+		nvgScissor(vg, RECT_ARGS(args.clipBox));
+		const float size = 12.5f, cy = box.size.y / 2.f;
+		const bool focused = (this == APP->event->getSelectedWidget());
+		// Prompt.
+		const char* prompt = "\xe2\x80\xba "; // "› "
+		drawTxt(vg, FONT_MONO, 3.f, cy, size, TH_CON_NAME, prompt, NVG_ALIGN_LEFT);
+		const float tx = 3.f + textWidth(vg, FONT_MONO, size, prompt);
+		if (text.empty() && !focused) {
+			drawTxt(vg, FONT_MONO, tx, cy, size, TH_CON_DIM, placeholder, NVG_ALIGN_LEFT,
+				box.size.x - tx - 3.f);
+		} else {
+			// Selection highlight.
+			if (focused && cursor != selection) {
+				int a = std::min(cursor, selection), b = std::max(cursor, selection);
+				float xa = tx + textWidth(vg, FONT_MONO, size, text.substr(0, a));
+				float xb = tx + textWidth(vg, FONT_MONO, size, text.substr(0, b));
+				nvgBeginPath(vg);
+				nvgRect(vg, xa, cy - size * 0.7f, xb - xa, size * 1.4f);
+				nvgFillColor(vg, nvgRGBA(0x2a, 0xc8, 0x66, 0x55));
+				nvgFill(vg);
+			}
+			drawTxt(vg, FONT_MONO, tx, cy, size, TH_CON_TEXT, text, NVG_ALIGN_LEFT);
+			if (focused) {
+				float cx = tx + textWidth(vg, FONT_MONO, size, text.substr(0, cursor));
+				nvgBeginPath(vg);
+				nvgRect(vg, cx, cy - size * 0.62f, 1.3f, size * 1.24f);
+				nvgFillColor(vg, TH_CON_NAME);
+				nvgFill(vg);
+			}
+		}
+		nvgResetScissor(vg);
+	}
+};
+
 // Clickable refresh control (re-fetches the directory in the background).
 struct RefreshButton : OpaqueWidget {
 	Ninjam* module = nullptr;
@@ -924,16 +1062,26 @@ struct TxToggle : OpaqueWidget {
 		OpaqueWidget::onButton(e);
 	}
 	void draw(const DrawArgs& args) override {
+		NVGcontext* vg = args.vg;
 		bool on = module && module->transmitting;
-		nvgBeginPath(args.vg);
-		nvgRoundedRect(args.vg, 0, 0, box.size.x, box.size.y, 3);
-		nvgFillColor(args.vg, on ? (hovered ? nvgRGB(0x33, 0xbe, 0x62) : NINJAM_GREEN)
-		                         : (hovered ? nvgRGBA(0x00, 0x00, 0x00, 0x18) : TH_WELL));
-		nvgFill(args.vg);
-		nvgStrokeColor(args.vg, TH_CARD_BD);
-		nvgStroke(args.vg);
-		drawTxt(args.vg, FONT_BOLD, box.size.x / 2, box.size.y / 2, 11.f,
-			on ? nvgRGB(0xff, 0xff, 0xff) : TH_TEXT_DIM, "TX", NVG_ALIGN_CENTER);
+		const float cx = box.size.x / 2, cy = box.size.y / 2, r = box.size.x / 2 - 1.f;
+		// Soft glow when transmitting.
+		if (on) {
+			nvgBeginPath(vg);
+			nvgCircle(vg, cx, cy, r + 3.f);
+			NVGpaint glow = nvgRadialGradient(vg, cx, cy, r, r + 4.f,
+				nvgRGBA(0x2e, 0xd1, 0x6b, 0xb0), nvgRGBA(0x2e, 0xd1, 0x6b, 0x00));
+			nvgFillPaint(vg, glow);
+			nvgFill(vg);
+		}
+		nvgBeginPath(vg);
+		nvgCircle(vg, cx, cy, r);
+		nvgFillColor(vg, on ? (hovered ? nvgRGB(0x4a, 0xe0, 0x82) : NINJAM_GREEN)
+		                    : (hovered ? nvgRGBA(0x00, 0x00, 0x00, 0x20) : TH_WELL));
+		nvgFill(vg);
+		nvgStrokeColor(vg, TH_CARD_BD);
+		nvgStrokeWidth(vg, 1.f);
+		nvgStroke(vg);
 	}
 };
 
@@ -1018,57 +1166,99 @@ struct JamView : Widget {
 		const float w = box.size.x, pad = 12.f, avail = w - 2 * pad;
 		int bpi = module->jamBpi.load(std::memory_order_relaxed);
 		int cur = module->currentBeat.load(std::memory_order_relaxed);
-		float phase = module->jamPhase.load(std::memory_order_relaxed);
 
-		// Big beat ticks.
+		// Beat ticks — one tick per beat in the bar, reflowed into as many rows as it takes
+		// to keep each tick legible. BPI is server-driven and changes live when any admin
+		// votes/commands a new tempo, so the whole block re-lays-out (and the chat below
+		// shifts) on the fly. `tickBottom` is where the row(s) end.
+		float tickBottom = 4.f;
 		if (bpi > 0) {
-			const float ty = 16.f, th = 30.f, gap = 3.f;
-			float tw = (avail - (bpi - 1) * gap) / bpi;
+			const float ty = 4.f, gap = 3.f, rowGap = 3.f, minTW = 10.f;
+			// How many ticks fit per row at the legible minimum, then balance across rows.
+			int perRow = std::max(1, (int) std::floor((avail + gap) / (minTW + gap)));
+			int rows = std::min(4, (bpi + perRow - 1) / perRow);
+			perRow = (bpi + rows - 1) / rows;
+			float tw = (avail - (perRow - 1) * gap) / perRow;
 			if (tw < 1.f) tw = 1.f;
+			// Tick height: full 20 px for a single row, shrinking as rows stack (cap block ~40 px).
+			float th = std::min(20.f, (40.f - (rows - 1) * rowGap) / rows);
 			for (int b = 0; b < bpi; b++) {
-				float x = pad + b * (tw + gap);
+				int row = b / perRow, col = b % perRow;
+				float x = pad + col * (tw + gap);
+				float y = ty + row * (th + rowGap);
 				NVGcolor c = (b == cur) ? nvgRGB(0x2a, 0xc8, 0x66)
 				           : (cur >= 0 && b < cur) ? NINJAM_GREEN
 				           : (b == 0) ? nvgRGB(0xc8, 0x9a, 0x3a)
 				           : nvgRGBA(0x00, 0x00, 0x00, 0x1a);
 				nvgBeginPath(vg);
-				nvgRoundedRect(vg, x, ty, tw, th, 2.f);
+				nvgRoundedRect(vg, x, y, tw, th, 2.f);
 				nvgFillColor(vg, c);
 				nvgFill(vg);
 			}
-			if (cur >= 0)
-				drawTxt(vg, FONT_REG, pad, 58, 11.f, TH_TEXT_DIM,
-					string::f("beat %d / %d", cur + 1, bpi), NVG_ALIGN_LEFT);
+			tickBottom = ty + rows * th + (rows - 1) * rowGap;
 		}
 
-		// Interval progress bar.
-		const float by = 70.f, bh = 12.f;
-		nvgBeginPath(vg);
-		nvgRoundedRect(vg, pad, by, avail, bh, 3.f);
-		nvgFillColor(vg, nvgRGBA(0, 0, 0, 0x1e));
-		nvgFill(vg);
-		if (phase > 0.f) {
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, pad, by, avail * phase, bh, 3.f);
-			nvgFillColor(vg, NINJAM_GREEN);
-			nvgFill(vg);
-		}
-
-		// Roster (who's here), one per line.
-		drawTxt(vg, FONT_BOLD, pad, 100, 11.f, TH_TEXT_DIM, "IN THE ROOM", NVG_ALIGN_LEFT);
+		// Info line: beat counter (left) + who's here (right), just under the ticks.
+		const float infoY = tickBottom + 12.f;
+		if (cur >= 0)
+			drawTxt(vg, FONT_REG, pad, infoY, 10.5f, TH_TEXT_DIM,
+				string::f("%d BPM \xc2\xb7 beat %d / %d",
+					module->jamBpm.load(std::memory_order_relaxed), cur + 1, bpi),
+				NVG_ALIGN_LEFT);
 		std::string who = module->rosterText();
-		if (who.empty()) {
-			drawTxt(vg, FONT_REG, pad, 116, 11.f, TH_TEXT_DIM, "(just you)", NVG_ALIGN_LEFT);
+		std::string here = who.empty() ? std::string("just you")
+		                               : (std::string("here: you, ") + who);
+		drawTxt(vg, FONT_REG, w - pad, infoY, 10.5f, nvgRGB(0x1c, 0x7a, 0x3e), here,
+			NVG_ALIGN_RIGHT, avail * 0.62f);
+
+		// Chat console — a recessed dark TTY pane holding the message log and, along its
+		// bottom, the frameless input line (the ChatField sibling overlays that strip).
+		const float conTop = infoY + 10.f, conBot = box.size.y;
+		nvgBeginPath(vg);
+		nvgRoundedRect(vg, pad, conTop, avail, conBot - conTop, 4.f);
+		nvgFillColor(vg, TH_CON_BG);
+		nvgFill(vg);
+
+		const float inset = 6.f;
+		const float inputTop = conBot - 24.f;     // input strip (ChatField sits here)
+		const float logTop = conTop + inset, logBot = inputTop - 4.f;
+		const float lineH = 13.f;
+
+		// Faint rule between the log and the input line.
+		nvgBeginPath(vg);
+		nvgMoveTo(vg, pad + inset, inputTop);
+		nvgLineTo(vg, w - pad - inset, inputTop);
+		nvgStrokeColor(vg, nvgRGBA(0xff, 0xff, 0xff, 0x14));
+		nvgStroke(vg);
+
+		// Message log — monospace, newest at the bottom, auto-tailing to what fits.
+		const float tpad = pad + inset, tclip = avail - 2 * inset;
+		std::vector<Ninjam::ChatLine> lines = module->chatSnapshot();
+		if (lines.empty()) {
+			drawTxt(vg, FONT_MONO, tpad, (logTop + logBot) / 2, 11.5f, TH_CON_DIM,
+				"\xe2\x80\x94 no messages yet \xe2\x80\x94", NVG_ALIGN_LEFT);
 		} else {
-			float y = 116.f;
-			size_t start = 0;
-			while (start < who.size() && y < box.size.y - 6) {
-				size_t comma = who.find(", ", start);
-				std::string name = who.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
-				drawTxt(vg, FONT_REG, pad, y, 11.5f, nvgRGB(0x1c, 0x7a, 0x3e), name, NVG_ALIGN_LEFT, avail);
-				y += 14.f;
-				if (comma == std::string::npos) break;
-				start = comma + 2;
+			int fit = (int) ((logBot - logTop) / lineH);
+			if (fit < 1) fit = 1;
+			int first = (int) lines.size() > fit ? (int) lines.size() - fit : 0;
+			float y = logTop + lineH * 0.5f;
+			for (int i = first; i < (int) lines.size(); i++) {
+				const Ninjam::ChatLine& l = lines[i];
+				if (l.kind == Ninjam::ChatLine::Topic) {
+					drawTxt(vg, FONT_MONO, tpad, y, 14.f, nvgRGB(0xe0, 0xc4, 0x6a), l.text, NVG_ALIGN_LEFT, tclip);
+				} else if (l.kind == Ninjam::ChatLine::System) {
+					drawTxt(vg, FONT_MONO, tpad, y, 11.f, TH_CON_DIM, l.text, NVG_ALIGN_LEFT, tclip);
+				} else if (l.who.empty()) {
+					drawTxt(vg, FONT_MONO, tpad, y, 11.5f, TH_CON_TEXT, l.text, NVG_ALIGN_LEFT, tclip);
+				} else {
+					// "name " in green, then the message in the normal console color.
+					std::string name = l.who + " ";
+					drawTxt(vg, FONT_MONO, tpad, y, 11.5f, TH_CON_NAME, name, NVG_ALIGN_LEFT);
+					float nx = tpad + textWidth(vg, FONT_MONO, 11.5f, name);
+					drawTxt(vg, FONT_MONO, nx, y, 11.5f, TH_CON_TEXT, l.text, NVG_ALIGN_LEFT,
+						tclip - (nx - tpad));
+				}
+				y += lineH;
 			}
 		}
 	}
@@ -1156,29 +1346,17 @@ struct JoinButton : OpaqueWidget {
 // history dropdown), and a JOIN button. Creates and lays out its children.
 struct JoinCard : Widget {
 	JoinCard(Ninjam* module, float width) {
-		box.size = Vec(width, 70);
-		const float inner = 8.f;
+		box.size = Vec(width, 48);
+		const float inner = 8.f, gap = 5.f;
 
 		TabField* userField = new TabField;
 		NjPasswordField* passField = new NjPasswordField;
 		ServerField* serverField = new ServerField;
 
-		float fieldW = (width - 2 * inner - 6) / 2.f;
-		userField->box.pos = Vec(inner, 20);
-		userField->box.size = Vec(fieldW, 18);
-		userField->placeholder = "username";
-		userField->text = module ? module->joinUser : "";
-		addChild(userField);
-
-		passField->box.pos = Vec(inner + fieldW + 6, 20);
-		passField->box.size = Vec(fieldW, 18);
-		passField->placeholder = "password";
-		passField->text = module ? module->joinPass : "";
-		addChild(passField);
-
-		const float joinW = 46.f, dropW = 18.f, gap = 5.f;
-		float serverW = width - 2 * inner - joinW - dropW - 2 * gap;
-		serverField->box.pos = Vec(inner, 44);
+		// Row 1: server host:port + history dropdown (where the old label was).
+		const float dropW = 22.f;
+		float serverW = width - 2 * inner - dropW - gap;
+		serverField->box.pos = Vec(inner, 5);
 		serverField->box.size = Vec(serverW, 18);
 		serverField->placeholder = "host:port";
 		serverField->module = module;
@@ -1191,16 +1369,31 @@ struct JoinCard : Widget {
 		ServerDropdownButton* drop = new ServerDropdownButton;
 		drop->module = module;
 		drop->serverField = serverField;
-		drop->box.pos = Vec(inner + serverW + gap, 44);
+		drop->box.pos = Vec(inner + serverW + gap, 5);
 		drop->box.size = Vec(dropW, 18);
 		addChild(drop);
+
+		// Row 2: username | password | JOIN.
+		const float joinW = 46.f;
+		float credW = (width - 2 * inner - joinW - 2 * gap) / 2.f;
+		userField->box.pos = Vec(inner, 27);
+		userField->box.size = Vec(credW, 18);
+		userField->placeholder = "username";
+		userField->text = module ? module->joinUser : "";
+		addChild(userField);
+
+		passField->box.pos = Vec(inner + credW + gap, 27);
+		passField->box.size = Vec(credW, 18);
+		passField->placeholder = "password";
+		passField->text = module ? module->joinPass : "";
+		addChild(passField);
 
 		JoinButton* join = new JoinButton;
 		join->module = module;
 		join->userField = userField;
 		join->passField = passField;
 		join->serverField = serverField;
-		join->box.pos = Vec(inner + serverW + gap + dropW + gap, 44);
+		join->box.pos = Vec(inner + 2 * credW + 2 * gap, 27);
 		join->box.size = Vec(joinW, 18);
 		addChild(join);
 
@@ -1217,7 +1410,6 @@ struct JoinCard : Widget {
 		nvgFill(vg);
 		nvgStrokeColor(vg, TH_CARD_BD);
 		nvgStroke(vg);
-		drawTxt(vg, FONT_BOLD, 8, 11, 11.5f, TH_TEXT, "Private server:", NVG_ALIGN_LEFT);
 		Widget::draw(args);
 	}
 };
@@ -1228,9 +1420,12 @@ struct JoinCard : Widget {
 struct OutputSection : Widget {
 	Ninjam* module = nullptr;
 	// L/R pairs grouped close together; the two stereo groups separated by a gap.
-	static constexpr float xInL = 0.16f, xInR = 0.30f, xTx = 0.74f;          // transmit-in pair
-	static constexpr float xMainL = 0.16f, xMainR = 0.30f, xPolyL = 0.62f, xPolyR = 0.76f; // out pairs
-	static constexpr float xClick = 0.12f, xClock = 0.30f, xReset = 0.50f, xRun = 0.70f, xPhase = 0.88f;
+	// One jack row holds three stereo pairs: IN (left), MAIN (center), PLY (right);
+	// the TX LED tucks in the gap right after the IN pair. The three plates share the
+	// CV row's outer edges (IN-L sits under CLICK, PLY-R under PHASE) and are evenly spaced.
+	static constexpr float xInL = 0.12f, xInR = 0.26f, xTx = 0.19f;          // IN pair; TX LED centered between them
+	static constexpr float xMainL = 0.46f, xMainR = 0.60f, xPolyL = 0.74f, xPolyR = 0.88f; // out pairs (MAIN nudged toward PLY)
+	static constexpr float xClick = 0.12f, xClock = 0.31f, xReset = 0.50f, xRun = 0.69f, xPhase = 0.88f;
 	// A rounded jack-group box. `plate` = solid black output plate (white labels);
 	// otherwise a light recessed well with a colored border (inputs).
 	static void groupBox(NVGcontext* vg, float w, float xL, float xR, float top, float h,
@@ -1254,14 +1449,14 @@ struct OutputSection : Widget {
 		// Label sits high in the plate; the jack is low (only ~4 px of plate below it),
 		// matching Fundamental's OUT boxes. Jack local rows: IN 36, audio 88, CV 140.
 
-		// INPUT group: light well, blue border, dark bold labels.
-		groupBox(vg, w, xInL, xInR, 6, 46, false, TH_IN_BD);
-		drawTxt(vg, FONT_BOLD, w * xInL - 18, 15, 11.f, TH_IN_BD, "IN", NVG_ALIGN_LEFT);
-		drawTxt(vg, FONT_BOLD, w * xInL, 15, 11.f, TH_TEXT_DIM, "L", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, w * xInR, 15, 11.f, TH_TEXT_DIM, "R", NVG_ALIGN_CENTER);
+		// INPUT group: light well, blue border, dark bold labels — same row as the outputs.
+		groupBox(vg, w, xInL, xInR, 58, 46, false, TH_IN_BD);
+		drawTxt(vg, FONT_BOLD, w * xInL, 67, 11.f, TH_TEXT_DIM, "L", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xInR, 67, 11.f, TH_TEXT_DIM, "R", NVG_ALIGN_CENTER);
 
-		// Peak meter (thin bar in the gap between IN and OUT).
-		const float bx = 12, by = 54, bw = w - 24, bh = 4;
+		// Peak meter (thin bar above the jack rows, aligned to the plate edges). Centered in
+		// the gap between the panel content above (ends at local 42) and the plate tops (58).
+		const float bx = w * xClick - 18.f, by = 48, bw = (w * xPhase + 18.f) - bx, bh = 4;
 		nvgBeginPath(vg);
 		nvgRoundedRect(vg, bx, by, bw, bh, 2);
 		nvgFillColor(vg, nvgRGBA(0, 0, 0, 0x33));
@@ -1305,6 +1500,7 @@ struct NinjamWidget : ModuleWidget {
 	Widget* browser = nullptr;
 	Widget* jamView = nullptr;
 	Widget* metro = nullptr;
+	Widget* chatField = nullptr;
 
 	NinjamWidget(Ninjam* module) {
 		nj = module;
@@ -1344,38 +1540,51 @@ struct NinjamWidget : ModuleWidget {
 
 		// ---- Disconnected: server-selection UI ----
 		JoinCard* card = new JoinCard(module, W - 12);
-		card->box.pos = Vec(6, 50);
+		card->box.pos = Vec(6, 46);
 		addChild(card);
 		joinCard = card;
 
 		SearchField* s = new SearchField;
-		s->box.pos = Vec(8, 128);
+		s->box.pos = Vec(8, 100);
 		s->box.size = Vec(W - 8 - 40, 20);
 		addChild(s);
 		search = s;
 
 		RefreshButton* rb = new RefreshButton;
 		rb->module = module;
-		rb->box.pos = Vec(W - 36, 128);
+		rb->box.pos = Vec(W - 36, 100);
 		rb->box.size = Vec(28, 20);
 		addChild(rb);
 		refresh = rb;
 
+		// Room list fills all the way down to just above the jack section.
 		RoomBrowser* b = new RoomBrowser;
 		b->module = module;
 		b->search = s;
-		b->box.pos = Vec(6, 150);
-		b->box.size = Vec(W - 12, 44);
+		b->box.pos = Vec(6, 124);
+		b->box.size = Vec(W - 12, 242 - 124);
 		addChild(b);
 		browser = b;
 
 		// ---- Connected: jam view (same region; replaces the connect UI) ----
+		// The jam view starts just under the status bar (tight) and runs down to just above
+		// the meter/jack section, so the beat ticks + chat console fill the space.
+		const float jvTop = 44.f, jvH = 198.f;
 		JamView* jv = new JamView;
 		jv->module = module;
-		jv->box.pos = Vec(6, 50);
-		jv->box.size = Vec(W - 12, 144);
+		jv->box.pos = Vec(6, jvTop);
+		jv->box.size = Vec(W - 12, jvH);
 		addChild(jv);
 		jamView = jv;
+
+		// Chat input — frameless, overlaying the bottom strip of the console pane. Taller
+		// than a default field so descenders aren't clipped.
+		ChatField* cf = new ChatField;
+		cf->module = module;
+		cf->box.pos = Vec(20, jvTop + jvH - 23);
+		cf->box.size = Vec(W - 40, 19);
+		addChild(cf);
+		chatField = cf;
 
 		// Bottom I/O section (always): TRANSMIT IN row + meter + output rows.
 		const float oy = 200;
@@ -1385,14 +1594,16 @@ struct NinjamWidget : ModuleWidget {
 		out->box.size = Vec(W, 162);
 		addChild(out);
 
-		const float rowIn = oy + 36, rowA = oy + 88, rowB = oy + 140; // 52px apart; low in plates
-		// TRANSMIT IN (poly) + TX enable.
-		addInput(createInputCentered<PJ301MPort>(Vec(W * OutputSection::xInL, rowIn), module, Ninjam::LEFT_INPUT));
-		addInput(createInputCentered<PJ301MPort>(Vec(W * OutputSection::xInR, rowIn), module, Ninjam::RIGHT_INPUT));
+		const float rowA = oy + 88, rowB = oy + 140; // 52px apart; low in plates
+		// One row: TRANSMIT IN (poly) + TX LED, MAIN out, PLY out.
+		addInput(createInputCentered<PJ301MPort>(Vec(W * OutputSection::xInL, rowA), module, Ninjam::LEFT_INPUT));
+		addInput(createInputCentered<PJ301MPort>(Vec(W * OutputSection::xInR, rowA), module, Ninjam::RIGHT_INPUT));
 		TxToggle* txBtn = new TxToggle;
 		txBtn->module = module;
-		txBtn->box.size = Vec(40, 18);
-		txBtn->box.pos = Vec(W * OutputSection::xTx - 20, rowIn - 9);
+		txBtn->box.size = Vec(11, 11);
+		// Center it in the IN well: horizontally between the two jacks, vertically between
+		// the L/R label row (oy+67) and the jack row (rowA), nudged up a few px off the jacks.
+		txBtn->box.pos = Vec(W * OutputSection::xTx - 5.5f, (oy + 67.f + rowA) / 2.f - 5.5f - 4.f);
 		addChild(txBtn);
 		// Outputs: MAIN L/R + PLAYERS poly L/R, then CLICK/CLOCK/RESET/RUN/PHASE.
 		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xMainL, rowA), module, Ninjam::LEFT_OUTPUT));
@@ -1415,6 +1626,7 @@ struct NinjamWidget : ModuleWidget {
 		if (browser) browser->visible = !joined;
 		if (jamView) jamView->visible = joined;
 		if (metro) metro->visible = joined;
+		if (chatField) chatField->visible = joined;
 		if (nj) nj->syncTransmit();
 		ModuleWidget::step();
 	}

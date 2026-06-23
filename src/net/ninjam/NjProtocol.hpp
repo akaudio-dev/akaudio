@@ -128,6 +128,17 @@ struct DownloadBegin {
 };
 bool parseDownloadBegin(const uint8_t* data, size_t len, DownloadBegin& out);
 
+// CHAT_MESSAGE (0xc0): a list of NUL-terminated strings. parts[0] is the command
+// ("MSG", "PRIVMSG", "TOPIC", "JOIN", "PART", "USERCOUNT", …); the rest are its args.
+// Public chat arrives as {"MSG", speaker, text}; we send {"MSG", text}.
+struct ChatMessage {
+	std::vector<std::string> parts;
+	const std::string& cmd() const { static const std::string e; return parts.empty() ? e : parts[0]; }
+	const std::string& arg(size_t i) const { static const std::string e; return i + 1 < parts.size() ? parts[i + 1] : e; }
+};
+bool parseChat(const uint8_t* data, size_t len, ChatMessage& out);
+std::vector<uint8_t> buildChat(const std::vector<std::string>& parts);
+
 // DOWNLOAD_INTERVAL_WRITE: one chunk of an interval's encoded audio. `data`/`len`
 // alias the caller's payload buffer (valid only during dispatch). flag bit0 = last.
 struct DownloadWrite {

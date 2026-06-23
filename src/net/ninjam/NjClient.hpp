@@ -33,6 +33,7 @@ public:
 		std::function<void(State, const std::string&)> onState;    // state transitions (+ message)
 		std::function<void(int bpm, int bpi)> onConfig;            // CONFIG_CHANGE
 		std::function<void(const std::vector<UserChannel>&)> onUserInfo; // USERINFO_CHANGE
+		std::function<void(const ChatMessage&)> onChat;            // CHAT_MESSAGE (any command)
 		std::function<void(const std::string&)> onLog;             // optional debug log
 	};
 
@@ -67,6 +68,11 @@ public:
 	void setTransmit(const std::vector<std::string>& channelNames, float quality);
 	// Audio thread: push one captured stereo frame for local channel `ch`.
 	void captureFrame(int ch, float l, float r) { audio.captureFrame(ch, l, r); }
+
+	// Send chat to the room (UI thread). No-op unless connected.
+	void sendChat(const std::string& text);                 // public "MSG" (also carries "!vote …")
+	void sendAdmin(const std::string& command);             // "ADMIN" (e.g. "bpm 120"); server acts only if you're admin
+	void sendPrivate(const std::string& toUser, const std::string& text); // "PRIVMSG"
 
 	// Diagnostics.
 	long intervalsDecoded() const { return audio.intervalsDecoded(); }

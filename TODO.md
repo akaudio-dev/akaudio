@@ -192,6 +192,15 @@ corrupt intervals; resample remote rate→engine rate; send `SET_CHANNEL_INFO` p
 Icecast path; (4 later) OGG encode + `UPLOAD_INTERVAL_*` to actually play in the jam. Substantial,
 multi-phase. Keep the existing Icecast listening as the zero-dep fallback.
 
+**STATUS 2026-06-22 — transmit VERIFIED.** All four phases done. Transmit confirmed working
+against the private test server: poly IN jacks → downbeat-aligned OGG-Vorbis encode →
+`UPLOAD_INTERVAL_*`, **heard back from a second client**. Also shipped: room chat (`MSG_CHAT 0xc0`
+send/recv — `parseChat`/`buildChat` in NjProtocol, `onChat`/`sendChat` in NjClient, an in-panel
+chat log + input field in the jam view, roster compressed to one line, interval progress bar
+removed in favour of the beat ticks). Panel: three jack pairs (IN | MAIN | PLY) on one row, TX is
+now a small LED next to IN. Remaining polish: own-vs-others chat colour, scrollback, message wrap,
+per-channel TX gain/name UI.
+
 Key references — canonical: `ninjam/{netmsg,mpb,njclient}.{cpp,h}`, `WDL/vorbisencdec.h`;
 JamTaba: `src/Common/ninjam/{Ninjam,client/ServerMessages,client/ClientMessages,client/Service}.*`,
 `src/Common/NinjamController.cpp`, `src/Common/audio/NinjamTrackNode.cpp`,
