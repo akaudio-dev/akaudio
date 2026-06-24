@@ -101,7 +101,9 @@ struct Ninjam : Module {
 		std::string who;
 		std::string text;
 		Kind kind;
-		ChatLine(std::string w, std::string t, Kind k = Normal) : who(std::move(w)), text(std::move(t)), kind(k) {}
+		bool mine;  // a named message we sent ourselves (own-vs-others colour)
+		ChatLine(std::string w, std::string t, Kind k = Normal, bool mine_ = false)
+			: who(std::move(w)), text(std::move(t)), kind(k), mine(mine_) {}
 	};
 	std::mutex chatMutex;
 	std::vector<ChatLine> chatLog;
@@ -117,6 +119,21 @@ struct Ninjam : Module {
 	std::vector<ChatLine> chatSnapshot() {
 		std::lock_guard<std::mutex> lk(chatMutex);
 		return chatLog;
+	}
+	// True if `speaker` is us. Registered logins echo our username verbatim; anonymous
+	// logins come back as "anonymous:<name>" (or bare "anonymous" when we gave no name),
+	// so strip that prefix before the case-insensitive compare against joinUser.
+	bool isOwnSpeaker(std::string speaker) const {
+		const std::string ap = "anonymous:";
+		if (speaker.rfind(ap, 0) == 0)
+			speaker = speaker.substr(ap.size());
+		const std::string mine = joinUser.empty() ? std::string("anonymous") : joinUser;
+		if (speaker.size() != mine.size())
+			return false;
+		for (size_t i = 0; i < speaker.size(); i++)
+			if (std::tolower((unsigned char) speaker[i]) != std::tolower((unsigned char) mine[i]))
+				return false;
+		return true;
 	}
 	// Route a typed chat line the way JamTaba does:
 	//   /bpm /bpi /topic /kick  -> ADMIN command (server acts only if we're admin)
@@ -239,8 +256,8 @@ struct Ninjam : Module {
 		};
 		cb.onChat = [this](const akaudio::nj::ChatMessage& m) {
 			const std::string& c = m.cmd();
-			if (c == "MSG")          pushChat({m.arg(0), m.arg(1)});      // speaker, text
-			else if (c == "PRIVMSG") pushChat({m.arg(0) + " (pm)", m.arg(1)});
+			if (c == "MSG")          pushChat({m.arg(0), m.arg(1), ChatLine::Normal, isOwnSpeaker(m.arg(0))}); // speaker, text
+			else if (c == "PRIVMSG") pushChat({m.arg(0) + " (pm)", m.arg(1), ChatLine::Normal, isOwnSpeaker(m.arg(0))});
 			else if (c == "TOPIC") {
 				if (!m.arg(1).empty())
 					pushChat({"", (m.arg(0).empty() ? std::string("Topic: ") : m.arg(0) + " set topic: ") + m.arg(1), ChatLine::Topic});
@@ -673,7 +690,8 @@ static const char* FONT_MONO = "res/fonts/ShareTechMono-Regular.ttf"; // TTY cha
 static const NVGcolor TH_CON_BG    = nvgRGB(0x16, 0x1a, 0x17); // console background (near-black)
 static const NVGcolor TH_CON_TEXT  = nvgRGB(0xcf, 0xd6, 0xcd); // message text
 static const NVGcolor TH_CON_DIM   = nvgRGB(0x6f, 0x79, 0x6f); // system lines / placeholder
-static const NVGcolor TH_CON_NAME  = nvgRGB(0x5f, 0xc8, 0x86); // speaker name (green)
+static const NVGcolor TH_CON_NAME  = nvgRGB(0x5f, 0xc8, 0x86); // others' speaker name (green)
+static const NVGcolor TH_CON_MINE  = nvgRGB(0x9b, 0xef, 0xbb); // our own speaker name (brighter green)
 
 static const NVGcolor NINJAM_GREEN = nvgRGB(0x2a, 0xa8, 0x55); // accent (darker for light panel)
 
@@ -742,6 +760,33 @@ static float textWidth(NVGcontext* vg, const char* fontRes, float size, const st
 	nvgFontSize(vg, size);
 	float b[4];
 	return nvgTextBounds(vg, 0, 0, s.c_str(), NULL, b);
+}
+
+// Break `s` into rows that each fit `maxW` px at the given font/size (word wrap, falling
+// back to mid-word breaks for unbreakable runs — nanovg handles both). Used by the chat
+// console so long messages flow across rows instead of being ellipsized.
+static std::vector<std::string> wrapText(NVGcontext* vg, const char* fontRes, float size,
+		float maxW, const std::string& s) {
+	std::vector<std::string> out;
+	std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system(fontRes));
+	if (!font || font->handle < 0 || maxW <= 0.f) {
+		out.push_back(s);
+		return out;
+	}
+	nvgFontFaceId(vg, font->handle);
+	nvgFontSize(vg, size);
+	const char* start = s.c_str();
+	const char* end = start + s.size();
+	NVGtextRow rows[4];
+	int n;
+	while (start < end && (n = nvgTextBreakLines(vg, start, end, maxW, rows, 4)) > 0) {
+		for (int i = 0; i < n; i++)
+			out.push_back(std::string(rows[i].start, rows[i].end - rows[i].start));
+		start = rows[n - 1].next;
+	}
+	if (out.empty())
+		out.push_back("");
+	return out;
 }
 
 // Loudspeaker icon (listen), drawn as vector paths — the bundled fonts have no speaker
@@ -1159,6 +1204,25 @@ struct TransportBlock : Widget {
 // row, an interval progress bar, and the roster of who's in the room.
 struct JamView : Widget {
 	Ninjam* module = nullptr;
+
+	// Chat scrollback. `scrollUp` = wrapped rows lifted above the newest (0 = pinned to the
+	// bottom, auto-tailing). `lastTotal` lets us hold the viewport on the same messages when
+	// new lines arrive while scrolled up. draw() clamps both against what currently fits.
+	int scrollUp = 0;
+	int lastTotal = -1;
+
+	// Mouse wheel scrolls the chat log. Wheel up (scrollDelta.y > 0, same sign Rack's
+	// ScrollWidget uses) reveals older lines; down returns toward the newest.
+	void onHoverScroll(const HoverScrollEvent& e) override {
+		if (e.scrollDelta.y > 0.f)
+			scrollUp += 3;
+		else if (e.scrollDelta.y < 0.f)
+			scrollUp -= 3;
+		if (scrollUp < 0)
+			scrollUp = 0;
+		e.consume(this);
+	}
+
 	void draw(const DrawArgs& args) override {
 		if (!module)
 			return;
@@ -1231,35 +1295,70 @@ struct JamView : Widget {
 		nvgStrokeColor(vg, nvgRGBA(0xff, 0xff, 0xff, 0x14));
 		nvgStroke(vg);
 
-		// Message log — monospace, newest at the bottom, auto-tailing to what fits.
+		// Message log — monospace, newest at the bottom. Each chat line is word-wrapped into
+		// one or more physical "rows"; we flatten them all, then show the window that fits.
 		const float tpad = pad + inset, tclip = avail - 2 * inset;
 		std::vector<Ninjam::ChatLine> lines = module->chatSnapshot();
 		if (lines.empty()) {
 			drawTxt(vg, FONT_MONO, tpad, (logTop + logBot) / 2, 11.5f, TH_CON_DIM,
 				"\xe2\x80\x94 no messages yet \xe2\x80\x94", NVG_ALIGN_LEFT);
-		} else {
-			int fit = (int) ((logBot - logTop) / lineH);
-			if (fit < 1) fit = 1;
-			int first = (int) lines.size() > fit ? (int) lines.size() - fit : 0;
-			float y = logTop + lineH * 0.5f;
-			for (int i = first; i < (int) lines.size(); i++) {
-				const Ninjam::ChatLine& l = lines[i];
-				if (l.kind == Ninjam::ChatLine::Topic) {
-					drawTxt(vg, FONT_MONO, tpad, y, 14.f, nvgRGB(0xe0, 0xc4, 0x6a), l.text, NVG_ALIGN_LEFT, tclip);
-				} else if (l.kind == Ninjam::ChatLine::System) {
-					drawTxt(vg, FONT_MONO, tpad, y, 11.f, TH_CON_DIM, l.text, NVG_ALIGN_LEFT, tclip);
-				} else if (l.who.empty()) {
-					drawTxt(vg, FONT_MONO, tpad, y, 11.5f, TH_CON_TEXT, l.text, NVG_ALIGN_LEFT, tclip);
-				} else {
-					// "name " in green, then the message in the normal console color.
-					std::string name = l.who + " ";
-					drawTxt(vg, FONT_MONO, tpad, y, 11.5f, TH_CON_NAME, name, NVG_ALIGN_LEFT);
-					float nx = tpad + textWidth(vg, FONT_MONO, 11.5f, name);
-					drawTxt(vg, FONT_MONO, nx, y, 11.5f, TH_CON_TEXT, l.text, NVG_ALIGN_LEFT,
-						tclip - (nx - tpad));
-				}
-				y += lineH;
+			lastTotal = -1; // forget scroll state while empty so a fresh room starts pinned
+			return;
+		}
+
+		// One physical line of the console. `name` (when set) prints at tpad in nameCol; the
+		// body prints at bodyX in bodyCol. Continuation rows of a wrapped message carry no
+		// name and hang-indent their body under where the first row's text began.
+		struct Row {
+			float size;
+			std::string name; NVGcolor nameCol;
+			float bodyX; NVGcolor bodyCol; std::string body;
+		};
+		std::vector<Row> rows;
+		for (const Ninjam::ChatLine& l : lines) {
+			if (l.kind == Ninjam::ChatLine::Topic) {
+				for (const std::string& s : wrapText(vg, FONT_MONO, 14.f, tclip, l.text))
+					rows.push_back({14.f, "", TH_CON_NAME, tpad, nvgRGB(0xe0, 0xc4, 0x6a), s});
+			} else if (l.kind == Ninjam::ChatLine::System) {
+				for (const std::string& s : wrapText(vg, FONT_MONO, 11.f, tclip, l.text))
+					rows.push_back({11.f, "", TH_CON_NAME, tpad, TH_CON_DIM, s});
+			} else if (l.who.empty()) {
+				for (const std::string& s : wrapText(vg, FONT_MONO, 11.5f, tclip, l.text))
+					rows.push_back({11.5f, "", TH_CON_NAME, tpad, TH_CON_TEXT, s});
+			} else {
+				// "name " coloured by ownership, then the wrapped message hung under the text.
+				std::string name = l.who + " ";
+				float indent = textWidth(vg, FONT_MONO, 11.5f, name);
+				if (indent > tclip * 0.5f) indent = tclip * 0.5f; // keep room for the message
+				NVGcolor nc = l.mine ? TH_CON_MINE : TH_CON_NAME;
+				std::vector<std::string> ws = wrapText(vg, FONT_MONO, 11.5f, tclip - indent, l.text);
+				for (size_t k = 0; k < ws.size(); k++)
+					rows.push_back({11.5f, k == 0 ? name : "", nc, tpad + indent, TH_CON_TEXT, ws[k]});
 			}
+		}
+
+		// Clamp the scroll window. scrollUp counts rows lifted above the newest; 0 = pinned to
+		// the bottom (auto-tail). When new rows arrive while scrolled up, grow scrollUp by the
+		// same amount so the viewport holds on the messages being read.
+		int total = (int) rows.size();
+		int fit = (int) ((logBot - logTop) / lineH);
+		if (fit < 1) fit = 1;
+		int maxScroll = total > fit ? total - fit : 0;
+		if (lastTotal >= 0 && scrollUp > 0 && total > lastTotal)
+			scrollUp += total - lastTotal;
+		lastTotal = total;
+		if (scrollUp > maxScroll) scrollUp = maxScroll;
+		if (scrollUp < 0) scrollUp = 0;
+		int startRow = maxScroll - scrollUp;
+
+		float y = logTop + lineH * 0.5f;
+		for (int i = startRow; i < total && i < startRow + fit; i++) {
+			const Row& r = rows[i];
+			if (!r.name.empty())
+				drawTxt(vg, FONT_MONO, tpad, y, r.size, r.nameCol, r.name, NVG_ALIGN_LEFT);
+			drawTxt(vg, FONT_MONO, r.bodyX, y, r.size, r.bodyCol, r.body, NVG_ALIGN_LEFT,
+				tclip - (r.bodyX - tpad));
+			y += lineH;
 		}
 	}
 };
