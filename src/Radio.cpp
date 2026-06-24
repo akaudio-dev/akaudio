@@ -10,6 +10,8 @@
 static const char* RADIO_FONT_BOLD = "res/fonts/Nunito-Bold.ttf";
 static const NVGcolor RADIO_TEXT     = nvgRGB(0x24, 0x27, 0x2b); // primary dark text
 static const NVGcolor RADIO_TEXT_DIM = nvgRGB(0x6a, 0x72, 0x7a); // secondary labels
+static const NVGcolor RADIO_TEXT_LT  = nvgRGB(0xe8, 0xea, 0xec); // labels on the dark output plate
+static const NVGcolor RADIO_PLATE    = nvgRGB(0x1f, 0x1f, 0x1f); // Fundamental output-plate black
 
 static void radioText(NVGcontext* vg, const char* fontRes, float x, float y, float size,
 		NVGcolor col, const char* s) {
@@ -28,20 +30,43 @@ static void radioText(NVGcontext* vg, const char* fontRes, float x, float y, flo
 struct RadioDecor : Widget {
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
+		// Black output plate (Fundamental convention: outputs sit on a dark #1F1F1F
+		// rounded panel; inputs stay on the bare panel). Same width as the artwork
+		// above for a tidy column. Drawn here (a low-z child) so the jacks, added
+		// later, render on top of it.
+		nvgBeginPath(vg);
+		nvgRoundedRect(vg, mm2px(6.32f), mm2px(103.0f), mm2px(28.0f), mm2px(17.5f), mm2px(1.6f));
+		nvgFillColor(vg, RADIO_PLATE);
+		nvgFill(vg);
+
 		radioText(vg, RADIO_FONT_BOLD, mm2px(20.32f), mm2px(7.2f), 13.f, RADIO_TEXT, "RADIO");
-		radioText(vg, RADIO_FONT_BOLD, mm2px(13.0f), mm2px(92.5f), 11.f, RADIO_TEXT_DIM, "L");
-		radioText(vg, RADIO_FONT_BOLD, mm2px(27.0f), mm2px(92.5f), 11.f, RADIO_TEXT_DIM, "R");
+		radioText(vg, RADIO_FONT_BOLD, mm2px(20.32f), mm2px(65.0f), 11.f, RADIO_TEXT, "VOLUME");
+		radioText(vg, RADIO_FONT_BOLD, mm2px(20.32f), mm2px(86.0f), 10.f, RADIO_TEXT_DIM, "CV");
+		radioText(vg, RADIO_FONT_BOLD, mm2px(13.0f), mm2px(106.5f), 11.f, RADIO_TEXT_LT, "L");
+		radioText(vg, RADIO_FONT_BOLD, mm2px(27.0f), mm2px(106.5f), 11.f, RADIO_TEXT_LT, "R");
 		Widget::draw(args);
 	}
 };
+
+// Volume knob taper. The param p ∈ [0,1] is the knob position; the applied gain is
+// exponential in p (a proper audio/log taper): gain = 2000^p · 0.001, i.e. linear in
+// dB. p=0 → 0.1 % (≈ −60 dB, effectively silent), default p≈0.909 → unity (100 %),
+// p=1 → 2× (+6 dB, 200 %). We let Rack render this natively as a percentage via the
+// configParam displayBase/displayMultiplier (display = 2000^p · 0.1), so there is no
+// custom ParamQuantity — the knob behaves exactly like a stock Fundamental knob.
+static const float VOL_DISPLAY_BASE = 2000.f;
+static const float VOL_UNITY_POS = 0.90876f; // log(1000)/log(2000): p where gain == 1
+static inline float radioGain(float p) { return std::pow(VOL_DISPLAY_BASE, p) * 0.001f; }
 
 // Streaming internet radio (Icecast/HTTP MP3) source. Audio is fetched and decoded
 // on a background thread (net/Stream.hpp) and pulled here on the audio thread.
 struct Radio : Module {
 	enum ParamId {
+		VOLUME_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {
+		VOLUME_INPUT, // CV modulation for the built-in VCA (unipolar 0–10V)
 		INPUTS_LEN
 	};
 	enum OutputId {
@@ -68,6 +93,10 @@ struct Radio : Module {
 
 	Radio() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
+		// Built-in VCA: default unity gain (100 %), so existing patches are unchanged;
+		// full right is +6 dB (200 %), full left is ~silence. Native % display.
+		configParam(VOLUME_PARAM, 0.f, 1.f, VOL_UNITY_POS, "Volume", "%", VOL_DISPLAY_BASE, 0.1f);
+		configInput(VOLUME_INPUT, "Volume CV");
 		configOutput(LEFT_OUTPUT, "Left");
 		configOutput(RIGHT_OUTPUT, "Right");
 		stream.setSampleRate(APP->engine->getSampleRate());
@@ -95,9 +124,14 @@ struct Radio : Module {
 	void process(const ProcessArgs& args) override {
 		float l = 0.f, r = 0.f;
 		stream.pull(l, r); // leaves l/r at 0 on underrun
+		// Built-in VCA: knob (exponential/audio taper) × optional CV (unipolar 0–10V).
+		// Unpatched CV leaves the gain at the knob level.
+		float gain = radioGain(params[VOLUME_PARAM].getValue());
+		if (inputs[VOLUME_INPUT].isConnected())
+			gain *= clamp(inputs[VOLUME_INPUT].getVoltage() / 10.f, 0.f, 1.f);
 		// Audio in Rack is ±5V line level.
-		outputs[LEFT_OUTPUT].setVoltage(l * 5.f);
-		outputs[RIGHT_OUTPUT].setVoltage(r * 5.f);
+		outputs[LEFT_OUTPUT].setVoltage(l * 5.f * gain);
+		outputs[RIGHT_OUTPUT].setVoltage(r * 5.f * gain);
 		// The playing state is shown by the clickable LED (reads stream state).
 	}
 
@@ -427,37 +461,45 @@ struct RadioWidget : ModuleWidget {
 		addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 		addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
-		// Station artwork (visual identification) — square, below the header strip.
+		// Station artwork (visual identification) — large square below the header.
 		StationArt* art = new StationArt;
 		art->module = module;
-		art->box.pos = mm2px(Vec(6.32, 15.0));
+		art->box.pos = mm2px(Vec(6.32, 14.5));
 		art->box.size = mm2px(Vec(28.0, 28.0));
 		addChild(art);
 
+		// Clickable status LED, as a "live" badge on the artwork's bottom-right corner:
+		// green=playing, amber=connecting, red=stopped. Click toggles playback.
+		ClickableLed* led = new ClickableLed;
+		led->box.size = mm2px(Vec(5.0, 5.0));
+		led->box.pos = mm2px(Vec(31.0, 38.0)).minus(led->box.size.div(2));
+		led->isLive = [module]() { return module && module->stream.getState() == akaudio::StreamClient::State::Playing; };
+		led->isPending = [module]() { return module && module->playing && module->stream.getState() != akaudio::StreamClient::State::Playing; };
+		led->onToggle = [module]() { if (module) module->togglePlay(); };
+		addChild(led);
+
 		// On-panel station picker (click to choose a bundled station). Dark text on a
-		// subtle recessed field, matching the silver Fundamental theme.
+		// subtle recessed field, matching the silver Fundamental theme. Near full width
+		// so long station names fit.
 		StationChoice* choice = new StationChoice;
 		choice->module = module;
 		choice->mw = this;
 		choice->color = RADIO_TEXT;
 		choice->bgColor = nvgRGBA(0, 0, 0, 0x14);
 		choice->fontPath = asset::system("res/fonts/DejaVuSans.ttf");
-		choice->box.pos = mm2px(Vec(2.5, 45.0));
-		choice->box.size = mm2px(Vec(35.64, 8.0));
+		choice->box.pos = mm2px(Vec(3.0, 46.0));
+		choice->box.size = mm2px(Vec(34.64, 8.5));
 		addChild(choice);
 
-		// Clickable status LED: green=playing, amber=connecting, red=stopped.
-		// Click toggles playback (stop → red).
-		ClickableLed* led = new ClickableLed;
-		led->box.size = mm2px(Vec(5.5, 5.5));
-		led->box.pos = mm2px(Vec(20.32, 56.0)).minus(led->box.size.div(2));
-		led->isLive = [module]() { return module && module->stream.getState() == akaudio::StreamClient::State::Playing; };
-		led->isPending = [module]() { return module && module->playing && module->stream.getState() != akaudio::StreamClient::State::Playing; };
-		led->onToggle = [module]() { if (module) module->togglePlay(); };
-		addChild(led);
+		// Built-in VCA: a stock Fundamental RoundBlackKnob (centered) modulated by an
+		// optional CV cable below it. Labels "VOLUME"/"CV" are drawn by RadioDecor.
+		addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(20.32, 75.0)), module, Radio::VOLUME_PARAM));
+		addInput(createInputCentered<PJ301MPort>(mm2px(Vec(20.32, 93.0)), module, Radio::VOLUME_INPUT));
 
-		addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(13.0, 100.0)), module, Radio::LEFT_OUTPUT));
-		addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(27.0, 100.0)), module, Radio::RIGHT_OUTPUT));
+		// Stereo outputs on the bottom row (Fundamental's y=113.115), on the black
+		// plate drawn by RadioDecor; L/R labels also drawn there.
+		addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(13.0, 113.115)), module, Radio::LEFT_OUTPUT));
+		addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(27.0, 113.115)), module, Radio::RIGHT_OUTPUT));
 	}
 
 	void appendContextMenu(Menu* menu) override {
