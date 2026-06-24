@@ -1,16 +1,26 @@
 # CLAUDE.md — AK Audio VCV Rack plugin
 
-This file provides guidance to Claude Code (claude.ai/code) when working in this repository.
+Guidance for Claude Code working in this repo. See `../CLAUDE.md` for the surrounding
+workspace (the source-built Rack SDK at `../Rack`; never touch the user's Rack Pro app).
 
 ## What this is
 
-A single VCV Rack **plugin** (slug `akaudio`) containing multiple **modules** — the Bidoo model: one slug, one shared library, one VCV Library page, many modules. See `../CLAUDE.md` for the surrounding workspace (the source-built Rack SDK at `../Rack`, and the rule to never touch the user's Rack Pro app in `/Applications`).
+A single VCV Rack **plugin** (slug `akaudio`) with multiple **modules** — the Bidoo model:
+one slug, one shared library, one Library page, many modules. Both modules are
+"network audio → Rack engine" and share `src/net/`.
 
-Modules:
-- **Radio** (`src/Radio.cpp`) — streaming internet radio (Icecast/HTTP MP3) source. Implemented (v1).
-- **Ninjam** (`src/Ninjam.cpp`) — NINJAM jam **listener**. Listening does NOT use the NINJAM protocol and does not join the server: public NINJAM communities publish a live Icecast/HTTP stream of each room's mix, so this reuses `StreamClient` (same as Radio) pointed at a room's stream URL. Joining as a (silent) protocol participant — connect/auth-anonymous/subscribe/decode-OGG-intervals, as in `~/work/jamauv3` — remains a separate, much larger future feature. The panel is **20 HP** and hosts an in-panel browser of public rooms (search, scrollable list, per-row click-to-listen, peak meter) fed by `net/RoomDirectory` (background fetch of ninbot's directory); the room data and list never block the UI thread. See `TODO.md` ("Ninjam: server picker") for the design.
-
-Both are "network audio → Rack engine" and share `src/net/`.
+- **Radio** (`src/Radio.cpp`) — streaming internet radio source (Icecast/HTTP, MP3 /
+  AAC / HLS). Ships curated factory presets (see "Stations" below).
+- **Ninjam** (`src/Ninjam.cpp`) — NINJAM jam client, **two paths**:
+  - **LISTEN** — zero-dependency: consume a room's public Icecast/HTTP mix via
+    `StreamClient` (same as Radio). No protocol, no join.
+  - **JOIN** — the real **NINJAM protocol** (`src/net/ninjam/`): connect, anonymous
+    SHA1 auth, subscribe, decode the live multi-user OGG interval mix, **and transmit**
+    (poly IN jacks → downbeat-aligned OGG-Vorbis encode → upload; heard by other
+    clients). Room chat (send/recv) works. 20 HP panel with an in-panel room browser
+    (search, scrollable list, click-to-listen/join, peak meter) fed by
+    `net/RoomDirectory` (background fetch of ninbot's directory). UI never blocks on the
+    network. Open polish items in `TODO.md`.
 
 ## Build / install
 
@@ -21,57 +31,120 @@ make install         # package + install into ~/Library/Application Support/Rack
 make clean
 ```
 
-`make install` writes into the **shared** Rack user folder, i.e. the same plugins folder the user's Rack Pro app reads (the user has accepted this). The `Makefile` globs all of `src/**/*.cpp` via `find`, so new files under `src/` are picked up automatically.
+`make install` writes the **shared** Rack user folder (also read by the user's Rack Pro
+app — accepted). The Makefile globs `src/**/*.cpp` via `find`, so new files under `src/`
+are picked up automatically. It also compiles vendored **libogg + libvorbis**
+(`src/dep/libogg`, `src/dep/libvorbis`) directly — for OGG-Vorbis *encoding* (NINJAM
+transmit); no separate `make dep`. Decoding uses **stb_vorbis** (NINJAM intervals) and
+**dr_mp3** (radio). macOS-only AAC links `-framework AudioToolbox -framework CoreFoundation`
+(guarded by `ifdef ARCH_MAC`, after `include plugin.mk`).
 
 ## THE REALTIME / THREADING CONTRACT (most important thing to get right)
 
-Rack runs `Module::process(args)` on the **audio thread**, once per sample frame (tens of thousands of times per second). In `process()` and anything it calls:
+Rack runs `Module::process(args)` on the **audio thread**, once per sample frame (tens of
+thousands of times/sec). In `process()` and anything it calls:
 
-- **Never block, allocate, take a lock, or do I/O.** No `new`/`malloc`, no `std::mutex`, no syscalls, no network, no file access, no logging. Doing so causes audio dropouts/xruns.
-- All networking and decoding happens on a **background thread** (`akaudio::StreamClient`, `src/net/Stream.cpp`).
-- The two threads communicate **only** through a lock-free single-producer/single-consumer ring buffer (`akaudio::StereoRingBuffer`, `src/net/RingBuffer.hpp`): the net thread `push()`es decoded frames, `process()` `pull()`s one frame. `pull()` returns false on underrun → output silence, never wait.
+- **Never block, allocate, lock, or do I/O.** No `new`/`malloc`, no `std::mutex`, no
+  syscalls, network, file access, or logging — any of these causes audio dropouts/xruns.
+- All networking + decoding + encoding runs on **background threads** (`StreamClient`,
+  `nj::NjClient`).
+- The threads communicate **only** through lock-free SPSC ring buffers
+  (`akaudio::StereoRingBuffer`, `src/net/RingBuffer.hpp`): the bg thread `push()`es
+  decoded frames, `process()` `pull()`s one. `pull()` returns false on underrun → output
+  silence, never wait.
 
 Control flow rules:
-- **Start/stop the stream from the UI/main thread only** (context-menu actions, `dataFromJson`), never from `process()`. `StreamClient::stop()` joins the background thread — joining on the audio thread would stall audio.
-- `pull()` is the only `StreamClient` method safe to call from `process()`.
-- Update the engine sample rate via `onSampleRateChange()` → `StreamClient::setSampleRate()` (atomic; the resampler reads it per block).
+- **Start/stop streams/clients from the UI/main thread only** (menu actions,
+  `dataFromJson`), never from `process()` — `stop()` joins the bg thread.
+- `pull()` is the only such method safe to call from `process()`.
+- Update sample rate via `onSampleRateChange()` → `setSampleRate()` (atomic; the
+  resampler reads it per block).
 
-## net/ layer design (`src/net/`)
+## net/ layer (`src/net/`)
 
-- `RingBuffer.hpp` — lock-free SPSC stereo ring buffer; power-of-two capacity; atomic head/tail with acquire/release ordering.
-- `Stream.hpp` / `Stream.cpp` — `StreamClient`. Background thread: parse `http://host:port/path` → blocking socket connect → HTTP/1.0 GET with `Icy-MetaData: 0` (keeps the MP3 body clean) → stream body through **dr_mp3** (pull model; our `onRead` serves post-header leftover bytes then `recv()`s) → **linear resample** from stream rate to engine rate → `push()` to the ring. Backpressure: when the ring is full the producer briefly sleeps and retries, so it reads from the socket at playback speed and never drops audio. `stop()` sets an abort flag and `shutdown()`s the socket to interrupt a blocked `recv()`; `run()` owns the `close()`.
-  - **Non-seekable init (important):** `drmp3_init` is called with **NULL** seek/tell callbacks. dr_mp3 probes the first 10 bytes for an ID3v2 tag; on a live stream those are MP3 audio, so it tries to rewind — and a seek callback that returns `DRMP3_FALSE` makes init **abort** (`"Not an MP3 stream"`). Passing NULL takes dr_mp3's no-seek path: it discards those 10 bytes and the decoder re-syncs to the next frame. Without this, *no* live Icecast stream plays.
-- `../test/play_test.cpp` — standalone smoke test for the audio path (links only the net layer + dr_mp3, no Rack): drives `StreamClient` against a live stream and reports decoded-audio stats. Build/run: `c++ -std=c++11 -I src test/play_test.cpp src/net/Stream.cpp src/dep/dr_mp3_impl.cpp -o build/play_test && build/play_test [url] [seconds]`.
-- `Http.hpp` / `Http.cpp` — `httpGet(url, out)`: a tiny blocking HTTP(S) GET for small text bodies (the NINJAM room directory JSON; also playlist files for `StreamClient`). Must be called off the UI/audio thread (it blocks). Not for audio — streams go through `StreamClient`.
-- **Playlist resolution:** `StreamClient::run` auto-resolves `.pls` / `.m3u` URLs (NOT `.m3u8` = HLS) to the first stream URL before connecting — `httpGet` the playlist, scan for the first `http(s)` token (handles both PLS `FileN=` lines and M3U bare-URL lines), up to a few hops. Lets users paste a station's playlist link. (LiveATC ATC `.pls` resolves but the feed blocks non-browser access — ATC stays parked.)
-- `RoomDirectory.hpp` / `RoomDirectory.cpp` — background directory of public NINJAM rooms. `refresh()` fetches+parses `http://ninbot.com/app/servers.php` (jansson) on a worker thread into a mutex-guarded `vector<Room>`; the UI reads `rooms()` (sorted snapshot) and `status()` instantly, never blocking on the network. `Room.playUrl()` is the http MP3 mount `StreamClient` plays (ssl_stream is ignored in v1: no TLS).
-- `dep/dr_mp3.h` — vendored single-header MP3 decoder (public domain / MIT-0). `dep/dr_mp3_impl.cpp` is the one TU that defines `DR_MP3_IMPLEMENTATION`.
-
-- `Tls.hpp` / `Tls.cpp` — minimal TLS client over an already-connected fd, using the **OpenSSL that `libRack` exports** (535 SSL symbols; resolved at load via `-undefined dynamic_lookup`, no new dep). `tlsHandshake` does the handshake with **SNI**; `tlsRead`/`tlsWrite` fall back to plain `recv`/`send` when TLS is inactive, so the http and https paths share one code path. Certificate verification is **not enforced** (`SSL_VERIFY_NONE`, no bundled CA store) — adequate for public audio streams; tighten later if we ship a CA bundle. Both `StreamClient` and `httpGet` accept `https://`.
-
-- `AacDecoder.hpp` / `AacDecoder.cpp` — streaming ADTS-AAC decoder, **macOS only** (uses the system `AudioToolbox`: `AudioFileStream` parses ADTS into packets, `AudioConverter` → Float32 stereo). `#if defined(__APPLE__)`-gated; on other platforms `available()`/`init()` return false and the caller reports "AAC needs macOS". Push model: `feed()` raw bytes, decoded PCM arrives via `onPCM`. The Makefile links `-framework AudioToolbox -framework CoreFoundation` under `ifdef ARCH_MAC` (after `include plugin.mk`, where `ARCH_MAC` is defined).
-- **Codec is chosen at runtime** in `StreamClient::run` from the response `Content-Type` (`audio/aac`/`aacp`/`application/aac` → AAC; otherwise MP3 via dr_mp3). Both decoders feed the same linear resampler + backpressure push (`pushFrame` lambda).
-- `Hls.hpp` / `Hls.cpp` + `StreamClient::runHls` — **HLS** (`.m3u8`), **macOS only** (rides on the AAC path). HLS is segment-based, not a byte stream: `runHls` resolves a master playlist to a variant, then polls the live media playlist (`httpGet`), fetches each new `.ts` segment, runs `tsExtractAdts` (a tiny single-audio MPEG-TS → AAC-ADTS demux — finds the audio PES by `stream_id` 0xC0–0xDF, no PAT/PMT), and feeds the ADTS to `AacDecoder`. Backpressure on the ring paces playback; the ~1.3 s ring covers the per-segment fetch gap. `looksLikeHls` (`.m3u8` or `#EXTM3U`) routes `run` → `runHls` after playlist resolution. This is what makes **BBC Radio 4** (and most modern spoken/public radio) playable.
-
-Current limitations (future work): **no OGG/Vorbis** yet; AAC is macOS-only (other platforms fall back to an error); blocking connect (cancelled only via socket shutdown / OS timeout); linear (not band-limited) resampling.
+- `RingBuffer.hpp` — lock-free SPSC stereo ring; power-of-two capacity; atomic head/tail
+  with acquire/release ordering.
+- `Stream.{hpp,cpp}` — `StreamClient`. Bg thread: parse URL → blocking connect → HTTP/1.0
+  GET (`Icy-MetaData: 0`) → decode → **linear resample** to engine rate → `push()`.
+  Backpressure: when the ring is full the producer sleeps+retries, so it reads at
+  playback speed and never drops audio. `stop()` aborts via socket `shutdown()`.
+  - **Codec chosen at runtime** from `Content-Type`: AAC (`audio/aac`/`aacp`) → AAC path;
+    else MP3 via dr_mp3. Both feed the same resampler + backpressure push.
+  - **Non-seekable MP3 init (critical):** `drmp3_init` is called with **NULL** seek/tell
+    callbacks. A seek callback returning false makes init abort ("Not an MP3 stream") on
+    live streams (dr_mp3 probes the first 10 bytes for ID3v2 and tries to rewind). NULL
+    takes the no-seek path. Without this, *no* live Icecast stream plays.
+  - **Playlist resolution:** auto-resolves `.pls`/`.m3u` (not `.m3u8`) to the first stream
+    URL before connecting.
+- `Http.{hpp,cpp}` — `httpGet(url, out)`: tiny blocking HTTP(S) GET for small text bodies
+  (room directory JSON, playlists). Off-thread only; not for audio.
+- `Tls.{hpp,cpp}` — minimal TLS over a connected fd using the **OpenSSL `libRack`
+  exports** (resolved via `-undefined dynamic_lookup`, no new dep). SNI handshake;
+  `tlsRead`/`tlsWrite` fall back to plain `recv`/`send` when inactive so http/https share
+  one path. Cert verification **not enforced** (`SSL_VERIFY_NONE`) — fine for public
+  audio; tighten if we ship a CA bundle.
+- `AacDecoder.{hpp,cpp}` — streaming ADTS-AAC, **macOS only** (`AudioToolbox`). Push
+  model: `feed()` bytes → PCM via `onPCM`. Off-macOS: `available()` false.
+- `Hls.{hpp,cpp}` + `StreamClient::runHls` — **HLS** (`.m3u8`), **macOS only** (rides the
+  AAC path). Resolves master→variant, polls the live media playlist, fetches each `.ts`
+  segment, `tsExtractAdts` (tiny MPEG-TS→ADTS demux) → `AacDecoder`. `looksLikeHls`
+  routes `run`→`runHls`. Makes BBC Radio 4 etc. playable.
+- `RoomDirectory.{hpp,cpp}` — background directory of public NINJAM rooms. `refresh()`
+  fetches+parses `http://ninbot.com/app/servers.php` (jansson) into a mutex-guarded
+  `vector<Room>`; UI reads `rooms()`/`status()` instantly. `Room.playUrl()` is the http
+  MP3 mount (ssl_stream ignored).
+- `ninjam/` — the NINJAM protocol stack:
+  - `NjProtocol.{hpp,cpp}` — wire format (`[type u8][size u32 LE][payload]`, NUL-term
+    UTF-8 strings, LE ints), message build/parse, SHA1 auth
+    (`passhash=SHA1("user:pass")`, `response=SHA1(passhash+challenge8)`), chat
+    (`parseChat`/`buildChat`).
+  - `NjClient.{hpp,cpp}` — owns a TCP socket (port 2049) on a bg thread: connect, auth,
+    keepalive, metadata (tempo/roster), interval reassembly, decode/mix, transmit, chat.
+  - `NjAudio.{hpp,cpp}` — per-user interval decode (stb_vorbis) + tempo-driven interval
+    clock → ring.
+  - `NjEncoder.{hpp,cpp}` — OGG-Vorbis encode of local input intervals for upload.
 
 ## Adding a module
 
-1. `src/<Name>.cpp`: a `Module` subclass + a `ModuleWidget` subclass + `Model* model<Name> = createModel<...>("<Name>");`.
-2. `extern Model* model<Name>;` in `src/plugin.hpp`.
-3. `p->addModel(model<Name>);` in `src/plugin.cpp`.
-4. `res/<Name>.svg` panel (mm units; 1 HP = 5.08 mm wide, 128.5 mm tall) and a `modules[]` entry in `plugin.json`.
+1. `src/<Name>.cpp`: a `Module` subclass + `ModuleWidget` subclass +
+   `Model* model<Name> = createModel<...>("<Name>");`.
+2. `extern Model* model<Name>;` in `src/plugin.hpp`; `p->addModel(model<Name>);` in
+   `src/plugin.cpp`.
+3. `res/<Name>.svg` panel (mm; 1 HP = 5.08 mm wide, 128.5 mm tall) + a `modules[]` entry
+   in `plugin.json`.
 
 ## Persistence
 
-Module state is saved per-instance via `dataToJson`/`dataFromJson` (Radio persists `url`, `stationName`, `playing`; auto-resumes playback on patch load). The slug strings in `plugin.json` and `createModel(...)` are the permanent identity — don't rename them once patches reference them.
+Per-instance state via `dataToJson`/`dataFromJson` (Radio persists `url`/`stationName`/
+`icon`/`playing` and auto-resumes; Ninjam persists last server/credentials/room). The slug
+strings in `plugin.json` and `createModel(...)` are permanent identity — never rename once
+patches reference them.
 
 ## Stations = factory presets (Radio)
 
-Radio's "stations" are **curated factory presets**, not a bespoke database — we lean on Rack's native preset system. Each `.vcvm` is a module `toJson()` (`plugin`/`model`/`version`/`params`/`data`) whose `data` is `dataToJson` (`url`, `stationName`, `icon`, `playing:true`). Rack lists them under right-click → **Preset → (factory presets)**; we also surface them on-panel via a `StationChoice` (LedDisplayChoice) and a context-menu **Stations** submenu, both loading the chosen file through the public `ModuleWidget::loadAction` (so it's the real preset loader, with undo).
+Radio's "stations" are **curated factory presets**, not a bespoke DB — we lean on Rack's
+native preset system. Each `.vcvm` is a module `toJson()` whose `data` is `dataToJson`
+(`url`, `stationName`, `icon`, `playing:true`). Rack lists them under right-click →
+**Preset**; we also surface them via an on-panel `StationChoice` and a context-menu
+**Stations** submenu, both loading through `ModuleWidget::loadAction` (real preset loader,
+with undo).
 
-**Theme (deliberate): ambient/utility sound *sources*, NOT music.** Radio feeds a modular patch, so a fixed-tempo song is useless/distracting — the curated set is raw material for granular/ambient processing: **Nature** (Ambi Nature Radio, MyNoise Pure Nature, Nature Radio Rain), **Space** (Echoes of Blue Mars: Blue Mars / Cryosleep / Voices From Within), **Scanners** (Broadcastify police/fire/EMS feeds). All confirmed live `audio/mpeg` before shipping (liveness is mandatory — niche feeds rot; see `TODO.md`). Future: **Spoken** (BBC Radio 4 et al.) needs HLS; **ATC** (LiveATC) is `.pls`-wrapped + ToS-gray — both deferred.
+- **Theme (deliberate): ambient/utility sound *sources*, not music** — Radio feeds a
+  patch, so a fixed-tempo song fights it. Categories: Nature & Ambient, Space & Science,
+  Scanners, ATC, News & Talk, Spoken & Stories (see `presets/Radio/`).
+- **Liveness is mandatory** — niche feeds rot; confirm `audio/mpeg` (or AAC/HLS) live
+  before shipping. `tools/gen_stations.py` helps generate presets.
+- **Add a station = drop a verified `.vcvm` in `presets/Radio/<Category>/`** (named
+  `NN_<Name>.vcvm`). `appendStationDir()` recurses subfolders → submenus, mirroring
+  Rack's factory-preset folder convention.
+- **Artwork:** each preset carries `icon` = plugin-relative PNG (`res/stations/<id>.png`,
+  256² — NanoVG decodes png/jpg/gif but **not .ico**). Rendered on the panel
+  (`StationArt`) and as picker thumbnails (`StationItem`, green ring = current). A
+  hand-typed URL clears `icon` → ♪ placeholder.
 
-**Grouping.** Presets live in **category subfolders** (`presets/Radio/<Category>/NN_<Name>.vcvm`). `appendStationDir()` recurses: a subfolder becomes a submenu, a `.vcvm` becomes a station row — mirroring Rack's own factory-preset folder convention, so the native Preset menu groups identically. **Add a station = drop a verified `.vcvm` in the right `presets/Radio/<Category>/`.** Picking one calls `loadAction` → `dataFromJson`, which stops any current stream and starts the new URL.
+## Test harnesses (`test/`, no Rack link)
 
-**Station artwork (visual ID).** Each station carries an `icon` = plugin-relative PNG path (e.g. `stations/groovesalad.png`) under `res/stations/`. We **bundle** the art (fetched from SomaFM's logo API at build time, 256² PNG — NanoVG decodes png/jpg/gif but **not .ico**, so favicons must be PNG). It renders via `drawStationArt()` (`APP->window->loadImage` + `nvgImagePattern`, cached by path): a large square on the panel (`StationArt`) and a right-aligned thumbnail per row in the picker (`StationItem`, with a green ring on the current station). A hand-typed URL clears `icon` (no art → ♪ placeholder). **Runtime favicon fetching is deferred** to the radio-browser.info phase (download bytes off-thread via `httpGet`, `nvgCreateImageMem` on the UI thread, disk cache; PNG-only).
+- `play_test.cpp` — drives `StreamClient` against a live URL, reports decoded-audio stats.
+  `c++ -std=c++11 -I src test/play_test.cpp src/net/Stream.cpp src/dep/dr_mp3_impl.cpp -o build/play_test && build/play_test [url] [seconds]`.
+- `njclient_test.cpp` — NINJAM protocol client against a server.
+- `enc_test.cpp` — OGG-Vorbis encoder.
