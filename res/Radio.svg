@@ -8,4 +8,7 @@
   </defs>
   <rect width="40.64" height="128.5" fill="url(#bg)"/>
   <rect width="40.64" height="14" fill="#cfd2d6"/>
+  <!-- Scale ring around the VOLUME knob, Fundamental-style: a thin dark circle on the panel,
+       ~0.85 mm outside the knob's 4.8 mm radius. Centred on the knob at mm(20.32, 75). -->
+  <circle cx="20.32" cy="75" r="5.65" fill="none" stroke="#1f1f1f" stroke-width="0.3"/>
 </svg>
