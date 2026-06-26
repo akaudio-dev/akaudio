@@ -38,12 +38,23 @@ one slug, one shared library, one Library page, many modules. Both modules are
 
 ## Build / install
 
+You do **not** need a Rack *source* checkout. The Makefile builds against either a
+sibling Rack source tree (`../Rack`) **or** the official downloadable Rack **SDK**
+(`../Rack-SDK`), auto-detecting whichever exists (source preferred). The SDK alone is
+enough: it ships `plugin.mk`, `include/`, and `libRack.dylib` (the import library whose
+OpenSSL exports our TLS/SHA1 code resolves against — `-undefined dynamic_lookup` defers
+those to load time in the Rack app, so an SDK link is identical to a source link).
+
 ```bash
-export RACK_DIR=/Users/akozlov/work/VCV/Rack   # or rely on Makefile default ../Rack
-make                 # -> plugin.dylib
+tools/get_sdk.sh     # one-time: download the SDK into ../Rack-SDK (host OS/arch auto-picked)
+make                 # auto-detects ../Rack-SDK (or ../Rack) -> plugin.dylib
 make install         # package + install into ~/Library/Application Support/Rack2/plugins-mac-arm64/
 make clean
 ```
+
+Override the framework location explicitly with `make RACK_DIR=/path/to/Rack-SDK`.
+`tools/get_sdk.sh` defaults to Rack SDK 2.6.4 (`RACK_SDK_VERSION=...` to change) and
+selects the mac-arm64 / mac-x64 / lin-x64 / win-x64 zip for the host.
 
 `make install` writes the **shared** Rack user folder (also read by the user's Rack Pro
 app — accepted). The Makefile globs `src/**/*.cpp` via `find`, so new files under `src/`

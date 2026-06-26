@@ -1,5 +1,9 @@
-# If RACK_DIR is not defined when calling the Makefile, default to two directories above (the sibling Rack source build).
-RACK_DIR ?= ../Rack
+# Where to find Rack's plugin build framework + import library. Two supported sources:
+#   1. A sibling Rack *source* checkout (../Rack) — the original peer-of-enlistment setup.
+#   2. The official downloadable Rack *SDK* (../Rack-SDK) — no source checkout needed;
+#      run `tools/get_sdk.sh` to fetch it. The SDK alone is enough to build+link.
+# Prefer the source build if present, else fall back to the SDK. Override with `make RACK_DIR=...`.
+RACK_DIR ?= $(firstword $(wildcard ../Rack ../Rack-SDK) ../Rack)
 
 # FLAGS will be passed to both the C and C++ compiler
 FLAGS +=
