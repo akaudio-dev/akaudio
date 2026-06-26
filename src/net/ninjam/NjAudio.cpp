@@ -22,27 +22,40 @@ void NjAudio::setSampleRate(double sr) {
 	recomputeInterval();
 }
 
-void NjAudio::recomputeInterval() {
-	std::lock_guard<std::mutex> lock(mu);
+void NjAudio::recomputeIntervalLocked() {
 	double sr = sampleRate.load(std::memory_order_relaxed);
 	int n = 0;
 	if (bpm > 0 && bpi > 0 && sr > 0)
 		n = (int)std::llround((double)bpi * 60.0 * sr / (double)bpm);
 	int prev = intervalSamples.exchange(n, std::memory_order_relaxed);
 	if (n != prev) {
-		// Interval length changed (tempo/sr): queued intervals no longer match; drop them.
+		// Interval length changed (tempo/sr): queued intervals were gridded to the old
+		// length; drop them so we don't mix mismatched buffers.
 		for (auto& kv : channels)
 			kv.second.ready.clear();
 	}
 }
 
+void NjAudio::recomputeInterval() {
+	std::lock_guard<std::mutex> lock(mu);
+	recomputeIntervalLocked();
+}
+
 void NjAudio::setTempo(int newBpm, int newBpi) {
-	{
-		std::lock_guard<std::mutex> lock(mu);
+	std::lock_guard<std::mutex> lock(mu);
+	if (intervalSamples.load(std::memory_order_relaxed) <= 0) {
+		// No interval established yet (the initial config on join): apply immediately so
+		// the mixer/tx can start. Otherwise defer to the next interval boundary, applied
+		// in mixLoop — like njclient/JamTaba, a config change takes effect at the next
+		// interval cycle, leaving the current interval's audio untouched.
 		bpm = newBpm;
 		bpi = newBpi;
+		recomputeIntervalLocked();
+	} else {
+		pendingBpm = newBpm;
+		pendingBpi = newBpi;
+		tempoPending = true;
 	}
-	recomputeInterval();
 }
 
 void NjAudio::onUserChannel(const std::string& user, int chidx, bool active, int volDb10, int pan) {
@@ -154,6 +167,7 @@ std::vector<float> NjAudio::decodeOgg(const uint8_t* data, size_t len, int frame
 		return {};
 	stb_vorbis_info info = stb_vorbis_get_info(v);
 	int nch = info.channels;
+	int srcRate = (int)info.sample_rate;
 	if (nch < 1) { stb_vorbis_close(v); return {}; }
 
 	// Decode the whole interval to interleaved float at the source rate.
@@ -169,9 +183,22 @@ std::vector<float> NjAudio::decodeOgg(const uint8_t* data, size_t len, int frame
 	if (srcFrames <= 0)
 		return {};
 
-	// Resample srcFrames -> `frames` (this also converts source rate -> engine rate,
-	// since every client's interval spans the same musical length) and downmix to stereo.
-	std::vector<float> out((size_t)frames * 2);
+	// Resample by the FIXED source-rate -> engine-rate ratio and downmix to stereo, so
+	// playback speed depends only on sample rates — never on BPM/BPI (matches njclient/
+	// JamTaba). The interval grid is a SEPARATE concern: size the output to `frames`,
+	// padding with silence if the recording is shorter or truncating if longer (e.g. a
+	// pre-change interval landing after a BPI change). This decouples pitch from the grid,
+	// so a BPI change no longer doubles/halves the tempo.
+	double engineRate = sampleRate.load(std::memory_order_relaxed);
+	double ratio = (srcRate > 0 && engineRate > 0)
+		? (double)srcRate / engineRate          // samples to advance per output sample
+		: (double)srcFrames / (double)frames;   // fallback if rates unknown (old behaviour)
+	int outFrames = (int)std::llround((double)srcFrames / ratio); // srcFrames * engineRate/srcRate
+	if (outFrames < 0)
+		outFrames = 0;
+
+	std::vector<float> out((size_t)frames * 2, 0.f); // sized to the interval grid (silence-padded)
+	int limit = std::min(outFrames, frames);
 	auto srcStereo = [&](int idx, float& l, float& r) {
 		if (idx < 0) idx = 0;
 		if (idx >= srcFrames) idx = srcFrames - 1;
@@ -179,8 +206,7 @@ std::vector<float> NjAudio::decodeOgg(const uint8_t* data, size_t len, int frame
 		l = f[0];
 		r = nch >= 2 ? f[1] : f[0];
 	};
-	double ratio = (double)srcFrames / (double)frames;
-	for (int i = 0; i < frames; i++) {
+	for (int i = 0; i < limit; i++) {
 		double pos = (double)i * ratio;
 		int i0 = (int)pos;
 		double frac = pos - i0;
@@ -277,6 +303,19 @@ void NjAudio::mixLoop() {
 	std::chrono::steady_clock::time_point firstReady;
 
 	while (!abort.load(std::memory_order_acquire)) {
+		// Apply a deferred server tempo change here — the top of a cycle is an interval
+		// boundary — never mid-interval. The grid length changed, so re-prebuffer.
+		{
+			std::lock_guard<std::mutex> lock(mu);
+			if (tempoPending) {
+				bpm = pendingBpm;
+				bpi = pendingBpi;
+				tempoPending = false;
+				recomputeIntervalLocked();
+				started = false;
+				sawReady = false;
+			}
+		}
 		int N = intervalSamples.load(std::memory_order_relaxed);
 		if (N <= 0) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -352,8 +391,11 @@ void NjAudio::mixLoop() {
 			for (const Src& s : srcs) {
 				if (s.buf.empty() || s.slot < 0)
 					continue;
-				frame[s.slot * 2] += s.buf[(size_t)i * 2] * s.gl;
-				frame[s.slot * 2 + 1] += s.buf[(size_t)i * 2 + 1] * s.gr;
+				size_t idx = (size_t)i * 2;
+				if (idx + 1 >= s.buf.size())
+					continue; // past this interval's decoded audio -> silence (length guard)
+				frame[s.slot * 2] += s.buf[idx] * s.gl;
+				frame[s.slot * 2 + 1] += s.buf[idx + 1] * s.gr;
 			}
 			while (!ring.push(frame)) {
 				if (abort.load(std::memory_order_acquire))

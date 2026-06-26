@@ -147,6 +147,7 @@ private:
 
 	static std::string chanKey(const std::string& user, int chidx);
 	void recomputeInterval();
+	void recomputeIntervalLocked(); // caller holds mu
 	void enqueue(const std::string& key, std::vector<float>&& interval);
 	std::vector<float> decodeOgg(const uint8_t* data, size_t len, int frames);
 	void mixLoop();
@@ -169,6 +170,11 @@ private:
 	std::atomic<double> sampleRate{48000.0};
 	std::atomic<int> intervalSamples{0};
 	int bpm = 0, bpi = 0;
+	// A server tempo change is applied at the next interval boundary (in mixLoop),
+	// not instantly, so audio already decoded/queued for the current interval isn't
+	// re-gridded mid-flight (matches njclient/JamTaba). Guarded by mu.
+	int pendingBpm = 0, pendingBpi = 0;
+	bool tempoPending = false;
 
 	std::mutex mu; // guards channels, slots, tempo fields
 	std::map<std::string, Channel> channels;
