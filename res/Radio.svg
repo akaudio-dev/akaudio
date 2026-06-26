@@ -1,14 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="40.64mm" height="128.5mm" viewBox="0 0 40.64 128.5">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#f3f4f5"/>
-      <stop offset="1" stop-color="#dfe1e3"/>
+    <!-- userSpaceOnUse spanning the full height — matches the core/Fundamental panel
+         gradient exactly (NanoSVG mis-scales objectBoundingBox gradients). -->
+    <linearGradient id="bg" x1="20.32" y1="0" x2="20.32" y2="128.5" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ebebeb"/>
+      <stop offset="1" stop-color="#e1e1e1"/>
     </linearGradient>
   </defs>
   <rect width="40.64" height="128.5" fill="url(#bg)"/>
-  <rect width="40.64" height="14" fill="#cfd2d6"/>
-  <!-- Scale ring around the VOLUME knob, Fundamental-style: a thin dark circle on the panel,
-       ~0.85 mm outside the knob's 4.8 mm radius. Centred on the knob at mm(20.32, 75). -->
-  <circle cx="20.32" cy="75" r="5.65" fill="none" stroke="#1f1f1f" stroke-width="0.3"/>
 </svg>
