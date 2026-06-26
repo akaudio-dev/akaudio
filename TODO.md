@@ -6,17 +6,16 @@ not tracked here. Add stations by dropping a verified `.vcvm` in
 
 ## Radio
 
-- **Live curated DB (richer than bundled presets).** Optionally browse
-  radio-browser.info at runtime (its `/json/stations/search` API: name, url, codec,
-  bitrate, tags, country, popularity, last-check-ok). It is the canonical source
-  (confirmed: RadioUnit relies on it entirely). **Liveness validation is mandatory** —
-  scraped URLs rot; re-check before showing/shipping, drop dead ones. Likely shape:
-  bundle the current preset snapshot + an optional online refresh that generates `.vcvm`
-  presets and/or a `res/stations.json`. Data is CC0/free — verify attribution terms.
-- **Runtime favicon fetch.** For arbitrary (non-bundled) stations: download the
-  radio-browser `favicon` off-thread via `httpGet` → `nvgCreateImageMem` on the UI
-  thread → disk cache; filter to PNG/JPG (NanoVG can't decode `.ico`). Bundled presets
-  already carry `res/stations/<id>.png` art.
+- **Add-station-from-URL — shipped.** Paste a stream URL in the context menu → it
+  auditions (verify real audio → identify via radio-browser `byurl` → fetch favicon →
+  save a user preset). Favicon fetch + `.ico` parsing are done (`net/ImageCache`,
+  `net/StationImport`). Remaining ideas: a fuller *browse* of radio-browser's
+  `/json/stations/search` (a previous in-panel list was tried and reverted — 8 HP is too
+  small; would need a different surface), and SVG-favicon support (radio-browser often
+  serves SVG logos, which we currently skip → synth avatar; could rasterize via NanoSVG).
+- **Bundled presets rot — periodic re-verify.** A `tools/` liveness sweep (chunk-fetch
+  each `.vcvm` URL; treat a streaming mount as live even if momentarily silent, e.g. ATC
+  push-to-talk) to prune/refresh dead stations. 10 dead were pruned 2026-06-25.
 - **Codec/quality gaps.** No OGG/Vorbis on the *radio* stream path (NINJAM intervals do
   decode OGG via stb_vorbis). AAC + HLS are macOS-only (other platforms fall back to an
   error). Resampling is linear, not band-limited.
