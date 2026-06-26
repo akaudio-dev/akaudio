@@ -10,7 +10,12 @@ one slug, one shared library, one Library page, many modules. Both modules are
 "network audio → Rack engine" and share `src/net/`.
 
 - **Radio** (`src/Radio.cpp`) — streaming internet radio source (Icecast/HTTP, MP3 /
-  AAC / HLS). Ships curated factory presets (see "Stations" below).
+  AAC / HLS). Ships curated factory presets (see "Stations" below). Fundamental-style
+  panel with a **built-in VCA**: VOLUME knob (native exponential % taper, `gain =
+  2000^p·0.001` ≈ linear-in-dB; default unity, full-right +6 dB) + optional unipolar
+  0–10 V CV, feeding L/R outs on a black output plate. No custom `ParamQuantity`
+  subclass — uses Rack's native display scaling so the knob behaves identically across
+  the Free-SDK / Pro-host boundary (a prior custom subclass misbehaved there).
 - **Ninjam** (`src/Ninjam.cpp`) — NINJAM jam client, **two paths**:
   - **LISTEN** — zero-dependency: consume a room's public Icecast/HTTP mix via
     `StreamClient` (same as Radio). No protocol, no join.

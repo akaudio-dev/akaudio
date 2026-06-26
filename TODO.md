@@ -34,7 +34,6 @@ Works for `.ts`/AAC media playlists (BBC Radio 4 etc.). Still wanted:
 Protocol JOIN (connect/auth/subscribe/decode) and **transmit** (downbeat-aligned
 OGG-Vorbis encode → `UPLOAD_INTERVAL_*`) are both done and verified; chat send/recv works.
 Remaining polish:
-- Chat: own-vs-others colour, scrollback, message wrap.
 - Per-channel TX gain + name UI (multiple local channels).
 - Room browser: per-row tooltips (country/city from `users[]`), keyboard nav, persist
   scroll/filter, dim non-playable (TLS-only) rooms instead of hiding them.
