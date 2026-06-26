@@ -6,8 +6,11 @@
 #include <vector>
 
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 #include <netinet/in.h>
 
 #include "../dep/dr_mp3.h"
@@ -159,6 +162,7 @@ void StreamClient::start(const std::string& url) {
 	stop();
 	abort.store(false, std::memory_order_release);
 	running.store(true, std::memory_order_release);
+	produced.store(0, std::memory_order_release);
 	ring.clear();
 	setStatus(State::Connecting, "Connecting…");
 	thread = std::thread(&StreamClient::run, this, url);
@@ -187,7 +191,7 @@ void StreamClient::run(std::string url) {
 			break;
 		setStatus(State::Connecting, "Reading playlist\xe2\x80\xa6");
 		std::string body;
-		if (!httpGet(url, body))
+		if (!httpGet(url, body, &abort))
 			break;
 		std::string next = firstPlaylistUrl(body);
 		if (next.empty() || next == url)
@@ -220,24 +224,63 @@ void StreamClient::run(std::string url) {
 		return;
 	}
 
+	// Non-blocking connect that polls abort every 100 ms, so stop() (called on the
+	// UI thread on every station switch) never blocks on a slow/dead host's connect
+	// timeout — the cause of UI freezes when stepping quickly between stations.
 	int fd = -1;
 	for (addrinfo* ai = res; ai; ai = ai->ai_next) {
-		fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-		if (fd < 0)
+		int s = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+		if (s < 0)
 			continue;
-		if (::connect(fd, ai->ai_addr, ai->ai_addrlen) == 0)
+#ifdef SO_NOSIGPIPE
+		// Without this, a send() on a socket that stop() has shutdown() raises
+		// SIGPIPE, which terminates the whole process (Rack doesn't ignore it) —
+		// the crash seen when switching stations rapidly. Make writes return EPIPE.
+		int nosig = 1;
+		::setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &nosig, sizeof(nosig));
+#endif
+		sock.store(s, std::memory_order_release); // publish before connecting so stop() can see it
+
+		int flags = ::fcntl(s, F_GETFL, 0);
+		::fcntl(s, F_SETFL, flags | O_NONBLOCK);
+		int rc = ::connect(s, ai->ai_addr, ai->ai_addrlen);
+		bool connected = (rc == 0);
+		if (rc < 0 && errno == EINPROGRESS) {
+			for (int i = 0; i < 80 && !abort.load(std::memory_order_acquire); i++) {
+				fd_set wf;
+				FD_ZERO(&wf);
+				FD_SET(s, &wf);
+				timeval tv{0, 100 * 1000}; // 100 ms
+				int sel = ::select(s + 1, nullptr, &wf, nullptr, &tv);
+				if (sel > 0) {
+					int err = 0;
+					socklen_t len = sizeof(err);
+					::getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &len);
+					connected = (err == 0);
+					break;
+				}
+				if (sel < 0 && errno != EINTR)
+					break;
+			}
+		}
+		if (connected) {
+			::fcntl(s, F_SETFL, flags); // restore blocking for the read loop
+			fd = s;
 			break;
-		::close(fd);
-		fd = -1;
+		}
+		sock.store(-1, std::memory_order_release);
+		::close(s);
+		if (abort.load(std::memory_order_acquire))
+			break;
 	}
 	::freeaddrinfo(res);
 
 	if (fd < 0) {
-		setStatus(State::Error, "Connection failed");
+		bool aborted = abort.load(std::memory_order_acquire);
+		setStatus(aborted ? State::Stopped : State::Error, aborted ? "Stopped" : "Connection failed");
 		running.store(false, std::memory_order_release);
 		return;
 	}
-	sock.store(fd, std::memory_order_release);
 
 	// For https, wrap the socket in TLS before any HTTP I/O. Declared here (before
 	// the first `goto cleanup`) so it's in scope at the cleanup label, which frees
@@ -311,6 +354,7 @@ void StreamClient::run(std::string url) {
 					return false;
 				std::this_thread::sleep_for(std::chrono::milliseconds(2));
 			}
+			produced.fetch_add(1, std::memory_order_acq_rel);
 			return true;
 		};
 
@@ -476,7 +520,7 @@ void StreamClient::runHls(std::string url) {
 	std::string mediaUrl = url;
 	{
 		std::string body;
-		if (httpGet(url, body)) {
+		if (httpGet(url, body, &abort)) {
 			HlsPlaylist pl = parseHlsPlaylist(body);
 			if (pl.isMaster && !pl.variant.empty())
 				mediaUrl = urlJoin(url, pl.variant);
@@ -495,6 +539,7 @@ void StreamClient::runHls(std::string url) {
 				return false;
 			std::this_thread::sleep_for(std::chrono::milliseconds(2));
 		}
+		produced.fetch_add(1, std::memory_order_acq_rel);
 		return true;
 	};
 	dec.onPCM = [&](const float* pcm, int frames, double srcRate) {
@@ -535,7 +580,7 @@ void StreamClient::runHls(std::string url) {
 
 	while (running.load(std::memory_order_acquire) && !abort.load(std::memory_order_acquire) && !aborted) {
 		std::string body;
-		if (!httpGet(mediaUrl, body)) {
+		if (!httpGet(mediaUrl, body, &abort)) {
 			setStatus(State::Error, "Playlist fetch failed");
 			break;
 		}
@@ -550,7 +595,7 @@ void StreamClient::runHls(std::string url) {
 				break;
 
 			std::string seg;
-			if (!httpGet(urlJoin(mediaUrl, pl.segments[k]), seg))
+			if (!httpGet(urlJoin(mediaUrl, pl.segments[k]), seg, &abort))
 				continue;
 			std::string adts;
 			tsExtractAdts(reinterpret_cast<const uint8_t*>(seg.data()), seg.size(), adts);

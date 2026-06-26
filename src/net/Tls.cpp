@@ -1,6 +1,7 @@
 #include "Tls.hpp"
 
 #include <sys/socket.h>
+#include <cerrno>
 
 #include <openssl/ssl.h>
 
@@ -46,10 +47,25 @@ void tlsFree(Tls& t) {
 	}
 }
 
+// Returns >0 bytes, 0 on EOF, -1 on a real error, and -2 on would-block/timeout
+// (e.g. a socket with SO_RCVTIMEO) so the caller can poll an abort flag and retry
+// instead of treating a timeout as EOF.
 long tlsRead(const Tls& t, int fd, void* buf, size_t n) {
-	if (t.ssl)
-		return SSL_read((SSL*) t.ssl, buf, (int) n);
-	return (long) ::recv(fd, buf, n, 0);
+	if (t.ssl) {
+		int r = SSL_read((SSL*) t.ssl, buf, (int) n);
+		if (r > 0)
+			return r;
+		int err = SSL_get_error((SSL*) t.ssl, r);
+		if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+			return -2; // timed out / would block
+		if (err == SSL_ERROR_ZERO_RETURN)
+			return 0; // clean TLS close
+		return -1; // real error
+	}
+	long r = (long) ::recv(fd, buf, n, 0);
+	if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+		return -2;
+	return r;
 }
 
 long tlsWrite(const Tls& t, int fd, const void* buf, size_t n) {

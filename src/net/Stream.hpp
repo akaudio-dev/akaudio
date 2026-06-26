@@ -2,6 +2,7 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 
 #include "RingBuffer.hpp"
@@ -45,6 +46,13 @@ public:
 	State getState() const { return state.load(std::memory_order_acquire); }
 	std::string getStatusText();
 
+	// Total stereo frames actually decoded + pushed since the last start(). Unlike
+	// getState() (which flips to Playing once the decoder *inits*), this only moves
+	// when real audio flows — so "is audio actually playing?" is producedFrames()
+	// advancing, not state == Playing. Used to verify a stream and to keep the LED
+	// honest (a connected-but-silent stream never advances this).
+	uint64_t producedFrames() const { return produced.load(std::memory_order_acquire); }
+
 	// Audio thread: fetch the next stereo frame. Returns false on underrun
 	// (caller should output silence for this frame).
 	bool pull(float& l, float& r) { return ring.pull(l, r); }
@@ -61,6 +69,7 @@ private:
 	std::atomic<int> sock{-1}; // open socket fd, or -1; closed by stop() to interrupt recv
 	std::atomic<float> sampleRate{44100.f};
 	std::atomic<State> state{State::Stopped};
+	std::atomic<uint64_t> produced{0}; // stereo frames pushed since start(); resets on start()
 
 	std::mutex statusMutex;
 	std::string statusText;
