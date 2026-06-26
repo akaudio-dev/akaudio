@@ -75,6 +75,10 @@ struct Ninjam : Module {
 
 	// ---- Beat clock + metronome (meaningful only when joined to a tempo) ----
 	bool clickEnabled = false;            // metronome audible-click toggle (persisted)
+	// CLOCK output resolution in pulses per beat (PPQN). 1 = 1 pulse/beat (a step
+	// sequencer steps once per beat); 2 (default) suits modules that detect tempo
+	// assuming 2 pulses/beat; 24 ≈ MIDI-clock-style sync. Persisted.
+	std::atomic<int> clockPpqn{2};
 	std::atomic<int> currentBeat{-1};     // UI reads this; -1 = idle
 	std::atomic<float> jamPhase{0.f};     // 0..1 interval progress (UI progress bar)
 	std::atomic<bool> resyncBeat{false};  // set on join / tempo change to reset the clock
@@ -506,11 +510,16 @@ struct Ninjam : Module {
 				clickEnv -= args.sampleTime / 0.035f; // ~35 ms decay
 				if (clickEnv < 0.f) clickEnv = 0.f;
 			}
-			// CV sync outs: CLOCK = 50%-duty gate per beat; RESET = same pulse but only on
-			// the downbeat; RUN high while playing; PHASE = 0-10V ramp across the interval.
+			// CV sync outs: CLOCK = 50%-duty gate, `clockPpqn` pulses per beat; RESET = a
+			// pulse only on the interval downbeat; RUN high while playing; PHASE = 0-10V
+			// ramp across the interval.
 			float beatFrac = (float) (beatPhase / spb);                 // 0..1 within beat
 			float intervalPhase = ((float) beatIndex + beatFrac) / (float) bpiL; // 0..1
-			clockG = (beatFrac < 0.5f) ? 10.f : 0.f;
+			int ppqn = clockPpqn.load(std::memory_order_relaxed);
+			if (ppqn < 1) ppqn = 1;
+			float subFrac = beatFrac * (float) ppqn;
+			subFrac -= (float) (int) subFrac;                           // 0..1 within each sub-pulse
+			clockG = (subFrac < 0.5f) ? 10.f : 0.f;
 			resetG = (beatIndex == 0 && beatFrac < 0.5f) ? 10.f : 0.f;
 			runG = 10.f;
 			phaseV = intervalPhase * 10.f;
@@ -565,6 +574,7 @@ struct Ninjam : Module {
 		json_object_set_new(root, "joinPass", json_string(joinPass.c_str()));
 		json_object_set_new(root, "joined", json_boolean(joined));
 		json_object_set_new(root, "clickEnabled", json_boolean(clickEnabled));
+		json_object_set_new(root, "clockPpqn", json_integer(clockPpqn.load(std::memory_order_relaxed)));
 		json_object_set_new(root, "transmitting", json_boolean(transmitting));
 		json_object_set_new(root, "txQuality", json_real(txQuality));
 		json_t* hist = json_array();
@@ -595,6 +605,8 @@ struct Ninjam : Module {
 			joined = json_boolean_value(j);
 		if (json_t* j = json_object_get(root, "clickEnabled"))
 			clickEnabled = json_boolean_value(j);
+		if (json_t* j = json_object_get(root, "clockPpqn"))
+			clockPpqn.store((int) json_integer_value(j), std::memory_order_relaxed);
 		if (json_t* j = json_object_get(root, "transmitting"))
 			transmitting = json_boolean_value(j);
 		if (json_t* j = json_object_get(root, "txQuality"))
@@ -1742,6 +1754,17 @@ struct NinjamWidget : ModuleWidget {
 			if (module->isActive()) module->stopAll();
 		}));
 		menu->addChild(createBoolPtrMenuItem("Metronome click", "", &module->clickEnabled));
+
+		// CLOCK output resolution. 1 = once per beat (step sequencers); 2 (default) for
+		// modules that detect tempo assuming 2 pulses/beat; 24 ≈ MIDI-clock sync.
+		menu->addChild(createSubmenuItem("Clock: pulses per beat", "", [module](Menu* sub) {
+			static const int opts[] = {1, 2, 4, 8, 24};
+			for (int ppqn : opts) {
+				sub->addChild(createCheckMenuItem(string::f("%d / beat", ppqn), "",
+					[module, ppqn]() { return module->clockPpqn.load(std::memory_order_relaxed) == ppqn; },
+					[module, ppqn]() { module->clockPpqn.store(ppqn, std::memory_order_relaxed); }));
+			}
+		}));
 
 		menu->addChild(new MenuSeparator);
 		menu->addChild(createMenuLabel("Transmit quality"));
