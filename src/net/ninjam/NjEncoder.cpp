@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Andrey Kozlov
+
 #include "NjEncoder.hpp"
 
 #include <vorbis/vorbisenc.h>

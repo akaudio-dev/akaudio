@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Andrey Kozlov
+
 #pragma once
 // NINJAM wire protocol: message framing, the listen-only message subset, and the
 // SHA1 auth helper. Pure (no sockets) so it is unit-testable on its own.

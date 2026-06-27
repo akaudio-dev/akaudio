@@ -26,3 +26,15 @@ make clean
 2. Declare `extern Model* model<Name>;` in `src/plugin.hpp`.
 3. Register it with `p->addModel(model<Name>);` in `src/plugin.cpp`.
 4. Add a `res/<Name>.svg` panel and a module entry in `plugin.json`.
+
+## License
+
+Copyright © 2026 Andrey Kozlov.
+
+AK Audio is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See [LICENSE](LICENSE) for the full text.
+
+Bundled third-party code retains its own (GPL-compatible) license:
+libogg / libvorbis (BSD), stb_vorbis and dr_mp3 (public domain).

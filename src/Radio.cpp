@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Andrey Kozlov
+
 #include "plugin.hpp"
 #include "net/Stream.hpp"
 #include "net/StationImport.hpp"
