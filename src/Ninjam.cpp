@@ -713,8 +713,8 @@ static const NVGcolor TH_TEXT_DIM = nvgRGB(0x5c, 0x61, 0x68); // secondary text
 static const NVGcolor TH_CARD     = nvgRGB(0xd6, 0xd9, 0xdc); // card/well fill (vs panel)
 static const NVGcolor TH_CARD_BD  = nvgRGBA(0x00, 0x00, 0x00, 0x26); // card/well border
 static const NVGcolor TH_WELL     = nvgRGBA(0x00, 0x00, 0x00, 0x10); // recessed area fill
-static const NVGcolor TH_OUT_PLATE= nvgRGB(0x26, 0x29, 0x2e); // black output plate
-static const NVGcolor TH_OUT_TEXT = nvgRGB(0xe9, 0xec, 0xef); // label on a black plate
+static const NVGcolor TH_OUT_PLATE= nvgRGB(0x1f, 0x1f, 0x1f); // black output plate (Fundamental/Radio #1f1f1f)
+static const NVGcolor TH_OUT_TEXT = nvgRGB(0xf0, 0xf0, 0xf0); // label on a black plate (matches Radio/AUDIO #f0f0f0)
 static const NVGcolor TH_IN_BD    = nvgRGB(0x3c, 0x6f, 0xc4); // input frame stroke (blue)
 
 static std::string lower(std::string s) {
@@ -1534,9 +1534,14 @@ struct OutputSection : Widget {
 	// One jack row holds three stereo pairs: IN (left), MAIN (center), PLY (right);
 	// the TX LED tucks in the gap right after the IN pair. The three plates share the
 	// CV row's outer edges (IN-L sits under CLICK, PLY-R under PHASE) and are evenly spaced.
-	static constexpr float xInL = 0.12f, xInR = 0.26f, xTx = 0.19f;          // IN pair; TX LED centered between them
-	static constexpr float xMainL = 0.46f, xMainR = 0.60f, xPolyL = 0.74f, xPolyR = 0.88f; // out pairs (MAIN nudged toward PLY)
-	static constexpr float xClick = 0.12f, xClock = 0.31f, xReset = 0.50f, xRun = 0.69f, xPhase = 0.88f;
+	//
+	// Outer jack centers are placed so the group plates clear the panel edges by Radio's
+	// 3.9 mm plate margin: groupBox extends jh+pad = 18 px past the outer center, so the
+	// outer center sits at (mm2px(3.9)+18)/300 ≈ 0.0984 of the 20 HP (300 px) width. The
+	// rest are a linear remap of the old 0.12…0.88 layout onto 0.0984…0.9016.
+	static constexpr float xInL = 0.0984f, xInR = 0.2464f, xTx = 0.1724f;     // IN pair; TX LED centered between them
+	static constexpr float xMainL = 0.4577f, xMainR = 0.6057f, xPolyL = 0.7536f, xPolyR = 0.9016f; // out pairs (MAIN nudged toward PLY)
+	static constexpr float xClick = 0.0984f, xClock = 0.2992f, xReset = 0.5000f, xRun = 0.7008f, xPhase = 0.9016f;
 	// A rounded jack-group box. `plate` = solid black output plate (white labels);
 	// otherwise a light recessed well with a colored border (inputs).
 	static void groupBox(NVGcontext* vg, float w, float xL, float xR, float top, float h,
@@ -1544,7 +1549,9 @@ struct OutputSection : Widget {
 		const float jh = 13.f, pad = 5.f;
 		float x = w * xL - jh - pad, rx = w * xR + jh + pad;
 		nvgBeginPath(vg);
-		nvgRoundedRect(vg, x, top, rx - x, h, 4.f);
+		// Corner radius matches Radio's output plate (0.96 mm ≈ 2.84 px, the
+		// core/Fundamental value) so both modules read as one plugin family.
+		nvgRoundedRect(vg, x, top, rx - x, h, mm2px(0.96f));
 		nvgFillColor(vg, plate ? TH_OUT_PLATE : TH_WELL);
 		nvgFill(vg);
 		nvgStrokeColor(vg, border);
@@ -1554,20 +1561,25 @@ struct OutputSection : Widget {
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
 		const float w = box.size.x;
-		// Plates are 44 tall: label near the top (~local+5 from plate top), jack centered
-		// lower, leaving ~9 px of dark space below. Jack rows are 52 apart (set in the widget).
-
-		// Label sits high in the plate; the jack is low (only ~4 px of plate below it),
-		// matching Fundamental's OUT boxes. Jack local rows: IN 36, audio 88, CV 140.
+		// Plates mirror Radio's output plate exactly (top 104.66 mm, height 13.26 mm) so the
+		// two modules read identically. The CV row matches Radio's plate/jack; the audio row
+		// is the same plate raised to Radio's CV-input row (96.859 mm), so the IN/MAIN/PLY
+		// jacks line up with the neighbours' input row and the CV row with their output row.
+		// Y() converts an absolute-panel mm to this section's local coords; H() is a mm span.
+		auto Y = [&](float mm) { return mm2px(mm) - box.pos.y; };
+		auto H = [&](float mm) { return mm2px(mm); };
+		const float pTopHi = Y(104.66f - 16.256f), pTopLo = Y(104.66f); // plate tops: audio / CV
+		const float pH = H(13.26f);                                     // Radio's PLATE_H
+		const float labHi = Y(91.504f), labLo = Y(107.76f);            // labels = plate top + 3.1 mm
 
 		// INPUT group: light well, blue border, dark bold labels — same row as the outputs.
-		groupBox(vg, w, xInL, xInR, 58, 46, false, TH_IN_BD);
-		drawTxt(vg, FONT_BOLD, w * xInL, 67, 11.f, TH_TEXT_DIM, "L", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, w * xInR, 67, 11.f, TH_TEXT_DIM, "R", NVG_ALIGN_CENTER);
+		groupBox(vg, w, xInL, xInR, pTopHi, pH, false, TH_IN_BD);
+		drawTxt(vg, FONT_BOLD, w * xInL, labHi, 11.f, TH_TEXT_DIM, "L", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xInR, labHi, 11.f, TH_TEXT_DIM, "R", NVG_ALIGN_CENTER);
 
-		// Peak meter (thin bar above the jack rows, aligned to the plate edges). Centered in
-		// the gap between the panel content above (ends at local 42) and the plate tops (58).
-		const float bx = w * xClick - 18.f, by = 48, bw = (w * xPhase + 18.f) - bx, bh = 4;
+		// Peak meter (thin bar above the jack rows, aligned to the plate edges), in the gap
+		// between the panel content above and the plate tops.
+		const float bx = w * xClick - 18.f, by = Y(85.0f), bw = (w * xPhase + 18.f) - bx, bh = 4;
 		nvgBeginPath(vg);
 		nvgRoundedRect(vg, bx, by, bw, bh, 2);
 		nvgFillColor(vg, nvgRGBA(0, 0, 0, 0x33));
@@ -1586,19 +1598,23 @@ struct OutputSection : Widget {
 
 		// OUTPUTS: black plates with bold white labels.
 		const NVGcolor bd = nvgRGBA(0, 0, 0, 0x55);
-		groupBox(vg, w, xMainL, xMainR, 58, 46, true, bd);
-		groupBox(vg, w, xPolyL, xPolyR, 58, 46, true, bd);
-		drawTxt(vg, FONT_BOLD, w * xMainL, 67, 11.f, TH_OUT_TEXT, "MAIN L", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, w * xMainR, 67, 11.f, TH_OUT_TEXT, "MAIN R", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, w * xPolyL, 67, 11.f, TH_OUT_TEXT, "PLY L", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, w * xPolyR, 67, 11.f, TH_OUT_TEXT, "PLY R", NVG_ALIGN_CENTER);
+		groupBox(vg, w, xMainL, xMainR, pTopHi, pH, true, bd);
+		groupBox(vg, w, xPolyL, xPolyR, pTopHi, pH, true, bd);
+		drawTxt(vg, FONT_BOLD, w * xMainL, labHi, 11.f, TH_OUT_TEXT, "MAIN L", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xMainR, labHi, 11.f, TH_OUT_TEXT, "MAIN R", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xPolyL, labHi, 11.f, TH_OUT_TEXT, "PLY L", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xPolyR, labHi, 11.f, TH_OUT_TEXT, "PLY R", NVG_ALIGN_CENTER);
 
-		groupBox(vg, w, xClick, xPhase, 110, 46, true, bd);
-		drawTxt(vg, FONT_BOLD, w * xClick, 119, 9.5f, TH_OUT_TEXT, "CLICK", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, w * xClock, 119, 9.5f, TH_OUT_TEXT, "CLOCK", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, w * xReset, 119, 9.5f, TH_OUT_TEXT, "RESET", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, w * xRun, 119, 9.5f, TH_OUT_TEXT, "RUN", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, w * xPhase, 119, 9.5f, TH_OUT_TEXT, "PHASE", NVG_ALIGN_CENTER);
+		groupBox(vg, w, xClick, xPhase, pTopLo, pH, true, bd);
+		drawTxt(vg, FONT_BOLD, w * xClick, labLo, 9.5f, TH_OUT_TEXT, "CLICK", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xClock, labLo, 9.5f, TH_OUT_TEXT, "CLOCK", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xReset, labLo, 9.5f, TH_OUT_TEXT, "RESET", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xRun, labLo, 9.5f, TH_OUT_TEXT, "RUN", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xPhase, labLo, 9.5f, TH_OUT_TEXT, "PHASE", NVG_ALIGN_CENTER);
+
+		// "AK" maker mark below the output jacks, in the spot VCV uses for its logo —
+		// large + bold, at Radio's exact AK row (121 mm).
+		drawTxt(vg, FONT_BOLD, w / 2.f, Y(121.0f), 16.f, TH_TEXT, "AK", NVG_ALIGN_CENTER);
 	}
 };
 
@@ -1702,10 +1718,12 @@ struct NinjamWidget : ModuleWidget {
 		OutputSection* out = new OutputSection;
 		out->module = module;
 		out->box.pos = Vec(0, oy);
-		out->box.size = Vec(W, 162);
+		out->box.size = Vec(W, 180); // down to the panel bottom, room for the "AK" mark
 		addChild(out);
 
-		const float rowA = oy + 88, rowB = oy + 140; // 52px apart; low in plates
+		// Jack rows at Radio's exact grid: audio/IN row = Radio's CV-input row (96.859 mm),
+		// CV row = Radio's output row (113.115 mm) — absolute panel mm, independent of oy.
+		const float rowA = mm2px(96.859f), rowB = mm2px(113.115f);
 		// One row: TRANSMIT IN (poly) + TX LED, MAIN out, PLY out.
 		addInput(createInputCentered<PJ301MPort>(Vec(W * OutputSection::xInL, rowA), module, Ninjam::LEFT_INPUT));
 		addInput(createInputCentered<PJ301MPort>(Vec(W * OutputSection::xInR, rowA), module, Ninjam::RIGHT_INPUT));
@@ -1713,8 +1731,8 @@ struct NinjamWidget : ModuleWidget {
 		txBtn->module = module;
 		txBtn->box.size = Vec(11, 11);
 		// Center it in the IN well: horizontally between the two jacks, vertically between
-		// the L/R label row (oy+67) and the jack row (rowA), nudged up a few px off the jacks.
-		txBtn->box.pos = Vec(W * OutputSection::xTx - 5.5f, (oy + 67.f + rowA) / 2.f - 5.5f - 4.f);
+		// the L/R label row (91.504 mm) and the jack row (rowA), nudged up a few px off the jacks.
+		txBtn->box.pos = Vec(W * OutputSection::xTx - 5.5f, (mm2px(91.504f) + rowA) / 2.f - 5.5f - 4.f);
 		addChild(txBtn);
 		// Outputs: MAIN L/R + PLAYERS poly L/R, then CLICK/CLOCK/RESET/RUN/PHASE.
 		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xMainL, rowA), module, Ninjam::LEFT_OUTPUT));
