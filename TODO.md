@@ -32,10 +32,15 @@ Works for `.ts`/AAC media playlists (BBC Radio 4 etc.). Still wanted:
 
 Protocol JOIN (connect/auth/subscribe/decode) and **transmit** (downbeat-aligned
 OGG-Vorbis encode → `UPLOAD_INTERVAL_*`) are both done and verified; chat send/recv works.
+The panel is now visually consistent with Radio/Fundamental — dark `#1f1f1f` OUT plates,
+`#f0f0f0` labels, "AK" maker mark, and IN/OUT jack rows + plate keyed to Radio's exact mm
+grid (input row 96.859 mm, output row 113.115 mm, plate 104.66/13.26 mm, 3.9 mm margins).
 Remaining polish:
 - Per-channel TX gain + name UI (multiple local channels).
 - Room browser: per-row tooltips (country/city from `users[]`), keyboard nav, persist
   scroll/filter, dim non-playable (TLS-only) rooms instead of hiding them.
+- Unify NINJAM's left/right content margins: OUT plates now use Radio's 3.9 mm margin
+  while the chat/browser cards above still use a 6 px inset — pick one and apply it.
 
 ## Parked
 
