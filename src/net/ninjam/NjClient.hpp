@@ -27,7 +27,10 @@ namespace nj {
 
 class NjClient {
 public:
-	enum class State { Idle, Connecting, Authenticating, Connected, Error, Stopped };
+	// Stopped = we initiated the teardown (user pressed Leave). Disconnected = the server
+	// closed the connection out from under us (kick, server shutdown, network loss); the UI
+	// distinguishes the two so it can report an unexpected drop. Error = auth/protocol failure.
+	enum class State { Idle, Connecting, Authenticating, Connected, Error, Stopped, Disconnected };
 
 	struct Callbacks {
 		std::function<void(State, const std::string&)> onState;    // state transitions (+ message)

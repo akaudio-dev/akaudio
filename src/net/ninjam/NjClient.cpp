@@ -22,6 +22,7 @@ const char* stateName(NjClient::State s) {
 		case NjClient::State::Connected: return "Connected";
 		case NjClient::State::Error: return "Error";
 		case NjClient::State::Stopped: return "Stopped";
+		case NjClient::State::Disconnected: return "Disconnected";
 	}
 	return "?";
 }
@@ -357,8 +358,16 @@ done:
 	audio.stop();
 	int f = sock.exchange(-1, std::memory_order_acq_rel);
 	if (f >= 0) ::close(f);
+	// Terminal state, in priority order: a specific Error (auth/protocol failure) set via
+	// `goto done` stands as-is; otherwise distinguish who ended the session. abort set => the
+	// UI called stop() (user pressed Leave) => Stopped. abort clear => the loop fell out because
+	// the socket closed under us — a NINJAM kick is exactly this (the server broadcasts a
+	// "kicked by" chat MSG, then drops the TCP connection; there is no dedicated kick message),
+	// as is a server shutdown or network loss => Disconnected so the UI can report it.
 	if (st.load(std::memory_order_acquire) != State::Error)
-		setState(State::Stopped);
+		setState(abort.load(std::memory_order_acquire) ? State::Stopped
+		                                               : State::Disconnected,
+		         abort.load(std::memory_order_acquire) ? "" : "Disconnected by server");
 	running.store(false, std::memory_order_release);
 }
 

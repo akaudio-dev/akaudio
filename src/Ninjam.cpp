@@ -97,6 +97,18 @@ struct Ninjam : Module {
 	std::mutex rosterMutex;
 	std::vector<std::string> roster; // "name" of active remote users (UI thread reads)
 
+	// ---- Unexpected-disconnect reporting ----
+	// The network thread (onChat/onState) writes the raw reason; the UI thread reads it in
+	// handleServerDrop(). dropMutex guards both. `lastServerMsg` = the most recent server
+	// announcement (empty-sender MSG) — for a kick this is the "User X kicked by Y" line the
+	// server broadcasts just before dropping us. `termMsg` = the client's terminal Error/
+	// Disconnected message. `disconnectNote` (UI thread only) = the reason shown on the status
+	// bar after we auto-return to the connect view; "" when there is nothing to report.
+	std::mutex dropMutex;
+	std::string lastServerMsg;
+	std::string termMsg;
+	std::string disconnectNote;
+
 	// ---- Chat ----
 	// Room chat log. The network thread (onChat) appends; the UI thread reads a snapshot.
 	// Guarded by chatMutex. Declared before njclient so it outlives its callbacks.
@@ -237,8 +249,13 @@ struct Ninjam : Module {
 		// Log only the abnormal (errors / unexpected disconnects). onLog only fires for
 		// anomalies; onState logs only the Error state. Normal connect/auth/subscribe/stop
 		// stay silent. (Verbose per-event INFO logging available behind the commented line.)
-		cb.onState = [](akaudio::nj::NjClient::State s, const std::string& msg) {
-			if (s == akaudio::nj::NjClient::State::Error)
+		cb.onState = [this](akaudio::nj::NjClient::State s, const std::string& msg) {
+			using State = akaudio::nj::NjClient::State;
+			if (s == State::Error || s == State::Disconnected) {
+				std::lock_guard<std::mutex> lk(dropMutex);
+				termMsg = msg; // the terminal reason; handleServerDrop() surfaces it
+			}
+			if (s == State::Error)
 				WARN("akaudio.Ninjam: %s", msg.c_str());
 			// INFO("akaudio.Ninjam: state=%s %s", akaudio::nj::stateName(s), msg.c_str());
 		};
@@ -260,6 +277,13 @@ struct Ninjam : Module {
 		};
 		cb.onChat = [this](const akaudio::nj::ChatMessage& m) {
 			const std::string& c = m.cmd();
+			// A server message (MSG with an empty sender) carries server-side announcements —
+			// notably the "User X kicked by Y" line the server broadcasts right before it drops
+			// a kicked client. Stash the latest so an unexpected disconnect can report the reason.
+			if (c == "MSG" && m.arg(0).empty() && !m.arg(1).empty()) {
+				std::lock_guard<std::mutex> lk(dropMutex);
+				lastServerMsg = m.arg(1);
+			}
 			if (c == "MSG")          pushChat({m.arg(0), m.arg(1), ChatLine::Normal, isOwnSpeaker(m.arg(0))}); // speaker, text
 			else if (c == "PRIVMSG") pushChat({m.arg(0) + " (pm)", m.arg(1), ChatLine::Normal, isOwnSpeaker(m.arg(0))});
 			else if (c == "TOPIC") {
@@ -277,6 +301,7 @@ struct Ninjam : Module {
 
 	// Stop whatever is currently playing.
 	void stopAll() {
+		disconnectNote.clear(); // explicit user stop — nothing to report
 		if (listening) { stream.stop(); listening = false; }
 		if (joined) {
 			njclient.stop();
@@ -286,6 +311,28 @@ struct Ninjam : Module {
 			std::lock_guard<std::mutex> lock(rosterMutex);
 			roster.clear();
 		}
+	}
+
+	// UI thread. The JOIN bg thread exited on its own while we still believe we're joined —
+	// i.e. the server dropped us (kick / shutdown / network loss) or auth was rejected. Tear
+	// down the dead session (so the panel returns to the connect view) and record a reason to
+	// show on the status bar. Prefer the server's own words (the kick line) over the generic
+	// terminal message. Mirrors stopAll()'s JOIN cleanup, minus clearing the note.
+	void handleServerDrop() {
+		std::string reason;
+		{
+			std::lock_guard<std::mutex> lk(dropMutex);
+			reason = !lastServerMsg.empty() ? lastServerMsg
+			       : !termMsg.empty()       ? termMsg
+			                                : std::string("Disconnected by server");
+		}
+		disconnectNote = reason;
+		njclient.stop(); // join the already-exited thread
+		joined = false;
+		jamBpm.store(0, std::memory_order_relaxed);
+		jamBpi.store(0, std::memory_order_relaxed);
+		std::lock_guard<std::mutex> lock(rosterMutex);
+		roster.clear();
 	}
 
 	void setMode(int m) {
@@ -328,6 +375,7 @@ struct Ninjam : Module {
 	void listen() {
 		if (url.empty())
 			return;
+		disconnectNote.clear(); // a fresh source supersedes any prior drop reason
 		stream.start(url);
 		listening = true;
 	}
@@ -336,6 +384,12 @@ struct Ninjam : Module {
 	void joinStart() {
 		if (joinHost.empty())
 			return;
+		disconnectNote.clear(); // a fresh attempt supersedes any prior drop reason
+		{
+			std::lock_guard<std::mutex> lk(dropMutex);
+			lastServerMsg.clear();
+			termMsg.clear();
+		}
 		{
 			std::lock_guard<std::mutex> lock(rosterMutex);
 			roster.clear();
@@ -1206,9 +1260,15 @@ struct TransportBlock : Widget {
 		nvgStroke(vg);
 		std::string jam = module->jamStatusText();
 		const bool joined = !jam.empty();
-		drawTxt(vg, FONT_BOLD, 8, h / 2, 11.5f,
-			joined ? nvgRGB(0x1c, 0x7a, 0x3e) : TH_TEXT_DIM,
-			joined ? jam : module->directory.status(), NVG_ALIGN_LEFT, w - 8 - 44);
+		// When not joined, an unexpected drop reason (kick / server loss) takes over the line in
+		// amber until the next connect attempt; otherwise the live room-directory status shows.
+		const bool dropped = !joined && !module->disconnectNote.empty();
+		NVGcolor col = joined  ? nvgRGB(0x1c, 0x7a, 0x3e)
+		             : dropped ? nvgRGB(0xc0, 0x7a, 0x16)
+		                       : TH_TEXT_DIM;
+		drawTxt(vg, FONT_BOLD, 8, h / 2, 11.5f, col,
+			joined ? jam : dropped ? module->disconnectNote : module->directory.status(),
+			NVG_ALIGN_LEFT, w - 8 - 44);
 	}
 };
 
@@ -1748,6 +1808,11 @@ struct NinjamWidget : ModuleWidget {
 
 	// Swap connect UI <-> jam view each frame; keep our broadcast channels in sync.
 	void step() override {
+		// If we still believe we're joined but the JOIN bg thread has exited on its own, the
+		// server dropped us (kick / shutdown / network loss) or auth was rejected. Reconcile on
+		// the UI thread so the panel returns to the connect view and reports the reason.
+		if (nj && nj->joined && !nj->njclient.isRunning())
+			nj->handleServerDrop();
 		bool joined = nj && nj->joined;
 		if (joinCard) joinCard->visible = !joined;
 		if (search) search->visible = !joined;
