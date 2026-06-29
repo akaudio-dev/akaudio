@@ -12,7 +12,8 @@ go build -C "$TW" -o "$HERE/build/trusty_weaver" .
 
 cd "$HERE"
 # Files in deliberate reading order: identity -> realtime bridge -> streaming
-# core -> transport/codec layers -> room directory -> the two modules.
+# core -> transport/codec layers -> Radio's image cache + add-from-URL import ->
+# room directory -> NINJAM protocol stack -> the two modules.
 build/trusty_weaver \
   -title "AK Audio" \
   -subtitle "A VCV Rack plugin" \
@@ -32,8 +33,20 @@ build/trusty_weaver \
   src/net/AacDecoder.cpp \
   src/net/Hls.hpp \
   src/net/Hls.cpp \
+  src/net/ImageCache.hpp \
+  src/net/ImageCache.cpp \
+  src/net/StationImport.hpp \
+  src/net/StationImport.cpp \
   src/net/RoomDirectory.hpp \
   src/net/RoomDirectory.cpp \
+  src/net/ninjam/NjProtocol.hpp \
+  src/net/ninjam/NjProtocol.cpp \
+  src/net/ninjam/NjAudio.hpp \
+  src/net/ninjam/NjAudio.cpp \
+  src/net/ninjam/NjEncoder.hpp \
+  src/net/ninjam/NjEncoder.cpp \
+  src/net/ninjam/NjClient.hpp \
+  src/net/ninjam/NjClient.cpp \
   src/ClickableLed.hpp \
   src/Radio.cpp \
   src/Ninjam.cpp

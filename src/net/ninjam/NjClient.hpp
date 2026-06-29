@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Andrey Kozlov
+// Copyright (C) 2026 Andrei Kozlov
 
 #pragma once
 // NjClient — a NINJAM protocol client (TCP, default port 2049) on a background thread.

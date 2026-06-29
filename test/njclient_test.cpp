@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Andrey Kozlov
+// Copyright (C) 2026 Andrei Kozlov
 
 // Standalone harness for the NINJAM protocol client (Phases 1-2): connect to a
 // server, anonymous SHA1 auth, keepalive, and print the live room metadata

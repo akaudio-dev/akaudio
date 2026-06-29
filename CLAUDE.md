@@ -5,12 +5,12 @@ workspace (the source-built Rack SDK at `../Rack`; never touch the user's Rack P
 
 ## What this is
 
-A single VCV Rack **plugin** (slug `akaudio`) with multiple **modules** — the Bidoo model:
-one slug, one shared library, one Library page, many modules. Both modules are
+A single VCV Rack **plugin** (slug `akaudio`) with multiple **modules**:
+one slug, one shared library, one Library page, two modules (for now). Both modules are
 "network audio → Rack engine" and share `src/net/`.
 
 - **Radio** (`src/Radio.cpp`) — streaming internet radio source (Icecast/HTTP, MP3 /
-  AAC / HLS). Ships curated factory presets (see "Stations" below). Panel matches VCV
+  AAC / HLS). Ships some factory presets (see "Stations" below). Panel matches VCV
   core/Fundamental exactly (it deliberately mirrors the **AUDIO** module): `ebebeb→e1e1e1`
   gradient, `#1f1f1f` Nunito-Bold title, a **built-in VCA** on a `RoundLargeBlackKnob`
   **LEVEL** knob with the AUDIO taper (`configParam(0,2,1,"Level"," dB",-10,40)`, gain =
@@ -166,7 +166,7 @@ patches reference them.
 
 ## Stations = factory presets (Radio)
 
-Radio's "stations" are **curated factory presets**, not a bespoke DB — we lean on Rack's
+Radio's "stations" are **factory presets**, not a bespoke DB — we lean on Rack's
 native preset system. Each `.vcvm` is a module `toJson()` whose `data` is `dataToJson`
 (`url`, `stationName`, `icon`, `playing:true`). Rack lists them under right-click →
 **Preset**; we also surface them via an on-panel `StationChoice` and a context-menu
@@ -175,9 +175,10 @@ with undo).
 
 - **Theme (deliberate): ambient/utility sound *sources*, not music** — Radio feeds a
   patch, so a fixed-tempo song fights it. Categories: Nature & Ambient, Space & Science,
-  Scanners, ATC, News & Talk, Spoken & Stories (see `presets/Radio/`).
+  Scanners & ATC, News & Talk, Spoken & Stories (see `presets/Radio/`).
 - **Liveness is mandatory** — niche feeds rot; confirm `audio/mpeg` (or AAC/HLS) live
-  before shipping. `tools/gen_stations.py` helps generate presets.
+  before shipping (drive the URL through `test/play_test.cpp` and check it decodes real
+  audio, not just connects).
 - **Add a station = drop a verified `.vcvm` in `presets/Radio/<Category>/`** (named
   `NN_<Name>.vcvm`). `appendStationDir()` recurses subfolders → submenus, mirroring
   Rack's factory-preset folder convention. At runtime, users add their own by pasting a
@@ -191,6 +192,16 @@ with undo).
 ## Test harnesses (`test/`, no Rack link)
 
 - `play_test.cpp` — drives `StreamClient` against a live URL, reports decoded-audio stats.
-  `c++ -std=c++11 -I src test/play_test.cpp src/net/Stream.cpp src/dep/dr_mp3_impl.cpp -o build/play_test && build/play_test [url] [seconds]`.
+  `StreamClient` now pulls in the TLS/HTTP/HLS/AAC layers, so the link needs them plus
+  OpenSSL (the `libRack` dep's static libs work for a standalone test) and, on macOS, the
+  AAC frameworks:
+  ```bash
+  c++ -std=c++11 -I src -I $RACK_DIR/dep/include test/play_test.cpp \
+    src/net/Stream.cpp src/net/Http.cpp src/net/Tls.cpp src/net/Hls.cpp src/net/AacDecoder.cpp \
+    src/dep/dr_mp3_impl.cpp \
+    $RACK_DIR/dep/lib/libssl.a $RACK_DIR/dep/lib/libcrypto.a \
+    -framework AudioToolbox -framework CoreFoundation \
+    -o build/play_test && build/play_test [url] [seconds]
+  ```
 - `njclient_test.cpp` — NINJAM protocol client against a server.
 - `enc_test.cpp` — OGG-Vorbis encoder.

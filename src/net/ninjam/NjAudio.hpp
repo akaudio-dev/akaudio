@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Andrey Kozlov
+// Copyright (C) 2026 Andrei Kozlov
 
 #pragma once
 // NjAudio — NINJAM interval audio: reassembly, OGG decode, per-player mix, realtime pacing.

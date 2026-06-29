@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Andrey Kozlov
+// Copyright (C) 2026 Andrei Kozlov
 
 #pragma once
 // OGG Vorbis encoder for NINJAM transmit. Encodes one complete interval of interleaved

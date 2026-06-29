@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Andrey Kozlov
+// Copyright (C) 2026 Andrei Kozlov
 
 // Round-trip test for the OGG Vorbis encoder (transmit path): encode a stereo sine tone
 // interval, then decode it back with stb_vorbis and check it survived.

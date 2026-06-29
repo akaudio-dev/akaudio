@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Andrey Kozlov
+// Copyright (C) 2026 Andrei Kozlov
 
 #include "plugin.hpp"
 #include "net/Stream.hpp"
@@ -100,15 +100,15 @@ struct Radio : Module {
 	// "Add a station from a URL" worker: verify → identify (radio-browser) →
 	// favicon → save a user preset, all off-thread. The widget polls it.
 	akaudio::StationImporter importer;
-	// Default to a calm ambient bed; "stations" are curated factory presets
+	// Default to a calm ambient bed; "stations" are factory presets
 	// (sound sources for soundscapes — nature, scanners, space — not music).
 	std::string url = "https://nature-rex.radioca.st/stream";
 	// Human label for the current station (shown on the panel, persisted in
 	// presets). See presets/Radio/ for the grouped set.
 	std::string stationName = "Ambi Nature Radio";
 	// Plugin-relative path to the station's bundled artwork (e.g.
-	// "stations/ambinature.png"), shown on the panel. Empty = ♪ placeholder.
-	std::string icon = "stations/ambinature.png";
+	// "stations/bbcworldservice.png"), shown on the panel. Empty = ♪ placeholder.
+	std::string icon = "";
 	bool playing = false;
 
 	// --- Audition / import coordination (UI thread only) ---

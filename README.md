@@ -1,6 +1,6 @@
 # AK Audio
 
-A personal VCV Rack plugin (collection of modules) by Andrey Kozlov.
+A personal VCV Rack plugin (collection of modules) by Andrei Kozlov.
 
 Modules:
 
@@ -14,7 +14,7 @@ Both modules share the networked-audio layer in `src/net/` (HTTP/Icecast streami
 This plugin builds against a sibling source build of Rack at `../Rack`.
 
 ```bash
-export RACK_DIR=/Users/akozlov/work/VCV/Rack   # or rely on the Makefile default ../Rack
+export RACK_DIR=/path/to/Rack   # or rely on the Makefile default ../Rack
 make            # -> plugin.dylib
 make install    # package + install into the Rack user plugins folder
 make clean
@@ -29,7 +29,7 @@ make clean
 
 ## License
 
-Copyright © 2026 Andrey Kozlov.
+Copyright © 2026 Andrei Kozlov.
 
 AK Audio is free software: you can redistribute it and/or modify it under the
 terms of the GNU General Public License as published by the Free Software

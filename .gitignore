@@ -4,6 +4,3 @@
 /plugin.so
 /plugin.dll
 .DS_Store
-
-# Reference snapshots scraped from third-party radio AUs (proprietary / low-trust) — keep local, do not commit
-/data/

@@ -2,7 +2,7 @@
 
 Only open/future work lives here. Shipped features are documented in `CLAUDE.md`,
 not tracked here. Add stations by dropping a verified `.vcvm` in
-`presets/Radio/<Category>/` (see `tools/gen_stations.py`).
+`presets/Radio/<Category>/` (verify liveness with `test/play_test.cpp` first).
 
 ## Radio
 
@@ -47,5 +47,6 @@ Remaining polish:
 - **LiveATC** — `.pls` resolves but the feed blocks non-browser clients (would need
   UA-spoofing). ATC is instead served via Broadcastify feeds (plain MP3): add one by
   dropping a `.vcvm` pointing at `broadcastify.cdnstream1.com/<id>` in
-  `presets/Radio/ATC/`. ATC is push-to-talk — verify over a ~30 s window (short windows
-  hit silent gaps).
+  `presets/Radio/Scanners & ATC/` (the ATC and Scanners categories were merged). ATC and
+  scanner feeds are push-to-talk — verify over a ~30 s window (short windows hit silent
+  gaps), and discard feeds that decode pure digital silence (offline).

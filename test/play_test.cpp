@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Andrey Kozlov
+// Copyright (C) 2026 Andrei Kozlov
 
 // Standalone smoke test for the net/ audio path: drive StreamClient against a
 // live HTTP/Icecast MP3 stream (default: a ninbot NINJAM room) and confirm we
