@@ -27,6 +27,23 @@ make clean
 3. Register it with `p->addModel(model<Name>);` in `src/plugin.cpp`.
 4. Add a `res/<Name>.svg` panel and a module entry in `plugin.json`.
 
+## Privacy
+
+AK Audio makes network connections only when you ask it to, and only to the servers
+needed to play what you choose. There is **no telemetry, analytics, tracking, or
+account** — nothing is sent anywhere except the servers below, and only while a module
+is active.
+
+- **Radio / Ninjam (LISTEN)** — connects to the stream URL you select (or a bundled
+  station preset) to play its audio.
+- **Add a station from a URL** — looks the URL up on [radio-browser.info](https://www.radio-browser.info)
+  to fetch the station's name and icon.
+- **Ninjam (JOIN)** — connects to the NINJAM server you choose (anonymous login) to
+  exchange audio and chat; the room browser fetches the public room list from ninbot.com.
+
+Stream connections use TLS where the server offers it, but server certificates are not
+currently verified — appropriate for public audio, not for anything sensitive.
+
 ## License
 
 Copyright © 2026 Andrei Kozlov.

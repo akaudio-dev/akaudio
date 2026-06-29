@@ -4,6 +4,31 @@ Only open/future work lives here. Shipped features are documented in `CLAUDE.md`
 not tracked here. Add stations by dropping a verified `.vcvm` in
 `presets/Radio/<Category>/` (verify liveness with `test/play_test.cpp` first).
 
+## VCV Library submission (active milestone)
+
+Goal: get `akaudio` into the official VCV Library. The library builds from source on **all
+four targets** (mac-x64, mac-arm64, lin-x64, win-x64), so the blocker is cross-platform
+build, not packaging. Process + rules are in `CLAUDE.md` → "Publishing to the VCV Library".
+
+- [ ] **Verify the Linux build** (we have Linux access). Quickest: build against the
+      Linux Rack SDK (`tools/get_sdk.sh` picks the host zip) and `make`; or use the
+      `rack-plugin-toolchain` for a farm-identical build. Expect the TLS/OpenSSL symbols to
+      resolve at `dlopen` — confirm it links.
+- [ ] **Verify the Windows build (the likely blocker)** on the new Windows box.
+      `src/net/Tls.cpp` pulls `SSL_*` from `libRack`; a Windows DLL must resolve every
+      symbol at link time, so this may fail if `libRack`-win doesn't export OpenSSL. If it
+      fails: `ifdef` networking off on Windows, bundle a small TLS lib, or use Rack's
+      `network.hpp`/libcurl on Windows. (Details in `CLAUDE.md`.)
+- [ ] **Run the full `rack-plugin-toolchain`** (Docker, ~15 GB / 8 GB) to produce all four
+      `.vcvplugin`s the way VCV's farm will — the real acceptance gate.
+- [ ] **README privacy note** — one line: connects only to user-selected stream/room +
+      radio-browser/favicon servers, no telemetry. (Ethics: "no harming privacy.") Decide
+      whether to keep `SSL_VERIFY_NONE` or verify certs.
+- [ ] **Optional manifest polish** — set `manualUrl` (README) and `changelogUrl` in
+      `plugin.json` before submitting.
+- [ ] **Flip the repo to public**, then open **one** issue on `VCVRack/library` titled
+      `akaudio` (the slug, not "AK Audio") with the source URL.
+
 ## Radio
 
 - **Add-station-from-URL — shipped.** Paste a stream URL in the context menu → it

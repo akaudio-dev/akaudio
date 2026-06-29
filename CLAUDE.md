@@ -10,8 +10,8 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
 "network audio → Rack engine" and share `src/net/`.
 
 - **Radio** (`src/Radio.cpp`) — streaming internet radio source (Icecast/HTTP, MP3 /
-  AAC / HLS). Ships some factory presets (see "Stations" below). Panel matches VCV
-  core/Fundamental exactly (it deliberately mirrors the **AUDIO** module): `ebebeb→e1e1e1`
+  AAC / HLS). Ships some factory presets (see "Stations" below). Panel follows VCV's
+  core/Fundamental house style and the standard **AUDIO** control vocabulary: `ebebeb→e1e1e1`
   gradient, `#1f1f1f` Nunito-Bold title, a **built-in VCA** on a `RoundLargeBlackKnob`
   **LEVEL** knob with the AUDIO taper (`configParam(0,2,1,"Level"," dB",-10,40)`, gain =
   `param²`, −∞…+12 dB) + its gauge ring, optional unipolar 0–10 V CV, and a dark
@@ -205,3 +205,46 @@ with undo).
   ```
 - `njclient_test.cpp` — NINJAM protocol client against a server.
 - `enc_test.cpp` — OGG-Vorbis encoder.
+
+## Publishing to the VCV Library
+
+The official library is **build-from-source**: VCV's farm compiles your repo for **all
+four targets** (mac-x64, mac-arm64, lin-x64, win-x64) with the
+[rack-plugin-toolchain](https://github.com/VCVRack/rack-plugin-toolchain). You submit a
+*source URL + commit*, not binaries. So the gating requirement is **it must build *and
+link* on every platform**, not just macOS.
+
+- **Cross-platform build is the real hurdle (verify before submitting).** Run all targets
+  via the toolchain (Docker; ~15 GB disk, 8 GB RAM): `make plugin-build` against this repo.
+  Known risk areas:
+  - **TLS/OpenSSL (`src/net/Tls.cpp`)** resolves `SSL_*`/SHA1 from `libRack`'s OpenSSL
+    exports. macOS uses `-undefined dynamic_lookup` (deferred to load time); Linux resolves
+    undefined `.so` symbols at `dlopen` (usually fine); **Windows DLLs must resolve every
+    symbol at link time** against an import lib — if `libRack`-win doesn't export those
+    OpenSSL symbols, the **Windows link fails**. This is the most likely blocker. Fallbacks
+    if so: `ifdef` networking off on Windows, bundle a small TLS lib, or route through
+    Rack's `network.hpp`/libcurl on Windows.
+  - **macOS-only AAC/HLS** (`AacDecoder`/`Hls`, AudioToolbox) are `ifdef ARCH_MAC`-guarded
+    in the Makefile and degrade gracefully off-mac (no AAC/HLS, MP3 still works) — should
+    compile everywhere.
+- **Manifest/version rules** the library enforces (see `plugin.json`): `slug` is permanent
+  identity (only `[A-Za-z0-9_-]`, never rename post-release); `version` is
+  `MAJOR.MINOR.REVISION` with **MAJOR = Rack major (2)**, no `v` prefix; `sourceUrl` is the
+  repo homepage (not the `.git` URL); `license` is an SPDX id (ours `GPL-3.0-or-later` —
+  required to be GPLv3 anyway since the TLS code links Rack's OpenSSL).
+- **Ethics guidelines** (VCV reviews these): no cloning the brand/logo/**panel design or
+  component layout** of an existing product without permission, and no harming the user's
+  computer or **privacy**. Two things to be ready to defend for this plugin: (1) Radio's
+  panel uses VCV's standard **AUDIO** control vocabulary (its own house style, not a
+  third-party product's design); (2) all network access is user-initiated
+  (chosen stream/room URLs, radio-browser lookups, favicon fetches) with **no telemetry** —
+  worth a one-line privacy note in the README. A reviewer may also note TLS uses
+  `SSL_VERIFY_NONE` (certs not verified).
+- **Submission (open-source):** make the repo public, then open **exactly one issue** on
+  [VCVRack/library](https://github.com/VCVRack/library) with the **title = slug (`akaudio`,
+  not "AK Audio")** and the source URL in the body. A maintainer reviews + builds + publishes.
+- **Every later release:** bump `version` in `plugin.json`, commit, push, then **comment on
+  that same issue** with the new version and the exact **commit hash** (`git rev-parse
+  HEAD`) — never a branch name. (A git tag like `v2.0.0` is good hygiene but the library
+  keys off the commit hash, not the tag.)
+- Commercial/closed-source instead: email `contact@vcvrack.com`.
