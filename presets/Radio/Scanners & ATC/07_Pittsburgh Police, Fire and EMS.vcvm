@@ -1,0 +1,12 @@
+{
+  "plugin": "akaudio",
+  "model": "Radio",
+  "version": "2.0.0",
+  "params": [],
+  "data": {
+    "url": "https://broadcastify.cdnstream1.com/21738",
+    "stationName": "Pittsburgh Police, Fire and EMS",
+    "icon": "",
+    "playing": true
+  }
+}

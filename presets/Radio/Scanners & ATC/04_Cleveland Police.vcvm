@@ -1,0 +1,12 @@
+{
+  "plugin": "akaudio",
+  "model": "Radio",
+  "version": "2.0.0",
+  "params": [],
+  "data": {
+    "url": "https://broadcastify.cdnstream1.com/11446",
+    "stationName": "Cleveland Police",
+    "icon": "",
+    "playing": true
+  }
+}
