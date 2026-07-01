@@ -8,10 +8,10 @@
   "authorEmail": "andrei@akaudio.dev",
   "authorUrl": "https://akaudio.dev",
   "pluginUrl": "https://akaudio.dev",
-  "manualUrl": "",
+  "manualUrl": "https://github.com/akaudio-dev/akaudio/blob/main/docs/MANUAL.md",
   "sourceUrl": "https://github.com/akaudio-dev/akaudio",
   "donateUrl": "",
-  "changelogUrl": "",
+  "changelogUrl": "https://github.com/akaudio-dev/akaudio/blob/main/CHANGELOG.md",
   "modules": [
     {
       "slug": "Ninjam",
