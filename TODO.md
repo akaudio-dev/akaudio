@@ -25,13 +25,23 @@ build, not packaging. Process + rules are in `CLAUDE.md` → "Publishing to the 
       `char*` buffer casts, `WSAStartup` in `init()`, and `#ifdef SIGPIPE` in plugin.cpp.
       `mkdir` made portable in `ImageCache.cpp` (`_mkdir`). AAC/HLS still mac-only (stubbed
       off-mac). Runtime load in Rack on Windows not yet smoke-tested.
-- [ ] **Run the full `rack-plugin-toolchain`** (Docker, ~15 GB / 8 GB) to produce all four
-      `.vcvplugin`s the way VCV's farm will — the real acceptance gate.
-- [ ] **README privacy note** — one line: connects only to user-selected stream/room +
-      radio-browser/favicon servers, no telemetry. (Ethics: "no harming privacy.") Decide
-      whether to keep `SSL_VERIFY_NONE` or verify certs.
-- [ ] **Optional manifest polish** — set `manualUrl` (README) and `changelogUrl` in
-      `plugin.json` before submitting.
+- [x] **Run `rack-plugin-toolchain` (lin-x64 + win-x64)** — done 2026-06-30 on a native
+      x86-64 Linux box (Docker; the Dockerfile was trimmed to skip `toolchain-mac`, which
+      dropped the osxcross/LLVM compile). Both targets build, link, and package cleanly via
+      the real toolchain against SDK 2.6.6: `akaudio-2.0.0-lin-x64.vcvplugin` (1.18 MB) and
+      `akaudio-2.0.0-win-x64.vcvplugin` (1.20 MB). **Windows OpenSSL/Winsock confirmed on
+      the actual toolchain:** `x86_64-w64-mingw32-g++ ... -lRack ... -lws2_32` links with no
+      undefined `SSL_*`/SHA1 references. The **mac-x64/arm64** toolchain targets were skipped
+      on purpose — they need Apple's non-redistributable macOS SDK, mac-arm64 builds natively
+      here (primary platform), and VCV's farm compiles all four on submission anyway.
+- [x] **README privacy note** — done 2026-06-30. README `## Privacy` split into incoming
+      vs outgoing, making NINJAM JOIN's audio/chat transmit explicit; names `SSL_VERIFY_NONE`
+      and clarifies favicon fetch. **Decision: keep `SSL_VERIFY_NONE`** for now (public audio
+      /jamming, not credentials; enforcing verification means bundling a CA store for little
+      gain) — documented honestly so a reviewer sees it.
+- [x] **Manifest polish** — done 2026-06-30. `manualUrl` → `docs/MANUAL.md` (new user
+      manual), `changelogUrl` → `CHANGELOG.md` (new, Keep-a-Changelog 2.0.0 entry).
+      `donateUrl` intentionally left empty.
 - [ ] **Flip the repo to public**, then open **one** issue on `VCVRack/library` titled
       `akaudio` (the slug, not "AK Audio") with the source URL.
 
