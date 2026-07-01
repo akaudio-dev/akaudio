@@ -46,3 +46,16 @@ endif
 ifdef ARCH_WIN
 	LDFLAGS += -lws2_32
 endif
+
+# Clean install: plugin.mk's `install` only copies the new .vcvplugin over the top of any
+# existing install — it never removes the already-extracted "$(SLUG)/" folder, so presets
+# (or any distributable) that were renamed/removed in a new layout linger in the user's
+# Rack folder. Add a prerequisite that wipes the prior install — both the extracted folder
+# and any old package — so every `make install` is a clean slate. This is an extra
+# prerequisite line (no recipe), so it augments plugin.mk's install rule rather than
+# overriding it. It depends on `dist` so the wipe only happens once the new package has
+# built successfully (a failed build can't leave you with nothing installed).
+install: clean-prev-install
+
+clean-prev-install: dist
+	rm -rf "$(PLUGINS_DIR)/$(SLUG)" "$(PLUGINS_DIR)/$(SLUG)"-*.vcvplugin
