@@ -59,3 +59,58 @@ install: clean-prev-install
 
 clean-prev-install: dist
 	rm -rf "$(PLUGINS_DIR)/$(SLUG)" "$(PLUGINS_DIR)/$(SLUG)"-*.vcvplugin
+
+# Leak / memory-safety check (macOS). Links the standalone test harnesses against the
+# already-built object files and runs them under Apple's `leaks` — the right tool here
+# because Apple clang ships no LeakSanitizer on arm64. `leaks` exits non-zero when it
+# finds leaks, so this target fails CI on a regression. Coverage:
+#   * enc_test     — OFFLINE NINJAM OGG-Vorbis encode->decode (libvorbis/ogg/stb_vorbis).
+#                    Deterministic, always run.
+#   * leak_stress  — StreamClient lifecycle churn over MP3 + AAC/HLS (TLS/HTTP/decoder).
+#                    Streams live public URLs, so it needs internet.
+#   * njclient_test— live NINJAM protocol + interval decode. OPT-IN only: pass
+#                    `NJ_HOST=<server>` (we never connect to a public server unattended).
+# For memory safety (use-after-free), build a harness with `-fsanitize=address` and run
+# it directly; on Linux use valgrind instead of `leaks`.
+LEAKDIR := build/leakcheck
+RACK_ABS := $(realpath $(RACK_DIR))
+OGGVORBIS_OBJ := $(filter build/src/dep/libogg/% build/src/dep/libvorbis/%,$(OBJECTS))
+LEAK_INC := -I src -I src/dep/libogg/include -I src/dep/libvorbis/include -I src/dep/libvorbis/lib
+
+.PHONY: leakcheck
+leakcheck: all
+	@mkdir -p "$(LEAKDIR)"
+	@echo "== build enc_test (offline NINJAM encode/decode) =="
+	$(CXX) -std=c++11 -g $(LEAK_INC) test/enc_test.cpp \
+	  build/src/net/ninjam/NjEncoder.cpp.o build/src/dep/stb_vorbis_impl.cpp.o $(OGGVORBIS_OBJ) \
+	  -o "$(LEAKDIR)/enc_test"
+	@echo "== build leak_stress (StreamClient: TLS/HTTP/HLS/AAC/MP3) =="
+	$(CXX) -std=c++11 -g -I src -I $(RACK_DIR)/dep/include test/leak_stress.cpp \
+	  build/src/net/Stream.cpp.o build/src/net/Http.cpp.o build/src/net/Tls.cpp.o \
+	  build/src/net/Socket.cpp.o \
+	  build/src/net/Hls.cpp.o build/src/net/AacDecoder.cpp.o build/src/dep/dr_mp3_impl.cpp.o \
+	  "$(RACK_ABS)/libRack.dylib" -undefined dynamic_lookup \
+	  -framework AudioToolbox -framework CoreFoundation -o "$(LEAKDIR)/leak_stress"
+	@# `leaks` strips DYLD_LIBRARY_PATH, so bake libRack's absolute path into the binary.
+	install_name_tool -change libRack.dylib "$(RACK_ABS)/libRack.dylib" "$(LEAKDIR)/leak_stress"
+	@echo "== build njclient_test (live NINJAM protocol) =="
+	$(CXX) -std=c++11 -g $(LEAK_INC) test/njclient_test.cpp \
+	  build/src/net/ninjam/NjClient.cpp.o build/src/net/ninjam/NjProtocol.cpp.o \
+	  build/src/net/ninjam/NjAudio.cpp.o build/src/net/ninjam/NjEncoder.cpp.o \
+	  build/src/net/Socket.cpp.o \
+	  build/src/dep/stb_vorbis_impl.cpp.o $(OGGVORBIS_OBJ) \
+	  "$(RACK_ABS)/libRack.dylib" -undefined dynamic_lookup -o "$(LEAKDIR)/njclient_test"
+	install_name_tool -change libRack.dylib "$(RACK_ABS)/libRack.dylib" "$(LEAKDIR)/njclient_test"
+	@echo "\n== leaks: enc_test (offline, deterministic) =="
+	@set -o pipefail; leaks --atExit -- "$(LEAKDIR)/enc_test" | grep -E 'leaks for|nodes malloced'
+	@echo "\n== leaks: leak_stress x3 cycles (needs internet) =="
+	@set -o pipefail; leaks --atExit -- "$(LEAKDIR)/leak_stress" 3 | grep -E 'leaks for|nodes malloced'
+ifdef NJ_HOST
+	@echo "\n== leaks: njclient_test ($(NJ_HOST)) =="
+	@set -o pipefail; leaks --atExit -- "$(LEAKDIR)/njclient_test" "$(NJ_HOST)" 2049 8 akaudio-leakcheck | grep -E 'leaks for|nodes malloced'
+else
+	@echo "\n(skipping njclient_test — set NJ_HOST=<server> to leak-check the live NINJAM path)"
+endif
+	@echo "\nleakcheck: all harnesses reported 0 leaks (leaks(1) exits non-zero otherwise)"
+
+.PHONY: clean-prev-install
