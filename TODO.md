@@ -10,10 +10,10 @@ Goal: get `akaudio` into the official VCV Library. The library builds from sourc
 four targets** (mac-x64, mac-arm64, lin-x64, win-x64), so the blocker is cross-platform
 build, not packaging. Process + rules are in `CLAUDE.md` → "Publishing to the VCV Library".
 
-- [ ] **Verify the Linux build** (we have Linux access). Quickest: build against the
-      Linux Rack SDK (`tools/get_sdk.sh` picks the host zip) and `make`; or use the
-      `rack-plugin-toolchain` for a farm-identical build. Expect the TLS/OpenSSL symbols to
-      resolve at `dlopen` — confirm it links.
+- [x] **Verify the Linux build** — done 2026-06-29. `plugin.so` builds cleanly against
+      SDK 2.6.4; `SSL_*`/`EVP_sha1` symbols correctly defer to `libRack.so` at dlopen.
+      Standalone tests pass: `enc_test` (OGG round-trip), `play_test` (NPR HTTPS MP3),
+      `njclient_test` (NINJAM auth + roster from ninbot.com:2051).
 - [ ] **Verify the Windows build (the likely blocker)** on the new Windows box.
       `src/net/Tls.cpp` pulls `SSL_*` from `libRack`; a Windows DLL must resolve every
       symbol at link time, so this may fail if `libRack`-win doesn't export OpenSSL. If it

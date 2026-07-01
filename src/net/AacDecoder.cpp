@@ -42,6 +42,16 @@ struct AacDecoder::Impl {
 			failed = true;
 			return;
 		}
+		// Mono source → stereo out: without an explicit channel map CoreAudio
+		// routes the single input channel to output channel 0 only, leaving the
+		// right channel silent (a mono AAC/HLS stream would play hard-left). Map
+		// both output channels to input channel 0 so it plays centered — matching
+		// the MP3 path's `curL = curR = pcm[i]` mono fan-out.
+		if (srcFmt.mChannelsPerFrame == 1) {
+			SInt32 channelMap[2] = {0, 0};
+			AudioConverterSetProperty(converter, kAudioConverterChannelMap,
+				sizeof(channelMap), channelMap);
+		}
 		ready = true;
 	}
 };
