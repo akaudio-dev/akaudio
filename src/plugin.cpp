@@ -5,6 +5,10 @@
 
 #include <csignal>
 
+namespace akaudio {
+void netStartup(); // net/Socket.cpp — one-time Winsock init (no-op on POSIX)
+}
+
 Plugin* pluginInstance;
 
 // Rack calls init() once when loading the shared library.
@@ -12,11 +16,16 @@ Plugin* pluginInstance;
 void init(Plugin* p) {
 	pluginInstance = p;
 
+	// Initialize Winsock once before any networking (no-op on macOS/Linux).
+	akaudio::netStartup();
+
 	// Safety net: never let a write to a closed/shutdown socket terminate the host
 	// via SIGPIPE. Our sockets also set SO_NOSIGPIPE; this covers everything else
 	// (e.g. Ninjam transmit) regardless of platform. Default SIGPIPE action kills
-	// the process and leaves no crash report.
+	// the process and leaves no crash report. (Windows has no SIGPIPE.)
+#ifdef SIGPIPE
 	std::signal(SIGPIPE, SIG_IGN);
+#endif
 
 	p->addModel(modelNinjam);
 	p->addModel(modelRadio);

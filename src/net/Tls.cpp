@@ -3,8 +3,7 @@
 
 #include "Tls.hpp"
 
-#include <sys/socket.h>
-#include <cerrno>
+#include "Socket.hpp"
 
 #include <openssl/ssl.h>
 
@@ -65,8 +64,8 @@ long tlsRead(const Tls& t, int fd, void* buf, size_t n) {
 			return 0; // clean TLS close
 		return -1; // real error
 	}
-	long r = (long) ::recv(fd, buf, n, 0);
-	if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+	long r = (long) ::recv(fd, (char*) buf, (int) n, 0);
+	if (r < 0 && netWouldBlock())
 		return -2;
 	return r;
 }
@@ -74,7 +73,7 @@ long tlsRead(const Tls& t, int fd, void* buf, size_t n) {
 long tlsWrite(const Tls& t, int fd, const void* buf, size_t n) {
 	if (t.ssl)
 		return SSL_write((SSL*) t.ssl, buf, (int) n);
-	return (long) ::send(fd, buf, n, 0);
+	return (long) ::send(fd, (const char*) buf, (int) n, 0);
 }
 
 } // namespace akaudio

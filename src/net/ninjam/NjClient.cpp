@@ -3,16 +3,10 @@
 
 #include "NjClient.hpp"
 
-#include <cerrno>
+#include "../Socket.hpp"
+
 #include <cstring>
 #include <ctime>
-
-#include <netdb.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <unistd.h>
 
 namespace akaudio {
 namespace nj {
@@ -56,7 +50,7 @@ void NjClient::stop() {
 	abort.store(true, std::memory_order_release);
 	int fd = sock.load(std::memory_order_acquire);
 	if (fd >= 0)
-		::shutdown(fd, SHUT_RDWR); // interrupt a blocked recv; run() owns the close
+		netShutdown(fd); // interrupt a blocked recv; run() owns the close
 	if (thread.joinable())
 		thread.join();
 	running.store(false, std::memory_order_release);
@@ -133,11 +127,11 @@ bool NjClient::sendAll(const std::vector<uint8_t>& data) {
 	size_t off = 0;
 	while (off < data.size()) {
 		if (abort.load(std::memory_order_acquire)) return false;
-		ssize_t n = ::send(fd, data.data() + off, data.size() - off, 0);
+		long n = (long) ::send(fd, (const char*) (data.data() + off), (int) (data.size() - off), 0);
 		if (n > 0) { off += (size_t)n; continue; }
-		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) continue;
+		if (n < 0 && (netWouldBlock() || netInterrupted())) continue;
 		if (!abort.load(std::memory_order_acquire))
-			log(std::string("send error: ") + std::strerror(errno));
+			log(std::string("send error: ") + netErrorStr());
 		return false; // closed or error
 	}
 	return true;
@@ -152,22 +146,22 @@ int NjClient::recvExact(uint8_t* buf, size_t n, bool allowIdle) {
 	size_t got = 0;
 	while (got < n) {
 		if (abort.load(std::memory_order_acquire)) return 0;
-		ssize_t r = ::recv(fd, buf + got, n - got, 0);
+		long r = (long) ::recv(fd, (char*) (buf + got), (int) (n - got), 0);
 		if (r > 0) { got += (size_t)r; continue; }
 		if (r == 0) {
 			if (!abort.load(std::memory_order_acquire))
 				log("disconnect: server closed connection (recv=0)");
 			return 0; // peer closed
 		}
-		if (errno == EAGAIN || errno == EWOULDBLOCK) {
+		if (netWouldBlock()) {
 			// SO_RCVTIMEO fired. At a frame boundary with nothing buffered, let the
 			// caller service keepalives; mid-frame, keep waiting for the rest.
 			if (allowIdle && got == 0) return -2;
 			continue;
 		}
-		if (errno == EINTR) continue;
+		if (netInterrupted()) continue;
 		if (!abort.load(std::memory_order_acquire))
-			log(std::string("disconnect: recv error: ") + std::strerror(errno));
+			log(std::string("disconnect: recv error: ") + netErrorStr());
 		return 0; // error
 	}
 	return 1;
@@ -204,10 +198,10 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 	}
 	int fd = -1;
 	for (addrinfo* ai = res; ai; ai = ai->ai_next) {
-		fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+		fd = (int) ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
 		if (fd < 0) continue;
 		if (::connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
-		::close(fd);
+		netClose(fd);
 		fd = -1;
 	}
 	::freeaddrinfo(res);
@@ -219,11 +213,8 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 
 	// TCP_NODELAY (small protocol messages) + a 1s recv timeout so we can service
 	// keepalives without a second thread.
-	int one = 1;
-	::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-	timeval tv{};
-	tv.tv_sec = 1;
-	::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	netSetTcpNoDelay(fd);
+	netSetRcvTimeout(fd, 1000);
 	sock.store(fd, std::memory_order_release);
 
 	setState(State::Authenticating);
@@ -360,7 +351,7 @@ done:
 	(void)authed;
 	audio.stop();
 	int f = sock.exchange(-1, std::memory_order_acq_rel);
-	if (f >= 0) ::close(f);
+	if (f >= 0) netClose(f);
 	// Terminal state, in priority order: a specific Error (auth/protocol failure) set via
 	// `goto done` stands as-is; otherwise distinguish who ended the session. abort set => the
 	// UI called stop() (user pressed Leave) => Stopped. abort clear => the loop fell out because

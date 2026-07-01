@@ -14,11 +14,17 @@ build, not packaging. Process + rules are in `CLAUDE.md` → "Publishing to the 
       SDK 2.6.4; `SSL_*`/`EVP_sha1` symbols correctly defer to `libRack.so` at dlopen.
       Standalone tests pass: `enc_test` (OGG round-trip), `play_test` (NPR HTTPS MP3),
       `njclient_test` (NINJAM auth + roster from ninbot.com:2051).
-- [ ] **Verify the Windows build (the likely blocker)** on the new Windows box.
-      `src/net/Tls.cpp` pulls `SSL_*` from `libRack`; a Windows DLL must resolve every
-      symbol at link time, so this may fail if `libRack`-win doesn't export OpenSSL. If it
-      fails: `ifdef` networking off on Windows, bundle a small TLS lib, or use Rack's
-      `network.hpp`/libcurl on Windows. (Details in `CLAUDE.md`.)
+- [x] **Verify the Windows build (the likely blocker)** — done 2026-06-30. Builds, links,
+      and packages cleanly: `plugin.dll` + `akaudio-2.0.0-win-x64.vcvplugin` against SDK
+      2.6.4 with the MSYS2 mingw-w64 GCC toolchain. **The feared OpenSSL blocker did not
+      materialize:** `libRack.dll.a` re-exports `SSL_*`/SHA1, so TLS resolved at link time
+      with no fallback needed — only `-lws2_32` had to be added (Makefile `ifdef ARCH_WIN`).
+      The net/ layer was ported from POSIX sockets to Winsock2 behind a compat shim
+      (`src/net/Socket.{hpp,cpp}`): handle close/shutdown, non-blocking via `ioctlsocket`,
+      `SO_RCVTIMEO` as a DWORD, `WSAGetLastError`-based would-block/in-progress predicates,
+      `char*` buffer casts, `WSAStartup` in `init()`, and `#ifdef SIGPIPE` in plugin.cpp.
+      `mkdir` made portable in `ImageCache.cpp` (`_mkdir`). AAC/HLS still mac-only (stubbed
+      off-mac). Runtime load in Rack on Windows not yet smoke-tested.
 - [ ] **Run the full `rack-plugin-toolchain`** (Docker, ~15 GB / 8 GB) to produce all four
       `.vcvplugin`s the way VCV's farm will — the real acceptance gate.
 - [ ] **README privacy note** — one line: connects only to user-selected stream/room +

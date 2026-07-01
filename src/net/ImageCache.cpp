@@ -6,11 +6,25 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+
+#ifdef _WIN32
+#include <direct.h>
+#else
 #include <sys/stat.h>
+#endif
 
 namespace akaudio {
 
 namespace {
+
+// Portable "mkdir if missing"; mode is ignored on Windows (no POSIX perms).
+inline void makeDir(const std::string& dir) {
+#ifdef _WIN32
+	::_mkdir(dir.c_str());
+#else
+	::mkdir(dir.c_str(), 0755);
+#endif
+}
 
 bool startsWith(const std::string& b, const char* magic, size_t n) {
 	if (b.size() < n)
@@ -153,7 +167,7 @@ std::string cacheImage(const std::string& bytes, const std::string& dir, const s
 		return ""; // not an image we can decode
 	}
 
-	::mkdir(dir.c_str(), 0755); // ok if it already exists
+	makeDir(dir); // ok if it already exists
 	std::string path = dir + "/" + key + "." + ext;
 	if (!writeFile(path, payload))
 		return "";

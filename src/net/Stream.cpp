@@ -3,18 +3,12 @@
 
 #include "Stream.hpp"
 
+#include "Socket.hpp"
+
 #include <cctype>
 #include <chrono>
 #include <cstring>
 #include <vector>
-
-#include <sys/socket.h>
-#include <sys/select.h>
-#include <netdb.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <netinet/in.h>
 
 #include "../dep/dr_mp3.h"
 #include "Tls.hpp"
@@ -177,7 +171,7 @@ void StreamClient::stop() {
 	// Interrupt a blocked recv() by shutting the socket down; run() owns the close.
 	int fd = sock.load(std::memory_order_acquire);
 	if (fd >= 0)
-		::shutdown(fd, SHUT_RDWR);
+		netShutdown(fd);
 	if (thread.joinable())
 		thread.join();
 	ring.clear();
@@ -232,23 +226,23 @@ void StreamClient::run(std::string url) {
 	// timeout — the cause of UI freezes when stepping quickly between stations.
 	int fd = -1;
 	for (addrinfo* ai = res; ai; ai = ai->ai_next) {
-		int s = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+		int s = (int) ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
 		if (s < 0)
 			continue;
 #ifdef SO_NOSIGPIPE
 		// Without this, a send() on a socket that stop() has shutdown() raises
 		// SIGPIPE, which terminates the whole process (Rack doesn't ignore it) —
 		// the crash seen when switching stations rapidly. Make writes return EPIPE.
+		// (Not defined on Linux/Windows; SIGPIPE handled by ignoring it / not raised.)
 		int nosig = 1;
-		::setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &nosig, sizeof(nosig));
+		::setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, (const char*) &nosig, sizeof(nosig));
 #endif
 		sock.store(s, std::memory_order_release); // publish before connecting so stop() can see it
 
-		int flags = ::fcntl(s, F_GETFL, 0);
-		::fcntl(s, F_SETFL, flags | O_NONBLOCK);
+		netSetNonBlocking(s, true);
 		int rc = ::connect(s, ai->ai_addr, ai->ai_addrlen);
 		bool connected = (rc == 0);
-		if (rc < 0 && errno == EINPROGRESS) {
+		if (rc < 0 && netConnectInProgress()) {
 			for (int i = 0; i < 80 && !abort.load(std::memory_order_acquire); i++) {
 				fd_set wf;
 				FD_ZERO(&wf);
@@ -256,23 +250,20 @@ void StreamClient::run(std::string url) {
 				timeval tv{0, 100 * 1000}; // 100 ms
 				int sel = ::select(s + 1, nullptr, &wf, nullptr, &tv);
 				if (sel > 0) {
-					int err = 0;
-					socklen_t len = sizeof(err);
-					::getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &len);
-					connected = (err == 0);
+					connected = (netSoError(s) == 0);
 					break;
 				}
-				if (sel < 0 && errno != EINTR)
+				if (sel < 0 && !netInterrupted())
 					break;
 			}
 		}
 		if (connected) {
-			::fcntl(s, F_SETFL, flags); // restore blocking for the read loop
+			netSetNonBlocking(s, false); // restore blocking for the read loop
 			fd = s;
 			break;
 		}
 		sock.store(-1, std::memory_order_release);
-		::close(s);
+		netClose(s);
 		if (abort.load(std::memory_order_acquire))
 			break;
 	}
@@ -508,7 +499,7 @@ cleanup:
 	{
 		int f = sock.exchange(-1, std::memory_order_acq_rel);
 		if (f >= 0)
-			::close(f);
+			netClose(f);
 	}
 	running.store(false, std::memory_order_release);
 }

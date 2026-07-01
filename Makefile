@@ -39,3 +39,10 @@ include $(RACK_DIR)/plugin.mk
 ifdef ARCH_MAC
 	LDFLAGS += -framework AudioToolbox -framework CoreFoundation
 endif
+
+# Windows-only: the net/ layer's sockets are Winsock2 (src/net/Socket.hpp maps the
+# POSIX BSD-socket API onto it). Link the Winsock 2 import library. OpenSSL/SHA1
+# symbols (TLS) resolve from libRack's exports like on the other platforms.
+ifdef ARCH_WIN
+	LDFLAGS += -lws2_32
+endif

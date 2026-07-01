@@ -219,14 +219,20 @@ link* on every platform**, not just macOS.
   Known risk areas:
   - **TLS/OpenSSL (`src/net/Tls.cpp`)** resolves `SSL_*`/SHA1 from `libRack`'s OpenSSL
     exports. macOS uses `-undefined dynamic_lookup` (deferred to load time); Linux resolves
-    undefined `.so` symbols at `dlopen` (usually fine); **Windows DLLs must resolve every
-    symbol at link time** against an import lib — if `libRack`-win doesn't export those
-    OpenSSL symbols, the **Windows link fails**. This is the most likely blocker. Fallbacks
-    if so: `ifdef` networking off on Windows, bundle a small TLS lib, or route through
-    Rack's `network.hpp`/libcurl on Windows.
+    undefined `.so` symbols at `dlopen`; **Windows DLLs must resolve every symbol at link
+    time** against an import lib. This was flagged as the most likely blocker — but
+    **verified clear (2026-06-30): `libRack.dll.a` re-exports the OpenSSL symbols**, so the
+    Windows link resolves TLS with no fallback needed. (Fallbacks if a future SDK drops them:
+    `ifdef` networking off on Windows, bundle a small TLS lib, or route through Rack's
+    `network.hpp`/libcurl.)
+  - **Windows sockets = Winsock2, not POSIX.** The net/ layer's BSD-socket calls are mapped
+    onto Winsock2 by `src/net/Socket.{hpp,cpp}` (a thin compat shim: `netClose`/`netShutdown`/
+    `netSetNonBlocking`/timeout/`netWouldBlock`/`netConnectInProgress`/`netErrorStr`, plus
+    `char*` buffer casts and `WSAStartup` from `init()`). The Makefile adds `-lws2_32`
+    (`ifdef ARCH_WIN`). Keep new socket code going through the shim, not raw POSIX calls.
   - **macOS-only AAC/HLS** (`AacDecoder`/`Hls`, AudioToolbox) are `ifdef ARCH_MAC`-guarded
-    in the Makefile and degrade gracefully off-mac (no AAC/HLS, MP3 still works) — should
-    compile everywhere.
+    in the Makefile and degrade gracefully off-mac (no AAC/HLS, MP3 still works) — compiles
+    everywhere (verified on Windows).
 - **Manifest/version rules** the library enforces (see `plugin.json`): `slug` is permanent
   identity (only `[A-Za-z0-9_-]`, never rename post-release); `version` is
   `MAJOR.MINOR.REVISION` with **MAJOR = Rack major (2)**, no `v` prefix; `sourceUrl` is the

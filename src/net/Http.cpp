@@ -3,21 +3,13 @@
 
 #include "Http.hpp"
 #include "Tls.hpp"
+#include "Socket.hpp"
 
 #include <cctype>
 #include <cstring>
 #include <chrono>
 #include <thread>
 #include <vector>
-
-#include <sys/socket.h>
-#include <sys/select.h>
-#include <sys/time.h>
-#include <netdb.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <netinet/in.h>
 
 namespace akaudio {
 
@@ -104,27 +96,25 @@ bool aborted(const std::atomic<bool>* abort) {
 }
 
 void setRcvTimeout(int fd, int ms) {
-	timeval tv{ms / 1000, (ms % 1000) * 1000};
-	::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-	::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+	netSetRcvTimeout(fd, ms);
+	netSetSndTimeout(fd, ms);
 }
 
 // Non-blocking connect that polls abort every 100 ms, up to ~6 s. Returns the
 // connected fd or -1. So a dead/slow host can't block, and stop() interrupts it.
 int connectAbortable(addrinfo* res, const std::atomic<bool>* abort) {
 	for (addrinfo* ai = res; ai; ai = ai->ai_next) {
-		int fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+		int fd = (int) ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
 		if (fd < 0)
 			continue;
 #ifdef SO_NOSIGPIPE
 		int nosig = 1;
-		::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosig, sizeof(nosig));
+		::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, (const char*) &nosig, sizeof(nosig));
 #endif
-		int flags = ::fcntl(fd, F_GETFL, 0);
-		::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+		netSetNonBlocking(fd, true);
 		int rc = ::connect(fd, ai->ai_addr, ai->ai_addrlen);
 		bool ok = (rc == 0);
-		if (rc < 0 && errno == EINPROGRESS) {
+		if (rc < 0 && netConnectInProgress()) {
 			for (int i = 0; i < 60 && !aborted(abort); i++) {
 				fd_set wf;
 				FD_ZERO(&wf);
@@ -132,21 +122,18 @@ int connectAbortable(addrinfo* res, const std::atomic<bool>* abort) {
 				timeval tv{0, 100 * 1000};
 				int s = ::select(fd + 1, nullptr, &wf, nullptr, &tv);
 				if (s > 0) {
-					int err = 0;
-					socklen_t len = sizeof(err);
-					::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
-					ok = (err == 0);
+					ok = (netSoError(fd) == 0);
 					break;
 				}
-				if (s < 0 && errno != EINTR)
+				if (s < 0 && !netInterrupted())
 					break;
 			}
 		}
 		if (ok) {
-			::fcntl(fd, F_SETFL, flags); // back to blocking (with SO_RCVTIMEO below)
+			netSetNonBlocking(fd, false); // back to blocking (with SO_RCVTIMEO below)
 			return fd;
 		}
-		::close(fd);
+		netClose(fd);
 		if (aborted(abort))
 			break;
 	}
@@ -172,7 +159,7 @@ std::string fetchOnce(const Url& u, const std::atomic<bool>* abort) {
 
 	Tls tls;
 	if (u.tls && !tlsHandshake(tls, fd, u.host)) {
-		::close(fd);
+		netClose(fd);
 		return "";
 	}
 
@@ -185,7 +172,7 @@ std::string fetchOnce(const Url& u, const std::atomic<bool>* abort) {
 		"\r\n";
 	if (tlsWrite(tls, fd, req.data(), req.size()) < 0) {
 		tlsFree(tls);
-		::close(fd);
+		netClose(fd);
 		return "";
 	}
 
@@ -216,7 +203,7 @@ std::string fetchOnce(const Url& u, const std::atomic<bool>* abort) {
 		}
 	}
 	tlsFree(tls);
-	::close(fd);
+	netClose(fd);
 	return resp;
 }
 
