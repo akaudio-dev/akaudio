@@ -4,3 +4,5 @@
 /plugin.so
 /plugin.dll
 .DS_Store
+# Stray runtime logs (e.g. myeasylog.log dropped in the repo root)
+*.log
