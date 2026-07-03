@@ -3,10 +3,9 @@
 
 #include "RoomDirectory.hpp"
 #include "Http.hpp"
+#include "Json.hpp"
 
 #include <algorithm>
-
-#include <jansson.h>
 
 namespace akaudio {
 
@@ -14,32 +13,12 @@ namespace {
 
 const char* kApiUrl = "http://ninbot.com/app/servers.php";
 
-// ninbot returns some numeric fields as JSON strings, others as integers.
-// Accept either (mirrors jamauv3's FlexInt).
-int flexInt(json_t* v, int fallback = 0) {
-	if (!v)
-		return fallback;
-	if (json_is_integer(v))
-		return (int) json_integer_value(v);
-	if (json_is_real(v))
-		return (int) json_real_value(v);
-	if (json_is_string(v)) {
-		const char* s = json_string_value(v);
-		if (s && *s)
-			return std::atoi(s);
-	}
-	return fallback;
-}
-
-std::string flexStr(json_t* v) {
-	if (v && json_is_string(v))
-		return json_string_value(v);
-	return "";
-}
-
 } // namespace
 
 RoomDirectory::~RoomDirectory() {
+	// Abort a fetch in flight — without this, deleting the module mid-refresh
+	// blocks the UI thread on the join for the full HTTP timeout.
+	abort_.store(true, std::memory_order_release);
 	if (thread.joinable())
 		thread.join();
 }
@@ -71,7 +50,7 @@ std::string RoomDirectory::status() {
 void RoomDirectory::fetch(unsigned bust) {
 	std::string url = std::string(kApiUrl) + "?t=" + std::to_string(bust);
 	std::string body;
-	bool ok = httpGet(url, body);
+	bool ok = httpGet(url, body, &abort_);
 
 	std::vector<Room> parsed;
 	std::string status;

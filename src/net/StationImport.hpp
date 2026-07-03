@@ -72,6 +72,7 @@ private:
 
 	std::thread thread;
 	std::atomic<bool> running_{false};
+	std::atomic<bool> abort_{false}; // set by the destructor so its join can't stall the UI
 	std::atomic<unsigned> generation_{0};
 };
 

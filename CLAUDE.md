@@ -198,6 +198,7 @@ with undo).
   ```bash
   c++ -std=c++11 -I src -I $RACK_DIR/dep/include test/play_test.cpp \
     src/net/Stream.cpp src/net/Http.cpp src/net/Tls.cpp src/net/Hls.cpp src/net/AacDecoder.cpp \
+    src/net/Socket.cpp \
     src/dep/dr_mp3_impl.cpp \
     $RACK_DIR/dep/lib/libssl.a $RACK_DIR/dep/lib/libcrypto.a \
     -framework AudioToolbox -framework CoreFoundation \

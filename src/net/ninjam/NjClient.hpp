@@ -2,13 +2,12 @@
 // Copyright (C) 2026 Andrei Kozlov
 
 #pragma once
-// NjClient — a NINJAM protocol client (TCP, default port 2049) on a background thread.
-//
-// Phases 1-2 (this file): connect, anonymous SHA1 auth, keepalive, and parse the live
-// room metadata (CONFIG_CHANGE = tempo, USERINFO_CHANGE = roster). It does NOT yet
-// decode the interval audio (Phase 3) — that adds OGG reassembly + stb_vorbis + a ring
-// buffer, mirroring StreamClient. This is a separate protocol from StreamClient (which
-// only listens to a room's public Icecast mix); NjClient owns its own socket.
+// NjClient — a full NINJAM protocol client (TCP, default port 2049) on a background
+// thread: connect, anonymous/registered SHA1 auth, keepalive, live room metadata
+// (CONFIG_CHANGE = tempo, USERINFO_CHANGE = roster), interval audio download +
+// decode + per-player mix (NjAudio), TRANSMIT (local capture → OGG-Vorbis upload),
+// and room chat. This is a separate protocol from StreamClient (which only listens
+// to a room's public Icecast mix); NjClient owns its own socket.
 //
 // Threading: start()/stop() are called from the UI/main thread. All socket I/O runs on
 // the background thread; callbacks fire on that thread (the caller must marshal to the
@@ -112,6 +111,8 @@ private:
 	std::map<std::string, uint32_t> subMask; // per-user subscribed-channel bitmask (SET_USERMASK)
 	std::vector<std::string> txChannels;     // declared local broadcast channels (names)
 	std::mutex sendMutex;                     // serialize socket sends across net + TX threads
+	std::mutex sockMutex;                     // makes stop()'s shutdown atomic with run()'s close
+	std::mutex txMutex;                       // guards txChannels (UI writes vs net-thread reads)
 	int keepAliveSecs = 3; // from server caps; refreshed after the challenge
 };
 

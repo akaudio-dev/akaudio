@@ -22,4 +22,18 @@ namespace akaudio {
 // the request is abandoned and false returned.
 bool httpGet(const std::string& url, std::string& out, const std::atomic<bool>* abort = nullptr);
 
+// Parsed http(s)://host[:port][/path]. Shared by Http and StreamClient (one
+// parser, one set of quirks).
+struct Url {
+	std::string host;
+	std::string port = "80";
+	std::string path = "/";
+	bool tls = false;
+	bool ok = false;
+};
+Url parseUrl(const std::string& url);
+
+// Case-insensitive suffix check (used for playlist/HLS extension sniffing).
+bool endsWithCI(const std::string& s, const std::string& suffix);
+
 } // namespace akaudio

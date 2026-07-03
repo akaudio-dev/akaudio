@@ -13,18 +13,6 @@
 
 namespace akaudio {
 
-namespace {
-
-// Parsed http(s)://host[:port][/path] (mirrors Stream.cpp's parser, kept local
-// so the two net helpers stay independent).
-struct Url {
-	std::string host;
-	std::string port = "80";
-	std::string path = "/";
-	bool tls = false;
-	bool ok = false;
-};
-
 Url parseUrl(const std::string& url) {
 	Url u;
 	std::string s;
@@ -55,6 +43,20 @@ Url parseUrl(const std::string& url) {
 	u.ok = !u.host.empty();
 	return u;
 }
+
+bool endsWithCI(const std::string& s, const std::string& suffix) {
+	if (s.size() < suffix.size())
+		return false;
+	for (size_t i = 0; i < suffix.size(); i++) {
+		char a = (char) std::tolower((unsigned char) s[s.size() - suffix.size() + i]);
+		char b = (char) std::tolower((unsigned char) suffix[i]);
+		if (a != b)
+			return false;
+	}
+	return true;
+}
+
+namespace {
 
 // Case-insensitive search for a header value (e.g. "location"). Returns "" if
 // absent. `headers` is the block before the blank line.
@@ -100,46 +102,6 @@ void setRcvTimeout(int fd, int ms) {
 	netSetSndTimeout(fd, ms);
 }
 
-// Non-blocking connect that polls abort every 100 ms, up to ~6 s. Returns the
-// connected fd or -1. So a dead/slow host can't block, and stop() interrupts it.
-int connectAbortable(addrinfo* res, const std::atomic<bool>* abort) {
-	for (addrinfo* ai = res; ai; ai = ai->ai_next) {
-		int fd = (int) ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-		if (fd < 0)
-			continue;
-#ifdef SO_NOSIGPIPE
-		int nosig = 1;
-		::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, (const char*) &nosig, sizeof(nosig));
-#endif
-		netSetNonBlocking(fd, true);
-		int rc = ::connect(fd, ai->ai_addr, ai->ai_addrlen);
-		bool ok = (rc == 0);
-		if (rc < 0 && netConnectInProgress()) {
-			for (int i = 0; i < 60 && !aborted(abort); i++) {
-				fd_set wf;
-				FD_ZERO(&wf);
-				FD_SET(fd, &wf);
-				timeval tv{0, 100 * 1000};
-				int s = ::select(fd + 1, nullptr, &wf, nullptr, &tv);
-				if (s > 0) {
-					ok = (netSoError(fd) == 0);
-					break;
-				}
-				if (s < 0 && !netInterrupted())
-					break;
-			}
-		}
-		if (ok) {
-			netSetNonBlocking(fd, false); // back to blocking (with SO_RCVTIMEO below)
-			return fd;
-		}
-		netClose(fd);
-		if (aborted(abort))
-			break;
-	}
-	return -1;
-}
-
 // One request; returns the raw response (headers + body) or "" on error/abort.
 std::string fetchOnce(const Url& u, const std::atomic<bool>* abort) {
 	addrinfo hints{};
@@ -148,7 +110,7 @@ std::string fetchOnce(const Url& u, const std::atomic<bool>* abort) {
 	addrinfo* res = nullptr;
 	if (::getaddrinfo(u.host.c_str(), u.port.c_str(), &hints, &res) != 0 || !res)
 		return "";
-	int fd = connectAbortable(res, abort);
+	int fd = netConnectAbortable(res, abort, 6000);
 	::freeaddrinfo(res);
 	if (fd < 0)
 		return "";
@@ -190,8 +152,12 @@ std::string fetchOnce(const Url& u, const std::atomic<bool>* abort) {
 		if (n > 0) {
 			resp.append(buf, n);
 			idleMs = 0;
-			if (resp.size() > maxResp)
+			if (resp.size() > maxResp) {
+				// Over the ceiling: this is not a "small body" — treat it as a
+				// failure rather than silently handing back a truncated payload.
+				resp.clear();
 				break;
+			}
 		} else if (n == -2) {
 			// recv timed out (no data this slice): keep waiting unless we've been
 			// idle too long or were aborted.

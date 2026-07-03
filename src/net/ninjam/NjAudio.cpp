@@ -30,6 +30,10 @@ void NjAudio::recomputeIntervalLocked() {
 	int n = 0;
 	if (bpm > 0 && bpi > 0 && sr > 0)
 		n = (int)std::llround((double)bpi * 60.0 * sr / (double)bpm);
+	// Sanity cap (~87 s at 48 kHz): a broken/hostile server tempo (e.g. bpm=1)
+	// must not size the per-interval decode buffers into the gigabytes.
+	if (n > (1 << 22))
+		n = 0;
 	int prev = intervalSamples.exchange(n, std::memory_order_relaxed);
 	if (n != prev) {
 		// Interval length changed (tempo/sr): queued intervals were gridded to the old
@@ -258,18 +262,35 @@ void NjAudio::stop() {
 	userSlot.clear();
 	for (int i = 0; i < MAX_PLAYERS; i++) slotUsed[i] = false;
 	nPoly.store(0, std::memory_order_relaxed);
-	ring.clear();
-	for (auto& c : txCapture) if (c) c->clear();
+	// The audio thread (this ring's consumer) may still be pulling; it applies
+	// the drop on its next pull. The tx capture rings are drained by txLoop
+	// (their consumer) — while inactive and at thread start — never from here,
+	// because the audio thread is their *producer* and may push concurrently.
+	ring.requestClear();
 }
 
 // Transmit: pull complete intervals from each channel's capture ring, encode, hand up.
 void NjAudio::txLoop() {
 	int serial = 1;
 	std::vector<float> interleaved;
+	// This thread is the capture rings' consumer, so it owns discarding stale
+	// audio: drain at start (a previous session's tail) and while TX is off
+	// (so re-enabling starts a fresh, downbeat-aligned interval, instead of
+	// uploading a stale partial one).
+	auto drainCapture = [this]() {
+		for (auto& c : txCapture)
+			if (c) c->drain();
+	};
+	drainCapture();
 	while (!abort.load(std::memory_order_acquire)) {
 		int N = intervalSamples.load(std::memory_order_relaxed);
 		int n = nTx.load(std::memory_order_relaxed);
-		if (!txActive.load(std::memory_order_acquire) || N <= 0 || n <= 0 || N > (1 << 20)) {
+		if (!txActive.load(std::memory_order_acquire)) {
+			drainCapture();
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			continue;
+		}
+		if (N <= 0 || n <= 0 || N > (1 << 20)) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 			continue;
 		}

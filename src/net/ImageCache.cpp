@@ -87,7 +87,9 @@ bool icoToImage(const std::string& b, std::string& out, std::string& ext) {
 		uint16_t bpp = rd16(b, e + 6);
 		uint32_t size = rd32(b, e + 8);
 		uint32_t off = rd32(b, e + 12);
-		if (size == 0 || off + size > b.size())
+		// Bounds-check in 64-bit: off + size can wrap uint32 on hostile input,
+		// which would pass the check and make substr() below throw.
+		if (size == 0 || (uint64_t) off + (uint64_t) size > (uint64_t) b.size())
 			continue;
 		long score = (long) w * h * 100 + bpp;
 		if (score > bestScore) {

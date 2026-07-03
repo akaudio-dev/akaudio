@@ -92,7 +92,7 @@ struct Radio : Module {
 		OUTPUTS_LEN
 	};
 	enum LightId {
-		PLAYING_LIGHT,
+		// (no Rack lights: playback state is shown by the ClickableLed widget)
 		LIGHTS_LEN
 	};
 
@@ -201,11 +201,12 @@ struct Radio : Module {
 
 	void process(const ProcessArgs& args) override {
 		float l = 0.f, r = 0.f;
-		stream.pull(l, r); // leaves l/r at 0 on underrun
+		stream.pull(l, r); // on underrun pull() leaves them untouched → they stay 0
 		// Built-in VCA: knob (exponential/audio taper) × optional CV (unipolar 0–10V).
 		// Unpatched CV leaves the gain at the knob level.
 		// gain = param² (AUDIO-module taper); optional unipolar 0–10 V CV scales it.
-		float gain = std::pow(params[LEVEL_PARAM].getValue(), 2.f);
+		float lv = params[LEVEL_PARAM].getValue();
+		float gain = lv * lv;
 		if (inputs[LEVEL_INPUT].isConnected())
 			gain *= clamp(inputs[LEVEL_INPUT].getVoltage() / 10.f, 0.f, 1.f);
 		// Audio in Rack is ±5V line level.
@@ -224,12 +225,9 @@ struct Radio : Module {
 	}
 
 	void dataFromJson(json_t* root) override {
-		if (json_t* j = json_object_get(root, "url"))
-			url = json_string_value(j);
-		if (json_t* j = json_object_get(root, "stationName"))
-			stationName = json_string_value(j);
-		if (json_t* j = json_object_get(root, "icon"))
-			icon = json_string_value(j);
+		url = jsonStr(json_object_get(root, "url"), url);
+		stationName = jsonStr(json_object_get(root, "stationName"), stationName);
+		icon = jsonStr(json_object_get(root, "icon"), icon);
 		// Loading a preset/patch: apply its playing state. Stop first so switching
 		// to a "stopped" station preset actually stops current playback, and so
 		// play() restarts cleanly on the new URL.
@@ -372,10 +370,8 @@ static void readStationPreset(const std::string& path, std::string& name, std::s
 	if (!root)
 		return;
 	if (json_t* data = json_object_get(root, "data")) {
-		if (json_t* j = json_object_get(data, "stationName"))
-			name = json_string_value(j);
-		if (json_t* j = json_object_get(data, "icon"))
-			icon = json_string_value(j);
+		name = jsonStr(json_object_get(data, "stationName"));
+		icon = jsonStr(json_object_get(data, "icon"));
 	}
 	json_decref(root);
 }

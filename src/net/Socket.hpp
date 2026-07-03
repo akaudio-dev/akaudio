@@ -16,6 +16,7 @@
 // precede windows.h). The net .cpp files are Rack-free and include it first.
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <cstring>
 
@@ -158,6 +159,14 @@ inline bool netInterrupted() {
 	return errno == EINTR;
 #endif
 }
+
+// Non-blocking connect across a getaddrinfo result that polls `abort` every
+// 100 ms, up to ~timeoutMs per address. Returns the connected fd (restored to
+// blocking mode) or -1. This is THE way to connect in this plugin: a dead/slow
+// host can never wedge a stop()/join() on the UI thread, because the loop
+// notices `abort` within 100 ms. Sets SO_NOSIGPIPE where available. Defined in
+// Socket.cpp; shared by Http, StreamClient, and NjClient.
+int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeoutMs = 6000);
 
 // Human-readable last socket error (for logs).
 inline std::string netErrorStr() {

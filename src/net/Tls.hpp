@@ -14,8 +14,7 @@
 namespace akaudio {
 
 struct Tls {
-	void* ssl = nullptr; // SSL*
-	void* ctx = nullptr; // SSL_CTX*
+	void* ssl = nullptr; // SSL* (the SSL_CTX is a process-wide shared singleton)
 	bool active() const { return ssl != nullptr; }
 };
 
@@ -23,7 +22,7 @@ struct Tls {
 // true on success; on failure frees any partial state (caller still owns fd).
 bool tlsHandshake(Tls& t, int fd, const std::string& host);
 
-// Free the SSL/SSL_CTX objects. Does NOT close the fd (the caller owns it).
+// Free the SSL object. Does NOT close the fd (the caller owns it).
 void tlsFree(Tls& t);
 
 // recv/send that transparently use TLS when t.active(), else the plain socket.

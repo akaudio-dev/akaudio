@@ -44,40 +44,9 @@ namespace nj {
 static const int MAX_PLAYERS = 16;       // VCV poly cable max
 static const int RING_CH = MAX_PLAYERS * 2; // interleaved stereo per slot
 
-// Lock-free SPSC ring of fixed-width float frames (RING_CH floats per frame).
-class WideRing {
-public:
-	explicit WideRing(size_t minFrames = 1 << 16) {
-		size_t cap = 1;
-		while (cap < minFrames) cap <<= 1;
-		mask = cap - 1;
-		buf.resize(cap * RING_CH);
-	}
-	bool push(const float* frame) {
-		const size_t w = writeIdx.load(std::memory_order_relaxed);
-		const size_t next = (w + 1) & mask;
-		if (next == readIdx.load(std::memory_order_acquire)) return false; // full
-		std::memcpy(&buf[w * RING_CH], frame, RING_CH * sizeof(float));
-		writeIdx.store(next, std::memory_order_release);
-		return true;
-	}
-	bool pull(float* frame) {
-		const size_t rd = readIdx.load(std::memory_order_relaxed);
-		if (rd == writeIdx.load(std::memory_order_acquire)) return false; // empty
-		std::memcpy(frame, &buf[rd * RING_CH], RING_CH * sizeof(float));
-		readIdx.store((rd + 1) & mask, std::memory_order_release);
-		return true;
-	}
-	void clear() {
-		readIdx.store(0, std::memory_order_relaxed);
-		writeIdx.store(0, std::memory_order_relaxed);
-	}
-private:
-	std::vector<float> buf;
-	size_t mask = 0;
-	std::atomic<size_t> writeIdx{0};
-	std::atomic<size_t> readIdx{0};
-};
+// The wide mix ring: one frame = RING_CH floats (per-slot stereo). Same SPSC
+// implementation as the stereo stream ring (net/RingBuffer.hpp).
+typedef FrameRingBuffer<RING_CH> WideRing;
 
 class NjAudio {
 public:

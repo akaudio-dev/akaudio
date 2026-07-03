@@ -65,11 +65,12 @@ private:
 	void runHls(std::string url); // HLS (.m3u8) path: poll playlist, demux TS, decode AAC (macOS)
 	void setStatus(State s, const std::string& text);
 
-	StereoRingBuffer ring{1 << 16}; // ~0.7 s at 48 kHz of headroom
+	StereoRingBuffer ring{1 << 16}; // 65536 frames ≈ 1.4 s at 48 kHz of headroom
 	std::thread thread;
 	std::atomic<bool> running{false};
 	std::atomic<bool> abort{false};
-	std::atomic<int> sock{-1}; // open socket fd, or -1; closed by stop() to interrupt recv
+	std::atomic<int> sock{-1};  // open socket fd, or -1; shutdown by stop() to interrupt recv
+	std::mutex sockMutex;       // makes stop()'s shutdown atomic with run()'s close (no fd reuse race)
 	std::atomic<float> sampleRate{44100.f};
 	std::atomic<State> state{State::Stopped};
 	std::atomic<uint64_t> produced{0}; // stereo frames pushed since start(); resets on start()

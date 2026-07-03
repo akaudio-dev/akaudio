@@ -14,7 +14,7 @@
 #include <mutex>
 #include <vector>
 
-// NINJAM module — two ways to hear a jam:
+// NINJAM module — two ways to be in a jam:
 //
 //  • LISTEN (Icecast stream): the zero-dependency path. Public NINJAM communities
 //    (ninjamer.com, ninbot, …) publish a live Icecast/HTTP mix of each room, so we
@@ -22,8 +22,9 @@
 //    join — pure external listening.
 //  • JOIN (NINJAM protocol): connect to the server over the real NINJAM protocol
 //    (net/ninjam/NjClient), authenticate, subscribe, and decode the live multi-user
-//    OGG interval mix ourselves — the actual jam, no Icecast required. Listen-only for
-//    now (we transmit nothing); speaking in the jam is a later phase.
+//    OGG interval mix ourselves — plus TRANSMIT: with TX enabled, the poly input
+//    jacks are captured, OGG-Vorbis-encoded per interval, and uploaded so the room
+//    hears us. Room chat works both ways.
 //
 // Both feed the same lock-free ring → process() just pull()s from whichever is active.
 struct Ninjam : Module {
@@ -59,25 +60,29 @@ struct Ninjam : Module {
 	// UI reads its cache instantly. Not persisted — rooms come and go.
 	akaudio::RoomDirectory directory;
 
-	int mode = MODE_LISTEN;
+	// UI-thread-written flags that process() (audio thread) also reads: atomics,
+	// so the cross-thread reads are well-defined. UI code uses them like plain
+	// values via std::atomic's implicit conversions; process() loads relaxed.
+	std::atomic<int> mode{MODE_LISTEN};
 
 	// ---- LISTEN (Icecast) state ----
 	// The jam's Icecast/HTTP listen-stream URL (MP3). Set by picking a room or typing
 	// one; empty by default since rooms come and go.
 	std::string url = "";
-	bool listening = false;
+	std::atomic<bool> listening{false};
 
 	// ---- JOIN (protocol) state ----
+	// The string fields are UI-thread-only (NjClient callbacks capture copies).
 	std::string joinHost = "";
 	int joinPort = 2049;
 	std::string joinUser = "";  // display name; empty -> anonymous
 	std::string joinPass = "";  // empty -> anonymous; set for a registered/private server
-	bool joined = false;
+	std::atomic<bool> joined{false};
 	// Most-recent-first "host:port" of servers we've joined, for the panel dropdown.
 	std::vector<std::string> serverHistory;
 
 	// ---- Beat clock + metronome (meaningful only when joined to a tempo) ----
-	bool clickEnabled = false;            // metronome audible-click toggle (persisted)
+	std::atomic<bool> clickEnabled{false}; // metronome audible-click toggle (persisted)
 	// CLOCK output resolution in pulses per beat (PPQN). 1 = 1 pulse/beat (a step
 	// sequencer steps once per beat); 2 (default) suits modules that detect tempo
 	// assuming 2 pulses/beat; 24 ≈ MIDI-clock-style sync. Persisted.
@@ -139,14 +144,16 @@ struct Ninjam : Module {
 		std::lock_guard<std::mutex> lk(chatMutex);
 		return chatLog;
 	}
-	// True if `speaker` is us. Registered logins echo our username verbatim; anonymous
-	// logins come back as "anonymous:<name>" (or bare "anonymous" when we gave no name),
-	// so strip that prefix before the case-insensitive compare against joinUser.
-	bool isOwnSpeaker(std::string speaker) const {
+	// True if `speaker` is `mine`. Registered logins echo our username verbatim;
+	// anonymous logins come back as "anonymous:<name>" (or bare "anonymous" when we
+	// gave no name), so strip that prefix before the case-insensitive compare.
+	// `mine` is passed in (a copy captured when the session's callbacks were built)
+	// rather than read from joinUser, because this runs on the NET thread — reading
+	// the member would race the UI thread editing the username field.
+	static bool isOwnSpeaker(std::string speaker, const std::string& mine) {
 		const std::string ap = "anonymous:";
 		if (speaker.rfind(ap, 0) == 0)
 			speaker = speaker.substr(ap.size());
-		const std::string mine = joinUser.empty() ? std::string("anonymous") : joinUser;
 		if (speaker.size() != mine.size())
 			return false;
 		for (size_t i = 0; i < speaker.size(); i++)
@@ -180,10 +187,10 @@ struct Ninjam : Module {
 	std::atomic<float> peak{0.f};
 
 	// ---- Transmit ----
-	bool transmitting = false;  // TX enable (persisted)
-	float txQuality = 0.5f;     // encoder VBR quality (persisted; ~190 kbps)
-	int txDeclared = -1;        // last channel count declared to the server (UI thread)
-	std::atomic<bool> txArmed{false}; // capture armed at a downbeat (aligns intervals)
+	std::atomic<bool> transmitting{false}; // TX enable (persisted)
+	std::atomic<float> txQuality{0.5f};    // encoder VBR quality (persisted; ~190 kbps)
+	std::atomic<int> txDeclared{-1};       // last channel count declared (written on UI thread)
+	std::atomic<bool> txArmed{false};      // capture armed at a downbeat (aligns intervals)
 
 	// Declared last so it is destroyed FIRST: NjClient::~ joins its threads before the
 	// state its callbacks touch (roster/atomics above) is torn down.
@@ -219,9 +226,9 @@ struct Ninjam : Module {
 		json_t* root = json_load_file(globalConfigPath().c_str(), 0, &err);
 		if (!root)
 			return;
-		if (json_t* j = json_object_get(root, "joinUser")) joinUser = json_string_value(j);
-		if (json_t* j = json_object_get(root, "joinPass")) joinPass = json_string_value(j);
-		if (json_t* j = json_object_get(root, "joinHost")) joinHost = json_string_value(j);
+		joinUser = jsonStr(json_object_get(root, "joinUser"), joinUser);
+		joinPass = jsonStr(json_object_get(root, "joinPass"), joinPass);
+		joinHost = jsonStr(json_object_get(root, "joinHost"), joinHost);
 		if (json_t* j = json_object_get(root, "joinPort")) joinPort = (int) json_integer_value(j);
 		if (json_t* hist = json_object_get(root, "serverHistory")) {
 			serverHistory.clear();
@@ -278,7 +285,10 @@ struct Ninjam : Module {
 					roster.erase(it);
 			}
 		};
-		cb.onChat = [this](const akaudio::nj::ChatMessage& m) {
+		// Snapshot of our display name for isOwnSpeaker(): the onChat lambda runs on
+		// the net thread, so it must not read the joinUser member (the UI edits it).
+		const std::string self = joinUser.empty() ? std::string("anonymous") : joinUser;
+		cb.onChat = [this, self](const akaudio::nj::ChatMessage& m) {
 			const std::string& c = m.cmd();
 			// A server message (MSG with an empty sender) carries server-side announcements —
 			// notably the "User X kicked by Y" line the server broadcasts right before it drops
@@ -287,8 +297,8 @@ struct Ninjam : Module {
 				std::lock_guard<std::mutex> lk(dropMutex);
 				lastServerMsg = m.arg(1);
 			}
-			if (c == "MSG")          pushChat({m.arg(0), m.arg(1), ChatLine::Normal, isOwnSpeaker(m.arg(0))}); // speaker, text
-			else if (c == "PRIVMSG") pushChat({m.arg(0) + " (pm)", m.arg(1), ChatLine::Normal, isOwnSpeaker(m.arg(0))});
+			if (c == "MSG")          pushChat({m.arg(0), m.arg(1), ChatLine::Normal, isOwnSpeaker(m.arg(0), self)}); // speaker, text
+			else if (c == "PRIVMSG") pushChat({m.arg(0) + " (pm)", m.arg(1), ChatLine::Normal, isOwnSpeaker(m.arg(0), self)});
 			else if (c == "TOPIC") {
 				if (!m.arg(1).empty())
 					pushChat({"", (m.arg(0).empty() ? std::string("Topic: ") : m.arg(0) + " set topic: ") + m.arg(1), ChatLine::Topic});
@@ -361,13 +371,17 @@ struct Ninjam : Module {
 		roomLabel = room.name.empty() ? room.host : room.name;
 		joinStart();
 	}
-	// Direct join to a typed server (private/registered). joinUser/joinPass must be set
-	// by the caller (the panel fields) beforehand.
-	void joinManual(const std::string& host, int port) {
+	// Direct join to a typed server (private/registered), with the credentials from
+	// the panel fields. Credentials are assigned only after stopAll(), so the old
+	// session (whose net thread may still be delivering callbacks) is fully joined
+	// before any of this state changes.
+	void joinManual(const std::string& host, int port, const std::string& user, const std::string& pass) {
 		if (host.empty())
 			return;
 		stopAll();
 		mode = MODE_JOIN;
+		joinUser = user;
+		joinPass = pass;
 		joinHost = host;
 		joinPort = port > 0 ? port : 2049;
 		roomLabel = joinHost;
@@ -505,8 +519,15 @@ struct Ninjam : Module {
 	}
 
 	void process(const ProcessArgs& args) override {
+		// Audio thread: read the UI-owned flags once, relaxed (they're mode
+		// switches, not synchronization points).
+		const int modeL = mode.load(std::memory_order_relaxed);
+		const bool joinedL = joined.load(std::memory_order_relaxed);
+		const bool transmittingL = transmitting.load(std::memory_order_relaxed);
+		const int txDeclaredL = txDeclared.load(std::memory_order_relaxed);
+
 		float l = 0.f, r = 0.f; // main mix (= sum of players in JOIN, or the Icecast stream)
-		if (mode == MODE_JOIN) {
+		if (modeL == MODE_JOIN) {
 			// Pull one wide frame (per-player stereo); fan out to the poly bundle and sum
 			// to the main mix. Audio in Rack is ±5V line level.
 			float frame[akaudio::nj::RING_CH];
@@ -527,7 +548,7 @@ struct Ninjam : Module {
 		} else {
 			outputs[POLY_L_OUTPUT].setChannels(0);
 			outputs[POLY_R_OUTPUT].setChannels(0);
-			stream.pull(l, r); // leaves l/r at 0 on underrun
+			stream.pull(l, r); // on underrun pull() leaves them untouched → they stay 0
 		}
 
 		// ---- Beat clock + metronome (only when joined to a tempo) ----
@@ -535,7 +556,9 @@ struct Ninjam : Module {
 		int bpiL = jamBpi.load(std::memory_order_relaxed);
 		float click = 0.f, clockG = 0.f, resetG = 0.f, runG = 0.f, phaseV = 0.f;
 		if (bpmL > 0 && bpiL > 0) {
-			if (resyncBeat.exchange(false, std::memory_order_acq_rel)) {
+			// Cheap relaxed load first; the RMW runs only on the rare resync frame.
+			if (resyncBeat.load(std::memory_order_relaxed)
+			        && resyncBeat.exchange(false, std::memory_order_acq_rel)) {
 				beatPhase = 0.0;
 				beatIndex = 0;
 				currentBeat.store(0, std::memory_order_relaxed);
@@ -548,7 +571,7 @@ struct Ninjam : Module {
 				beatIndex = (beatIndex + 1) % bpiL;
 				currentBeat.store(beatIndex, std::memory_order_relaxed);
 				// Arm transmit capture on the downbeat so uploaded intervals align to the grid.
-				if (beatIndex == 0 && transmitting && joined && txDeclared > 0)
+				if (beatIndex == 0 && transmittingL && joinedL && txDeclaredL > 0)
 					txArmed.store(true, std::memory_order_relaxed);
 				clickEnv = 1.f; // arm a click; accent the downbeat
 				clickPhase = 0.f;
@@ -589,10 +612,10 @@ struct Ninjam : Module {
 			clickEnv = 0.f;
 		}
 		// ---- Transmit capture: feed input frames once armed at a downbeat ----
-		if (transmitting && joined && txDeclared > 0 && txArmed.load(std::memory_order_relaxed)
+		if (transmittingL && joinedL && txDeclaredL > 0 && txArmed.load(std::memory_order_relaxed)
 		        && inputs[LEFT_INPUT].isConnected()) {
 			bool rConn = inputs[RIGHT_INPUT].isConnected();
-			for (int ch = 0; ch < txDeclared; ch++) {
+			for (int ch = 0; ch < txDeclaredL; ch++) {
 				float il = inputs[LEFT_INPUT].getPolyVoltage(ch) * 0.2f;  // ±5V -> ±1
 				float ir = rConn ? inputs[RIGHT_INPUT].getPolyVoltage(ch) * 0.2f : il;
 				njclient.captureFrame(ch, il, ir);
@@ -601,7 +624,7 @@ struct Ninjam : Module {
 
 		// Main mix: fold the metronome click in when the toggle is on, so it is audible on
 		// MAIN without needing to patch the CLICK jack.
-		if (clickEnabled)
+		if (clickEnabled.load(std::memory_order_relaxed))
 			{ l += click; r += click; }
 		outputs[LEFT_OUTPUT].setVoltage(l * 5.f);
 		outputs[RIGHT_OUTPUT].setVoltage(r * 5.f);
@@ -644,20 +667,15 @@ struct Ninjam : Module {
 	void dataFromJson(json_t* root) override {
 		if (json_t* j = json_object_get(root, "mode"))
 			mode = (int) json_integer_value(j);
-		if (json_t* j = json_object_get(root, "url"))
-			url = json_string_value(j);
-		if (json_t* j = json_object_get(root, "roomLabel"))
-			roomLabel = json_string_value(j);
+		url = jsonStr(json_object_get(root, "url"), url);
+		roomLabel = jsonStr(json_object_get(root, "roomLabel"), roomLabel);
 		if (json_t* j = json_object_get(root, "listening"))
 			listening = json_boolean_value(j);
-		if (json_t* j = json_object_get(root, "joinHost"))
-			joinHost = json_string_value(j);
+		joinHost = jsonStr(json_object_get(root, "joinHost"), joinHost);
 		if (json_t* j = json_object_get(root, "joinPort"))
 			joinPort = (int) json_integer_value(j);
-		if (json_t* j = json_object_get(root, "joinUser"))
-			joinUser = json_string_value(j);
-		if (json_t* j = json_object_get(root, "joinPass"))
-			joinPass = json_string_value(j);
+		joinUser = jsonStr(json_object_get(root, "joinUser"), joinUser);
+		joinPass = jsonStr(json_object_get(root, "joinPass"), joinPass);
 		if (json_t* j = json_object_get(root, "joined"))
 			joined = json_boolean_value(j);
 		if (json_t* j = json_object_get(root, "clickEnabled"))
@@ -709,12 +727,14 @@ static void parseHostPort(const std::string& s, std::string& host, int& port) {
 static void directJoin(Ninjam* module, ui::TextField* userF, ui::TextField* passF, ui::TextField* serverF) {
 	if (!module || !serverF || serverF->text.empty())
 		return;
-	if (userF) module->joinUser = userF->text;
-	if (passF) module->joinPass = passF->text;
 	std::string host;
 	int port;
 	parseHostPort(serverF->text, host, port);
-	module->joinManual(host, port);
+	// Credentials are handed to joinManual (assigned after it stops the old
+	// session), not written to the module while a session may still be live.
+	module->joinManual(host, port,
+		userF ? userF->text : module->joinUser,
+		passF ? passF->text : module->joinPass);
 }
 
 // Text field that moves focus to the next/previous field on TAB / Shift-TAB.
@@ -1839,7 +1859,9 @@ struct NinjamWidget : ModuleWidget {
 		menu->addChild(createMenuItem("Stop", "", [module]() {
 			if (module->isActive()) module->stopAll();
 		}));
-		menu->addChild(createBoolPtrMenuItem("Metronome click", "", &module->clickEnabled));
+		menu->addChild(createCheckMenuItem("Metronome click", "",
+			[module]() { return module->clickEnabled.load(std::memory_order_relaxed); },
+			[module]() { module->clickEnabled = !module->clickEnabled; }));
 
 		// CLOCK output resolution. 1 = once per beat (step sequencers); 2 (default) for
 		// modules that detect tempo assuming 2 pulses/beat; 24 ≈ MIDI-clock sync.

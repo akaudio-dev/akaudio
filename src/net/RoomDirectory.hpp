@@ -71,6 +71,7 @@ private:
 
 	std::thread thread;
 	std::atomic<bool> loading_{false};
+	std::atomic<bool> abort_{false};      // set by the destructor so its join can't stall the UI
 	std::atomic<unsigned> bust_{0};       // cache-bust counter for ?t=
 	std::atomic<unsigned> generation_{0}; // bumped on each successful parse
 };

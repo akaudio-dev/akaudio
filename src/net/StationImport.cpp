@@ -4,6 +4,8 @@
 #include "StationImport.hpp"
 #include "Http.hpp"
 #include "ImageCache.hpp"
+#include "Json.hpp"
+#include "Stream.hpp"
 
 #include <chrono>
 #include <cctype>
@@ -11,15 +13,13 @@
 #include <cstdio>
 #include <thread>
 
-#include <jansson.h>
-
 namespace akaudio {
 
 namespace {
 
-// StreamClient::State int values (kept in sync with net/Stream.hpp).
-constexpr int kPlaying = 2;
-constexpr int kError = 3;
+// StreamClient::State values as the ints Probe carries.
+constexpr int kPlaying = (int) StreamClient::State::Playing;
+constexpr int kError = (int) StreamClient::State::Error;
 
 // Verification gate: how many stereo frames must flow before we trust the stream.
 // ~30k frames is ~0.7 s of real audio at 44.1/48 kHz, drained at playback speed.
@@ -37,10 +37,6 @@ std::string urlEncode(const std::string& s) {
 	return out;
 }
 
-std::string flexStr(json_t* v) {
-	return (v && json_is_string(v)) ? json_string_value(v) : "";
-}
-
 // FNV-1a hex, for a stable favicon cache filename keyed on the stream URL.
 std::string hashKey(const std::string& s) {
 	uint32_t h = 2166136261u;
@@ -54,6 +50,9 @@ std::string hashKey(const std::string& s) {
 } // namespace
 
 StationImporter::~StationImporter() {
+	// Abort an audition in flight — without this, deleting the module mid-import
+	// blocks the UI thread on the join for the verify poll + HTTP timeouts.
+	abort_.store(true, std::memory_order_release);
 	if (thread.joinable())
 		thread.join();
 }
@@ -119,7 +118,7 @@ void StationImporter::run() {
 	bool started = false, verified = false;
 	std::string errText;
 	bool sawError = false, sawPlaying = false;
-	for (int i = 0; i < kMaxPolls; i++) {
+	for (int i = 0; i < kMaxPolls && !abort_.load(std::memory_order_acquire); i++) {
 		Probe p;
 		if (probe)
 			p = probe();
@@ -163,7 +162,7 @@ void StationImporter::run() {
 	{
 		std::string body;
 		std::string api = "https://all.api.radio-browser.info/json/stations/byurl?url=" + urlEncode(url);
-		if (httpGet(api, body)) {
+		if (httpGet(api, body, &abort_)) {
 			json_error_t err;
 			json_t* root = json_loads(body.c_str(), 0, &err);
 			if (root && json_is_array(root) && json_array_size(root) > 0) {
@@ -183,7 +182,7 @@ void StationImporter::run() {
 	if (!favicon.empty()) {
 		setStatus("Fetching art…");
 		std::string body;
-		if (httpGet(favicon, body) && body.size() >= 16)
+		if (httpGet(favicon, body, &abort_) && body.size() >= 16)
 			iconPath = cacheImage(body, cacheDir, hashKey(url));
 	}
 

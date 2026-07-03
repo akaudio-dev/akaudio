@@ -20,57 +20,8 @@ namespace akaudio {
 
 namespace {
 
-// Parsed http(s)://host[:port][/path]
-struct Url {
-	std::string host;
-	std::string port = "80";
-	std::string path = "/";
-	bool tls = false;
-	bool ok = false;
-};
-
-Url parseUrl(const std::string& url) {
-	Url u;
-	std::string s = url;
-	if (s.rfind("https://", 0) == 0) {
-		u.tls = true;
-		u.port = "443";
-		s = s.substr(8);
-	}
-	else if (s.rfind("http://", 0) == 0) {
-		s = s.substr(7);
-	}
-	else {
-		return u; // unsupported scheme
-	}
-
-	size_t slash = s.find('/');
-	std::string authority = (slash == std::string::npos) ? s : s.substr(0, slash);
-	u.path = (slash == std::string::npos) ? "/" : s.substr(slash);
-
-	size_t colon = authority.find(':');
-	if (colon == std::string::npos) {
-		u.host = authority;
-	}
-	else {
-		u.host = authority.substr(0, colon);
-		u.port = authority.substr(colon + 1);
-	}
-	u.ok = !u.host.empty();
-	return u;
-}
-
-bool endsWithCI(const std::string& s, const std::string& suffix) {
-	if (s.size() < suffix.size())
-		return false;
-	for (size_t i = 0; i < suffix.size(); i++) {
-		char a = (char) std::tolower((unsigned char) s[s.size() - suffix.size() + i]);
-		char b = (char) std::tolower((unsigned char) suffix[i]);
-		if (a != b)
-			return false;
-	}
-	return true;
-}
+// URL parsing + endsWithCI live in Http.{hpp,cpp} (one parser shared by the
+// whole net/ layer).
 
 // Path part of a URL, without the query string (for extension checks).
 std::string pathNoQuery(const std::string& url) {
@@ -109,8 +60,106 @@ std::string firstPlaylistUrl(const std::string& body) {
 	return "";
 }
 
+// The stream socket carries SO_RCVTIMEO so no recv can block forever; tlsRead
+// reports each expired slice as -2. kIdleBudgetMs bounds how long we keep
+// retrying with no data at all — a "live" stream silent that long is dead, and
+// without this bound a stalled-but-open server pinned the thread in recv with
+// the status stuck on "Playing" until the user hit stop.
+constexpr int kRecvSliceMs = 2000;
+constexpr int kIdleBudgetMs = 30000;
+
+// Bounded read: data / EOF / error / abort / idle-budget-exhausted (the last two
+// return 0, i.e. treated as end of stream).
+long readIdle(const Tls& tls, int fd, void* buf, size_t n, const std::atomic<bool>& abort) {
+	int idleMs = 0;
+	for (;;) {
+		if (abort.load(std::memory_order_acquire))
+			return 0;
+		long r = tlsRead(tls, fd, buf, n);
+		if (r != -2)
+			return r; // >0 data, 0 EOF, -1 error
+		idleMs += kRecvSliceMs;
+		if (idleMs >= kIdleBudgetMs)
+			return 0;
+	}
+}
+
+// Shared decode→ring plumbing for all three decode paths (MP3, AAC, HLS): the
+// warm-up linear resampler (source rate → engine rate) plus the blocking
+// backpressure push that paces the socket at playback speed. Built inside
+// StreamClient's member functions with references to its state.
+struct ResampleCtx {
+	StereoRingBuffer& ring;
+	const std::atomic<bool>& running;
+	const std::atomic<bool>& abort;
+	std::atomic<uint64_t>& produced;
+	const std::atomic<float>& sampleRate;
+
+	ResampleCtx(StereoRingBuffer& ring, const std::atomic<bool>& running,
+			const std::atomic<bool>& abort, std::atomic<uint64_t>& produced,
+			const std::atomic<float>& sampleRate)
+		: ring(ring), running(running), abort(abort), produced(produced), sampleRate(sampleRate) {}
+
+	// Linear resampler state.
+	double phase = 0.0;
+	float prevL = 0.f, prevR = 0.f;
+	bool havePrev = false;
+	bool stopped = false; // a push was refused → stop()/abort in progress
+
+	// Source samples to advance per output frame.
+	double stepFor(double srcRate) const {
+		double engineRate = sampleRate.load(std::memory_order_relaxed);
+		if (engineRate < 1.0)
+			engineRate = 44100.0;
+		return srcRate / engineRate;
+	}
+
+	// Push one output frame, blocking briefly under backpressure so the producer
+	// reads at playback speed and never drops audio. False = stop.
+	bool push(float l, float r) {
+		while (!ring.push(l, r)) {
+			if (!running.load(std::memory_order_acquire) || abort.load(std::memory_order_acquire)) {
+				stopped = true;
+				return false;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+		produced.fetch_add(1, std::memory_order_relaxed);
+		return true;
+	}
+
+	// Feed one source frame through the resampler (first frame just warms up
+	// prev). False = stop requested; the caller should bail out.
+	bool feed(float curL, float curR, double step) {
+		if (!havePrev) {
+			prevL = curL;
+			prevR = curR;
+			havePrev = true;
+			return true;
+		}
+		while (phase < 1.0) {
+			if (!push(prevL + (curL - prevL) * (float) phase,
+			          prevR + (curR - prevR) * (float) phase))
+				return false;
+			phase += step;
+		}
+		phase -= 1.0;
+		prevL = curL;
+		prevR = curR;
+		return true;
+	}
+
+	// Feed a block of interleaved stereo PCM (the AAC/HLS onPCM shape).
+	void feedStereoBlock(const float* pcm, int frames, double srcRate) {
+		const double step = stepFor(srcRate);
+		for (int i = 0; i < frames; i++)
+			if (!feed(pcm[2 * i + 0], pcm[2 * i + 1], step))
+				return;
+	}
+};
+
 // Context handed to dr_mp3's read callback: serves the post-header leftover bytes
-// first, then reads directly from the socket.
+// first, then reads directly from the socket (idle-bounded).
 struct ReadCtx {
 	StreamClient* self;
 	int fd;
@@ -134,7 +183,7 @@ size_t onRead(void* pUserData, void* pBufferOut, size_t bytesToRead) {
 		return n;
 	}
 
-	long n = tlsRead(*ctx->tls, ctx->fd, pBufferOut, bytesToRead);
+	long n = readIdle(*ctx->tls, ctx->fd, pBufferOut, bytesToRead, *ctx->abort);
 	return n > 0 ? static_cast<size_t>(n) : 0;
 }
 
@@ -160,7 +209,7 @@ void StreamClient::start(const std::string& url) {
 	abort.store(false, std::memory_order_release);
 	running.store(true, std::memory_order_release);
 	produced.store(0, std::memory_order_release);
-	ring.clear();
+	ring.requestClear(); // audio thread drops the old stream's tail on its next pull
 	setStatus(State::Connecting, "Connecting…");
 	thread = std::thread(&StreamClient::run, this, url);
 }
@@ -168,13 +217,19 @@ void StreamClient::start(const std::string& url) {
 void StreamClient::stop() {
 	abort.store(true, std::memory_order_release);
 	running.store(false, std::memory_order_release);
-	// Interrupt a blocked recv() by shutting the socket down; run() owns the close.
-	int fd = sock.load(std::memory_order_acquire);
-	if (fd >= 0)
-		netShutdown(fd);
+	// Interrupt a blocked recv() by shutting the socket down; run() owns the
+	// close. sockMutex makes shutdown atomic with that close — otherwise we
+	// could load the fd, lose the race to run()'s netClose, and shutdown() an fd
+	// number the OS had already recycled for an unrelated connection.
+	{
+		std::lock_guard<std::mutex> lock(sockMutex);
+		int fd = sock.load(std::memory_order_acquire);
+		if (fd >= 0)
+			netShutdown(fd);
+	}
 	if (thread.joinable())
 		thread.join();
-	ring.clear();
+	ring.requestClear();
 	if (state.load(std::memory_order_acquire) != State::Error)
 		setStatus(State::Stopped, "Stopped");
 }
@@ -210,7 +265,10 @@ void StreamClient::run(std::string url) {
 		return;
 	}
 
-	// Resolve + connect (blocking).
+	// Resolve + connect. netConnectAbortable polls `abort` every 100 ms, so
+	// stop() (called on the UI thread on every station switch) never blocks on a
+	// slow/dead host's connect timeout — the old cause of UI freezes when
+	// stepping quickly between stations.
 	addrinfo hints{};
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
@@ -220,53 +278,7 @@ void StreamClient::run(std::string url) {
 		running.store(false, std::memory_order_release);
 		return;
 	}
-
-	// Non-blocking connect that polls abort every 100 ms, so stop() (called on the
-	// UI thread on every station switch) never blocks on a slow/dead host's connect
-	// timeout — the cause of UI freezes when stepping quickly between stations.
-	int fd = -1;
-	for (addrinfo* ai = res; ai; ai = ai->ai_next) {
-		int s = (int) ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-		if (s < 0)
-			continue;
-#ifdef SO_NOSIGPIPE
-		// Without this, a send() on a socket that stop() has shutdown() raises
-		// SIGPIPE, which terminates the whole process (Rack doesn't ignore it) —
-		// the crash seen when switching stations rapidly. Make writes return EPIPE.
-		// (Not defined on Linux/Windows; SIGPIPE handled by ignoring it / not raised.)
-		int nosig = 1;
-		::setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, (const char*) &nosig, sizeof(nosig));
-#endif
-		sock.store(s, std::memory_order_release); // publish before connecting so stop() can see it
-
-		netSetNonBlocking(s, true);
-		int rc = ::connect(s, ai->ai_addr, ai->ai_addrlen);
-		bool connected = (rc == 0);
-		if (rc < 0 && netConnectInProgress()) {
-			for (int i = 0; i < 80 && !abort.load(std::memory_order_acquire); i++) {
-				fd_set wf;
-				FD_ZERO(&wf);
-				FD_SET(s, &wf);
-				timeval tv{0, 100 * 1000}; // 100 ms
-				int sel = ::select(s + 1, nullptr, &wf, nullptr, &tv);
-				if (sel > 0) {
-					connected = (netSoError(s) == 0);
-					break;
-				}
-				if (sel < 0 && !netInterrupted())
-					break;
-			}
-		}
-		if (connected) {
-			netSetNonBlocking(s, false); // restore blocking for the read loop
-			fd = s;
-			break;
-		}
-		sock.store(-1, std::memory_order_release);
-		netClose(s);
-		if (abort.load(std::memory_order_acquire))
-			break;
-	}
+	int fd = netConnectAbortable(res, &abort, 8000);
 	::freeaddrinfo(res);
 
 	if (fd < 0) {
@@ -275,6 +287,10 @@ void StreamClient::run(std::string url) {
 		running.store(false, std::memory_order_release);
 		return;
 	}
+	// Publish so stop() can interrupt a blocked recv; bound each recv so a
+	// silent-but-open stream is noticed (readIdle retries -2 up to its budget).
+	sock.store(fd, std::memory_order_release);
+	netSetRcvTimeout(fd, kRecvSliceMs);
 
 	// For https, wrap the socket in TLS before any HTTP I/O. Declared here (before
 	// the first `goto cleanup`) so it's in scope at the cleanup label, which frees
@@ -308,7 +324,7 @@ void StreamClient::run(std::string url) {
 		char tmp[2048];
 		size_t headerEnd = std::string::npos;
 		while (!abort.load(std::memory_order_acquire) && head.size() < (1 << 16)) {
-			long n = tlsRead(tls, fd, tmp, sizeof(tmp));
+			long n = readIdle(tls, fd, tmp, sizeof(tmp), abort);
 			if (n <= 0)
 				break;
 			head.append(tmp, n);
@@ -339,55 +355,16 @@ void StreamClient::run(std::string url) {
 		const size_t bodyStart = headerEnd + 4;
 		std::vector<char> leftover(head.begin() + bodyStart, head.end());
 
-		// Push one resampled stereo frame, blocking briefly under backpressure so
-		// we drain the socket at playback speed and never drop audio. Returns false
-		// when we should stop. Shared by both decoders' resamplers.
-		auto pushFrame = [&](float l, float r) -> bool {
-			while (!ring.push(l, r)) {
-				if (!running.load(std::memory_order_acquire) || abort.load(std::memory_order_acquire))
-					return false;
-				std::this_thread::sleep_for(std::chrono::milliseconds(2));
-			}
-			produced.fetch_add(1, std::memory_order_acq_rel);
-			return true;
-		};
+		// Decode → resample → blocking ring push, shared by both decoders.
+		ResampleCtx rs{ring, running, abort, produced, sampleRate};
 
 		if (isAac) {
 #if defined(__APPLE__)
 			// AAC via the system AudioToolbox (macOS). The decoder pushes decoded
-			// PCM through onPCM; we linear-resample to the engine rate here.
+			// PCM through onPCM; ResampleCtx resamples to the engine rate.
 			AacDecoder dec;
-			double phase = 0.0;
-			float prevL = 0.f, prevR = 0.f;
-			bool havePrev = false;
-			bool aborted = false;
 			dec.onPCM = [&](const float* pcm, int frames, double srcRate) {
-				double engineRate = sampleRate.load(std::memory_order_relaxed);
-				if (engineRate < 1.0)
-					engineRate = 44100.0;
-				const double step = srcRate / engineRate;
-				for (int i = 0; i < frames; i++) {
-					float curL = pcm[2 * i + 0];
-					float curR = pcm[2 * i + 1];
-					if (!havePrev) {
-						prevL = curL;
-						prevR = curR;
-						havePrev = true;
-						continue;
-					}
-					while (phase < 1.0) {
-						float outL = prevL + (curL - prevL) * (float) phase;
-						float outR = prevR + (curR - prevR) * (float) phase;
-						if (!pushFrame(outL, outR)) {
-							aborted = true;
-							return;
-						}
-						phase += step;
-					}
-					phase -= 1.0;
-					prevL = curL;
-					prevR = curR;
-				}
+				rs.feedStereoBlock(pcm, frames, srcRate);
 			};
 
 			if (!dec.init()) {
@@ -400,8 +377,8 @@ void StreamClient::run(std::string url) {
 				dec.feed(reinterpret_cast<const uint8_t*>(leftover.data()), leftover.size());
 
 			char buf[4096];
-			while (!aborted && running.load(std::memory_order_acquire) && !abort.load(std::memory_order_acquire)) {
-				long n = tlsRead(tls, fd, buf, sizeof(buf));
+			while (!rs.stopped && running.load(std::memory_order_acquire) && !abort.load(std::memory_order_acquire)) {
+				long n = readIdle(tls, fd, buf, sizeof(buf), abort);
 				if (n <= 0)
 					break;
 				if (!dec.feed(reinterpret_cast<const uint8_t*>(buf), (size_t) n))
@@ -433,30 +410,26 @@ void StreamClient::run(std::string url) {
 				goto cleanup;
 			}
 
-			const drmp3_uint32 channels = mp3.channels;
-			const double srcRate = mp3.sampleRate > 0 ? (double) mp3.sampleRate : 44100.0;
 			setStatus(State::Playing, "Playing " + u.host);
 
-			// Linear resampler state (source -> engine rate).
-			double phase = 0.0;
-			float prevL = 0.f, prevR = 0.f;
-			bool havePrev = false;
-
 			const drmp3_uint64 framesPerRead = 1152;
-			std::vector<float> pcm(framesPerRead * (channels ? channels : 2));
+			// MP3 is at most 2 channels; always size for stereo so a mono→stereo
+			// change mid-stream can never overflow the buffer.
+			std::vector<float> pcm(framesPerRead * 2);
 
-			bool stop = false;
-			while (!stop && running.load(std::memory_order_acquire) && !abort.load(std::memory_order_acquire)) {
+			while (!rs.stopped && running.load(std::memory_order_acquire) && !abort.load(std::memory_order_acquire)) {
 				drmp3_uint64 got = drmp3_read_pcm_frames_f32(&mp3, framesPerRead, pcm.data());
 				if (got == 0)
 					break; // stream ended
 
-				double engineRate = sampleRate.load(std::memory_order_relaxed);
-				if (engineRate < 1.0)
-					engineRate = 44100.0;
-				const double step = srcRate / engineRate; // source advance per output frame
+				// dr_mp3 updates channels/sampleRate as frames decode; re-read
+				// both per block so a mid-stream format change keeps the right
+				// interleave and pitch (streams may switch, e.g. mono↔stereo).
+				const drmp3_uint32 channels = mp3.channels ? mp3.channels : 2;
+				const double srcRate = mp3.sampleRate > 0 ? (double) mp3.sampleRate : 44100.0;
+				const double step = rs.stepFor(srcRate);
 
-				for (drmp3_uint64 i = 0; i < got && !stop; i++) {
+				for (drmp3_uint64 i = 0; i < got; i++) {
 					float curL, curR;
 					if (channels >= 2) {
 						curL = pcm[i * channels + 0];
@@ -465,26 +438,8 @@ void StreamClient::run(std::string url) {
 					else {
 						curL = curR = pcm[i];
 					}
-
-					if (!havePrev) {
-						prevL = curL;
-						prevR = curR;
-						havePrev = true;
-						continue;
-					}
-
-					while (phase < 1.0) {
-						float outL = prevL + (curL - prevL) * (float) phase;
-						float outR = prevR + (curR - prevR) * (float) phase;
-						if (!pushFrame(outL, outR)) {
-							stop = true;
-							break;
-						}
-						phase += step;
-					}
-					phase -= 1.0;
-					prevL = curL;
-					prevR = curR;
+					if (!rs.feed(curL, curR, step))
+						break;
 				}
 			}
 
@@ -497,6 +452,8 @@ void StreamClient::run(std::string url) {
 cleanup:
 	tlsFree(tls);
 	{
+		// Atomic with stop()'s shutdown (see stop()).
+		std::lock_guard<std::mutex> lock(sockMutex);
 		int f = sock.exchange(-1, std::memory_order_acq_rel);
 		if (f >= 0)
 			netClose(f);
@@ -521,46 +478,11 @@ void StreamClient::runHls(std::string url) {
 		}
 	}
 
-	// AAC decoder → linear resample → ring, identical to the direct-AAC path.
+	// AAC decoder → ResampleCtx → ring, identical to the direct-AAC path.
 	AacDecoder dec;
-	double phase = 0.0;
-	float prevL = 0.f, prevR = 0.f;
-	bool havePrev = false;
-	bool aborted = false;
-	auto pushFrame = [&](float l, float r) -> bool {
-		while (!ring.push(l, r)) {
-			if (!running.load(std::memory_order_acquire) || abort.load(std::memory_order_acquire))
-				return false;
-			std::this_thread::sleep_for(std::chrono::milliseconds(2));
-		}
-		produced.fetch_add(1, std::memory_order_acq_rel);
-		return true;
-	};
+	ResampleCtx rs{ring, running, abort, produced, sampleRate};
 	dec.onPCM = [&](const float* pcm, int frames, double srcRate) {
-		double engineRate = sampleRate.load(std::memory_order_relaxed);
-		if (engineRate < 1.0)
-			engineRate = 44100.0;
-		const double step = srcRate / engineRate;
-		for (int i = 0; i < frames; i++) {
-			float curL = pcm[2 * i + 0];
-			float curR = pcm[2 * i + 1];
-			if (!havePrev) {
-				prevL = curL;
-				prevR = curR;
-				havePrev = true;
-				continue;
-			}
-			while (phase < 1.0) {
-				if (!pushFrame(prevL + (curL - prevL) * (float) phase, prevR + (curR - prevR) * (float) phase)) {
-					aborted = true;
-					return;
-				}
-				phase += step;
-			}
-			phase -= 1.0;
-			prevL = curL;
-			prevR = curR;
-		}
+		rs.feedStereoBlock(pcm, frames, srcRate);
 	};
 	if (!dec.init()) {
 		setStatus(State::Error, "AAC init failed");
@@ -572,7 +494,7 @@ void StreamClient::runHls(std::string url) {
 	bool haveLast = false;
 	uint64_t lastSeq = 0;
 
-	while (running.load(std::memory_order_acquire) && !abort.load(std::memory_order_acquire) && !aborted) {
+	while (running.load(std::memory_order_acquire) && !abort.load(std::memory_order_acquire) && !rs.stopped) {
 		std::string body;
 		if (!httpGet(mediaUrl, body, &abort)) {
 			setStatus(State::Error, "Playlist fetch failed");
@@ -601,7 +523,7 @@ void StreamClient::runHls(std::string url) {
 			lastSeq = seq;
 			haveLast = true;
 			played++;
-			if (aborted)
+			if (rs.stopped)
 				break;
 		}
 

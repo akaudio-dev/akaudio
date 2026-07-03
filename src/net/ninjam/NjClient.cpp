@@ -41,6 +41,12 @@ void NjClient::start(const std::string& host, int port, const std::string& user,
                      const std::string& pass, Callbacks callbacks) {
 	stop();
 	cb = std::move(callbacks);
+	// (Re)bind the upload hook while no threads are running — assigning a
+	// std::function that the TX thread may concurrently invoke would be a race,
+	// so it must never happen in setTransmit() on a live session.
+	audio.onUploadInterval = [this](int ch, const std::vector<uint8_t>& ogg) {
+		sendUploadInterval(ch, ogg);
+	};
 	abort.store(false, std::memory_order_release);
 	running.store(true, std::memory_order_release);
 	thread = std::thread(&NjClient::run, this, host, port, user, pass);
@@ -48,9 +54,14 @@ void NjClient::start(const std::string& host, int port, const std::string& user,
 
 void NjClient::stop() {
 	abort.store(true, std::memory_order_release);
-	int fd = sock.load(std::memory_order_acquire);
-	if (fd >= 0)
-		netShutdown(fd); // interrupt a blocked recv; run() owns the close
+	// Interrupt a blocked recv; run() owns the close. sockMutex makes this
+	// atomic with that close so we can't shutdown() a recycled fd number.
+	{
+		std::lock_guard<std::mutex> lock(sockMutex);
+		int fd = sock.load(std::memory_order_acquire);
+		if (fd >= 0)
+			netShutdown(fd);
+	}
 	if (thread.joinable())
 		thread.join();
 	running.store(false, std::memory_order_release);
@@ -65,18 +76,25 @@ void NjClient::makeGuid(unsigned char out[16]) {
 }
 
 void NjClient::setTransmit(const std::vector<std::string>& channelNames, float quality) {
-	txChannels = channelNames;
+	{
+		// UI thread; the net thread reads txChannels in sendChannelDecl() (e.g.
+		// on AUTH_REPLY), so the write must be guarded.
+		std::lock_guard<std::mutex> lock(txMutex);
+		txChannels = channelNames;
+	}
 	audio.setTransmit((int) channelNames.size(), quality);
-	audio.onUploadInterval = [this](int ch, const std::vector<uint8_t>& ogg) {
-		sendUploadInterval(ch, ogg);
-	};
 	if (st.load(std::memory_order_acquire) == State::Connected)
 		sendChannelDecl(); // re-declare channels live
 }
 
 void NjClient::sendChannelDecl() {
-	if (!txChannels.empty())
-		sendAll(buildSetChannelInfo(txChannels));
+	std::vector<std::string> names;
+	{
+		std::lock_guard<std::mutex> lock(txMutex);
+		names = txChannels;
+	}
+	if (!names.empty())
+		sendAll(buildSetChannelInfo(names));
 	else
 		sendAll(buildSetChannelInfoListenOnly());
 }
@@ -186,7 +204,9 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 	subMask.clear();
 	setState(State::Connecting, host + ":" + std::to_string(port));
 
-	// Resolve + connect (blocking), same pattern as StreamClient.
+	// Resolve + connect, abort-pollable (netConnectAbortable) — a blocking
+	// connect() here would make stop() on a dead host hang the UI thread in
+	// join() for the full OS connect timeout.
 	addrinfo hints{};
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
@@ -196,17 +216,11 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 		running.store(false, std::memory_order_release);
 		return;
 	}
-	int fd = -1;
-	for (addrinfo* ai = res; ai; ai = ai->ai_next) {
-		fd = (int) ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-		if (fd < 0) continue;
-		if (::connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
-		netClose(fd);
-		fd = -1;
-	}
+	int fd = netConnectAbortable(res, &abort, 8000);
 	::freeaddrinfo(res);
 	if (fd < 0) {
-		setState(State::Error, "Connection failed");
+		bool wasAborted = abort.load(std::memory_order_acquire);
+		setState(wasAborted ? State::Stopped : State::Error, wasAborted ? "" : "Connection failed");
 		running.store(false, std::memory_order_release);
 		return;
 	}
@@ -310,6 +324,10 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 						audio.onUserChannel(u.user, u.channelIdx, u.active, u.volumeDb10, u.pan);
 						// Subscribe to this user's active channels (SET_USERMASK); many
 						// servers don't auto-subscribe, so without this we get no audio.
+						// channelIdx is an unvalidated wire u8 — a shift by >= 32 is UB,
+						// and the mask can't represent those channels anyway.
+						if (u.channelIdx >= 32)
+							continue;
 						uint32_t& mask = subMask[u.user];
 						uint32_t before = mask;
 						if (u.active) mask |= (1u << u.channelIdx);
@@ -350,8 +368,12 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 done:
 	(void)authed;
 	audio.stop();
-	int f = sock.exchange(-1, std::memory_order_acq_rel);
-	if (f >= 0) netClose(f);
+	{
+		// Atomic with stop()'s shutdown (see stop()).
+		std::lock_guard<std::mutex> lock(sockMutex);
+		int f = sock.exchange(-1, std::memory_order_acq_rel);
+		if (f >= 0) netClose(f);
+	}
 	// Terminal state, in priority order: a specific Error (auth/protocol failure) set via
 	// `goto done` stands as-is; otherwise distinguish who ended the session. abort set => the
 	// UI called stop() (user pressed Leave) => Stopped. abort clear => the loop fell out because
