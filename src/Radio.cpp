@@ -568,6 +568,34 @@ struct StationArt : Widget {
 		NVGcontext* vg = args.vg;
 		const float w = box.size.x, h = box.size.y;
 		const std::string name = module ? module->stationName : "";
+
+		// Stream error: show the reason in place of the artwork, so a dead station
+		// isn't a silent mystery — the user sees why (e.g. "HLS needs macOS" on a
+		// non-mac build, "Connection failed", "Bad URL"). State stays Error until
+		// the next start() (stop() deliberately preserves it), so this self-clears
+		// when the user picks or plays another station.
+		if (module && module->stream.getState() == akaudio::StreamClient::State::Error) {
+			const NVGcolor err = nvgRGB(0xc0, 0x39, 0x2b);
+			nvgBeginPath(vg);
+			nvgRoundedRect(vg, 0, 0, w, h, 5);
+			nvgFillColor(vg, nvgRGBA(0x50, 0x18, 0x18, 0x33));
+			nvgFill(vg);
+			std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system(RADIO_FONT_BOLD));
+			if (font && font->handle >= 0) {
+				nvgFontFaceId(vg, font->handle);
+				nvgFillColor(vg, err);
+				// ✕ mark (matches the import-error convention), then the wrapped reason.
+				nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+				nvgFontSize(vg, h * 0.24f);
+				nvgText(vg, w / 2, h * 0.14f, "\xe2\x9c\x95", NULL); // ✕
+				nvgFontSize(vg, 9.f);
+				nvgTextLineHeight(vg, 1.15f);
+				const std::string msg = module->stream.getStatusText();
+				nvgTextBox(vg, 3.f, h * 0.5f, w - 6.f, msg.c_str(), NULL);
+			}
+			return;
+		}
+
 		// Backing (shows through transparent favicons).
 		nvgBeginPath(vg);
 		nvgRoundedRect(vg, 0, 0, w, h, 5);
