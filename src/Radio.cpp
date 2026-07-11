@@ -5,6 +5,7 @@
 #include "net/Stream.hpp"
 #include "net/StationImport.hpp"
 #include "ClickableLed.hpp"
+#include "Theme.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -12,45 +13,30 @@
 #include <set>
 
 // Fundamental-style theme (matches the Ninjam panel): silver panel, dark labels.
-static const char* RADIO_FONT_BOLD = "res/fonts/Nunito-Bold.ttf";
+// Fonts, the plate colors, and the plate geometry are shared via Theme.hpp.
 static const NVGcolor RADIO_TEXT     = nvgRGB(0x1f, 0x1f, 0x1f); // panel text, exactly like core/Fundamental
 static const NVGcolor RADIO_TEXT_DIM = nvgRGB(0x6a, 0x72, 0x7a); // secondary labels
-static const NVGcolor RADIO_TEXT_LT  = nvgRGB(0xf0, 0xf0, 0xf0); // labels on the dark output plate (Audio uses #f0f0f0)
-static const NVGcolor RADIO_PLATE    = nvgRGB(0x1f, 0x1f, 0x1f); // Fundamental output-plate black
 
-static void radioText(NVGcontext* vg, const char* fontRes, float x, float y, float size,
-		NVGcolor col, const char* s) {
-	std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system(fontRes));
-	if (!font || font->handle < 0)
-		return;
-	nvgFontFaceId(vg, font->handle);
-	nvgFontSize(vg, size);
-	nvgFillColor(vg, col);
-	nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-	nvgText(vg, x, y, s, NULL);
-}
+// Output plate geometry: vertical grid from Theme.hpp (shared with Ninjam);
+// x/width center the plate on this 8 HP panel.
+static const float PLATE_X = 3.9f, PLATE_W = 32.84f;
+static const float OUT_L_X = 13.32f, OUT_R_X = 27.32f; // Audio output row columns
 
 // Code-drawn panel decoration (NanoSVG ignores <text>), matching VCV's core/
 // Fundamental house style: black Nunito-Bold title, LEVEL knob endpoint labels,
 // and a dark #1F1F1F rounded output plate with light LEFT/RIGHT labels.
-static const NVGcolor RADIO_TITLE = nvgRGB(0x1f, 0x1f, 0x1f); // core/Fundamental title color (#1f1f1f, not pure black)
-
-// Output plate geometry (Fundamental: 39.16 px tall, r 2.83 px on a 75 px panel →
-// 13.26 mm / 0.96 mm), centred on this 8 HP panel.
-static const float PLATE_X = 3.9f, PLATE_Y = 104.66f, PLATE_W = 32.84f, PLATE_H = 13.26f;
-static const float OUT_L_X = 13.32f, OUT_R_X = 27.32f, OUT_Y = 113.115f; // Audio output row
-
 struct RadioDecor : Widget {
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
 		// Dark output plate (outputs sit on it; drawn low-z so jacks render on top).
 		nvgBeginPath(vg);
-		nvgRoundedRect(vg, mm2px(PLATE_X), mm2px(PLATE_Y), mm2px(PLATE_W), mm2px(PLATE_H), mm2px(0.96f));
-		nvgFillColor(vg, RADIO_PLATE);
+		nvgRoundedRect(vg, mm2px(PLATE_X), mm2px(AK_PLATE_TOP_MM), mm2px(PLATE_W),
+			mm2px(AK_PLATE_H_MM), mm2px(AK_PLATE_R_MM));
+		nvgFillColor(vg, AK_PLATE);
 		nvgFill(vg);
 
-		radioText(vg, RADIO_FONT_BOLD, mm2px(20.32f), mm2px(9.0f), 15.f, RADIO_TITLE, "RADIO");
-		radioText(vg, RADIO_FONT_BOLD, mm2px(20.32f), mm2px(66.5f), 11.f, RADIO_TEXT, "LEVEL");
+		drawTxt(vg, FONT_BOLD, mm2px(20.32f), mm2px(9.0f), 15.f, RADIO_TEXT, "RADIO", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, mm2px(20.32f), mm2px(66.5f), 11.f, RADIO_TEXT, "LEVEL", NVG_ALIGN_CENTER);
 
 		// Gauge ring around the LEVEL knob — the open arc (gap at the bottom) the
 		// AUDIO/Fundamental knobs use: radius 7.09 mm, stroke #1f1f1f 0.8 px.
@@ -63,17 +49,31 @@ struct RadioDecor : Widget {
 		nvgStroke(vg);
 
 		// LEVEL endpoints at the arc's gap, like AUDIO.
-		radioText(vg, RADIO_FONT_BOLD, mm2px(13.0f), mm2px(86.5f), 9.f, RADIO_TEXT, "-\xe2\x88\x9e"); // -∞
-		radioText(vg, RADIO_FONT_BOLD, mm2px(27.6f), mm2px(86.5f), 9.f, RADIO_TEXT, "+12");
-		radioText(vg, RADIO_FONT_BOLD, mm2px(20.32f), mm2px(91.5f), 10.f, RADIO_TEXT, "CV");
+		drawTxt(vg, FONT_BOLD, mm2px(13.0f), mm2px(86.5f), 9.f, RADIO_TEXT, "-\xe2\x88\x9e", NVG_ALIGN_CENTER); // -∞
+		drawTxt(vg, FONT_BOLD, mm2px(27.6f), mm2px(86.5f), 9.f, RADIO_TEXT, "+12", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, mm2px(20.32f), mm2px(91.5f), 10.f, RADIO_TEXT, "CV", NVG_ALIGN_CENTER);
 		// LEFT / RIGHT labels on the output plate.
-		radioText(vg, RADIO_FONT_BOLD, mm2px(OUT_L_X), mm2px(PLATE_Y + 3.1f), 8.5f, RADIO_TEXT_LT, "LEFT");
-		radioText(vg, RADIO_FONT_BOLD, mm2px(OUT_R_X), mm2px(PLATE_Y + 3.1f), 8.5f, RADIO_TEXT_LT, "RIGHT");
+		drawTxt(vg, FONT_BOLD, mm2px(OUT_L_X), mm2px(AK_PLATE_TOP_MM + AK_PLATE_LABEL_DY_MM), 8.5f,
+			AK_PLATE_TEXT, "LEFT", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, mm2px(OUT_R_X), mm2px(AK_PLATE_TOP_MM + AK_PLATE_LABEL_DY_MM), 8.5f,
+			AK_PLATE_TEXT, "RIGHT", NVG_ALIGN_CENTER);
 		// "AK" maker mark at the bottom, in the spot VCV uses for its logo — large + bold.
-		radioText(vg, RADIO_FONT_BOLD, mm2px(20.32f), mm2px(121.0f), 16.f, RADIO_TEXT, "AK");
+		drawTxt(vg, FONT_BOLD, mm2px(20.32f), mm2px(AK_MARK_Y_MM), 16.f, RADIO_TEXT, "AK", NVG_ALIGN_CENTER);
 		Widget::draw(args);
 	}
 };
+
+// Radio's persisted `data` block. One builder shared by dataToJson and the
+// station-preset writer, so a new persisted field can't silently fork the two.
+static json_t* stationData(const std::string& url, const std::string& name,
+		const std::string& icon, bool playing) {
+	json_t* data = json_object();
+	json_object_set_new(data, "url", json_string(url.c_str()));
+	json_object_set_new(data, "stationName", json_string(name.c_str()));
+	json_object_set_new(data, "icon", json_string(icon.c_str()));
+	json_object_set_new(data, "playing", json_boolean(playing));
+	return data;
+}
 
 // Streaming internet radio (Icecast/HTTP MP3) source. Audio is fetched and decoded
 // on a background thread (net/Stream.hpp) and pulled here on the audio thread.
@@ -153,8 +153,8 @@ struct Radio : Module {
 	// Audition a URL: snapshot the current station, play the new URL, and kick the
 	// background importer to verify real audio → identify → fetch art. Nothing is
 	// committed or saved until the audition succeeds; a failure rolls back (see
-	// ImportWatcher). Provisional name "Auditioning…" so the panel never claims the
-	// new station prematurely.
+	// RadioWidget::step(), which drives the outcome). Provisional name
+	// "Auditioning…" so the panel never claims the new station prematurely.
 	void auditionUrl(const std::string& u) {
 		if (u.empty())
 			return;
@@ -216,12 +216,7 @@ struct Radio : Module {
 	}
 
 	json_t* dataToJson() override {
-		json_t* root = json_object();
-		json_object_set_new(root, "url", json_string(url.c_str()));
-		json_object_set_new(root, "stationName", json_string(stationName.c_str()));
-		json_object_set_new(root, "icon", json_string(icon.c_str()));
-		json_object_set_new(root, "playing", json_boolean(playing));
-		return root;
+		return stationData(url, stationName, icon, playing);
 	}
 
 	void dataFromJson(json_t* root) override {
@@ -259,10 +254,15 @@ static bool drawStationArt(NVGcontext* vg, const std::string& iconPath,
 	if (iconPath.empty())
 		return false;
 	// An absolute path = a runtime-cached favicon (importer); otherwise it's a
-	// bundled plugin-relative path under res/.
-	std::string file = iconPath[0] == '/'
-		? iconPath : asset::plugin(pluginInstance, "res/" + iconPath);
-	std::shared_ptr<window::Image> img = APP->window->loadImage(file);
+	// bundled plugin-relative path under res/. Cache the resolution — this runs
+	// per UI frame and asset::plugin() concatenates a fresh string each call.
+	static std::string lastIcon, lastFile; // UI thread only
+	if (iconPath != lastIcon) {
+		lastIcon = iconPath;
+		lastFile = iconPath[0] == '/'
+			? iconPath : asset::plugin(pluginInstance, "res/" + iconPath);
+	}
+	std::shared_ptr<window::Image> img = APP->window->loadImage(lastFile);
 	if (!img || img->handle < 0)
 		return false;
 	NVGpaint paint = nvgImagePattern(vg, x, y, w, h, 0.f, img->handle, 1.f);
@@ -309,8 +309,29 @@ static void drawSynthIcon(NVGcontext* vg, float x, float y, float w, float h,
 	nvgRoundedRect(vg, x, y, w, h, radius);
 	nvgFillColor(vg, bg);
 	nvgFill(vg);
-	radioText(vg, RADIO_FONT_BOLD, x + w / 2, y + h / 2 + 1.f, h * 0.40f,
-		nvgRGBA(0xff, 0xff, 0xff, 0xee), initials.c_str());
+	drawTxt(vg, FONT_BOLD, x + w / 2, y + h / 2 + 1.f, h * 0.40f,
+		nvgRGBA(0xff, 0xff, 0xff, 0xee), initials, NVG_ALIGN_CENTER);
+}
+
+// Station badge with fallbacks: real artwork → synthesized avatar → faint ♪
+// placeholder (no station picked yet). The one art-drawing entry point for the
+// panel square and the picker thumbnails.
+static void drawStationBadge(NVGcontext* vg, const std::string& icon, const std::string& name,
+		float x, float y, float w, float h, float radius) {
+	if (drawStationArt(vg, icon, x, y, w, h, radius))
+		return;
+	if (!name.empty()) {
+		drawSynthIcon(vg, x, y, w, h, name, radius);
+		return;
+	}
+	std::shared_ptr<window::Font> font = akLoadFont(FONT_REG);
+	if (font && font->handle >= 0) {
+		nvgFontFaceId(vg, font->handle);
+		nvgFontSize(vg, h * 0.5f);
+		nvgFillColor(vg, nvgRGBA(0x24, 0x27, 0x2b, 0x55));
+		nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+		nvgText(vg, x + w / 2, y + h / 2, "\xe2\x99\xaa", NULL); // ♪
+	}
 }
 
 // Strip a leading "NN_" ordering prefix (Rack's preset-sort convention).
@@ -349,63 +370,70 @@ struct StationItem : MenuItem {
 		MenuItem::draw(args); // native highlight + left-aligned text
 		const float s = box.size.y - 6.f;
 		const float ix = box.size.x - s - 5.f, iy = 3.f;
-		if (!drawStationArt(args.vg, icon, ix, iy, s, s, 3.f))
-			drawSynthIcon(args.vg, ix, iy, s, s, text, 3.f);
+		drawStationBadge(args.vg, icon, text, ix, iy, s, s, 3.f);
 		if (current) {
 			nvgBeginPath(args.vg);
 			nvgRoundedRect(args.vg, ix - 1.f, iy - 1.f, s + 2.f, s + 2.f, 4.f);
-			nvgStrokeColor(args.vg, nvgRGB(0x3a, 0xd0, 0x6a));
+			nvgStrokeColor(args.vg, AK_LED_GREEN);
 			nvgStrokeWidth(args.vg, 1.5f);
 			nvgStroke(args.vg);
 		}
 	}
 };
 
-// Read a station preset's display name + icon from its .vcvm (data block).
-static void readStationPreset(const std::string& path, std::string& name, std::string& icon) {
-	name.clear();
-	icon.clear();
+// A station preset on disk, with everything the UI needs from it. One
+// json_load_file per file — the single reader behind the picker menu, the
+// stepper, and the save/dedup logic.
+struct StationInfo {
+	std::string path;
+	std::string url;
+	std::string name;
+	std::string icon;
+};
+
+static StationInfo readStation(const std::string& path) {
+	StationInfo s;
+	s.path = path;
 	json_error_t err;
 	json_t* root = json_load_file(path.c_str(), 0, &err);
 	if (!root)
-		return;
+		return s;
 	if (json_t* data = json_object_get(root, "data")) {
-		name = jsonStr(json_object_get(data, "stationName"));
-		icon = jsonStr(json_object_get(data, "icon"));
+		s.url = jsonStr(json_object_get(data, "url"));
+		s.name = jsonStr(json_object_get(data, "stationName"));
+		s.icon = jsonStr(json_object_get(data, "icon"));
 	}
 	json_decref(root);
+	return s;
+}
+
+// Collect station presets under dir, in the order the picker menu shows them
+// (subfolders' contents first, then loose files, each sorted).
+static void scanStationDir(const std::string& dir, std::vector<StationInfo>& out) {
+	if (!system::isDirectory(dir))
+		return;
+	std::vector<std::string> entries = system::getEntries(dir);
+	std::sort(entries.begin(), entries.end());
+	for (const std::string& p : entries)
+		if (system::isDirectory(p))
+			scanStationDir(p, out);
+	for (const std::string& p : entries)
+		if (system::getExtension(p) == ".vcvm")
+			out.push_back(readStation(p));
 }
 
 // --- Saving auditioned stations (dedup by URL) ------------------------------
 
-// Read a preset's data.url, or "" if absent.
-static std::string readPresetUrl(const std::string& path) {
-	json_error_t err;
-	json_t* root = json_load_file(path.c_str(), 0, &err);
-	if (!root)
-		return "";
-	std::string u;
-	if (json_t* data = json_object_get(root, "data"))
-		if (json_t* j = json_object_get(data, "url"))
-			if (json_is_string(j))
-				u = json_string_value(j);
-	json_decref(root);
-	return u;
-}
-
 // Does any .vcvm under dir (recursively) already carry this URL? Used to avoid
 // duplicating a bundled (factory) station.
 static bool dirHasPresetUrl(const std::string& dir, const std::string& url) {
-	if (url.empty() || !system::isDirectory(dir))
+	if (url.empty())
 		return false;
-	for (const std::string& path : system::getEntries(dir)) {
-		if (system::isDirectory(path)) {
-			if (dirHasPresetUrl(path, url))
-				return true;
-		} else if (system::getExtension(path) == ".vcvm" && readPresetUrl(path) == url) {
+	std::vector<StationInfo> all;
+	scanStationDir(dir, all);
+	for (const StationInfo& s : all)
+		if (s.url == url)
 			return true;
-		}
-	}
 	return false;
 }
 
@@ -414,7 +442,7 @@ static std::string userPresetWithUrl(const std::string& dir, const std::string& 
 	if (url.empty() || !system::isDirectory(dir))
 		return "";
 	for (const std::string& path : system::getEntries(dir))
-		if (system::getExtension(path) == ".vcvm" && readPresetUrl(path) == url)
+		if (system::getExtension(path) == ".vcvm" && readStation(path).url == url)
 			return path;
 	return "";
 }
@@ -428,7 +456,8 @@ static std::string sanitizeName(const std::string& name) {
 	return out;
 }
 
-// Write a Radio station preset (data = url/name/icon, playing:true).
+// Write a Radio station preset (data = url/name/icon, playing:true). The empty
+// "params" array is deliberate: loading a station must not clobber the LEVEL knob.
 static void writeStationPreset(const std::string& path, const std::string& url,
 		const std::string& name, const std::string& icon) {
 	json_t* root = json_object();
@@ -436,12 +465,7 @@ static void writeStationPreset(const std::string& path, const std::string& url,
 	json_object_set_new(root, "model", json_string("Radio"));
 	json_object_set_new(root, "version", json_string(pluginInstance->version.c_str()));
 	json_object_set_new(root, "params", json_array());
-	json_t* data = json_object();
-	json_object_set_new(data, "url", json_string(url.c_str()));
-	json_object_set_new(data, "stationName", json_string(name.c_str()));
-	json_object_set_new(data, "icon", json_string(icon.c_str()));
-	json_object_set_new(data, "playing", json_true());
-	json_object_set_new(root, "data", data);
+	json_object_set_new(root, "data", stationData(url, name, icon, true));
 	json_dump_file(root, path.c_str(), JSON_INDENT(2));
 	json_decref(root);
 }
@@ -463,38 +487,21 @@ static std::string saveUserStation(Module* module, const std::string& name,
 	return existing.empty() ? "Added to Your stations" : "Updated station";
 }
 
-// Collect station preset paths in the same order the picker menu shows them
-// (subfolders' contents first, then loose files, each sorted), for prev/next
-// stepping.
-static void collectStationDir(const std::string& dir, std::vector<std::string>& out) {
-	if (!system::isDirectory(dir))
-		return;
-	std::vector<std::string> entries = system::getEntries(dir);
-	std::sort(entries.begin(), entries.end());
-	for (const std::string& p : entries)
-		if (system::isDirectory(p))
-			collectStationDir(p, out);
-	for (const std::string& p : entries)
-		if (system::getExtension(p) == ".vcvm")
-			out.push_back(p);
-}
-
 // Flat ordered list of all stations: bundled (factory) then user-saved. Deduped
 // by URL (keeping the first), so a duplicate station — e.g. a stale leftover
 // preset folder — can't make prev/next bounce within one region instead of
 // advancing.
-static std::vector<std::string> collectStations(ModuleWidget* mw) {
-	std::vector<std::string> raw;
-	collectStationDir(mw->model->getFactoryPresetDirectory(), raw);
-	collectStationDir(mw->model->getUserPresetDirectory(), raw);
+static std::vector<StationInfo> collectStations(ModuleWidget* mw) {
+	std::vector<StationInfo> raw;
+	scanStationDir(mw->model->getFactoryPresetDirectory(), raw);
+	scanStationDir(mw->model->getUserPresetDirectory(), raw);
 
-	std::vector<std::string> out;
+	std::vector<StationInfo> out;
 	std::set<std::string> seenUrls;
-	for (const std::string& path : raw) {
-		std::string u = readPresetUrl(path);
-		if (!u.empty() && !seenUrls.insert(u).second)
+	for (StationInfo& s : raw) {
+		if (!s.url.empty() && !seenUrls.insert(s.url).second)
 			continue; // a preset with this URL is already in the list
-		out.push_back(path);
+		out.push_back(std::move(s));
 	}
 	return out;
 }
@@ -523,14 +530,12 @@ static void appendStationDir(Menu* menu, ModuleWidget* mw, const std::string& di
 	for (const std::string& path : entries) {
 		if (system::getExtension(path) != ".vcvm")
 			continue;
-		std::string name, icon;
-		readStationPreset(path, name, icon);
-		if (name.empty())
-			name = prettyPresetName(system::getStem(path));
+		StationInfo s = readStation(path);
+		std::string name = !s.name.empty() ? s.name : prettyPresetName(system::getStem(path));
 
 		StationItem* item = new StationItem;
 		item->text = name;
-		item->icon = icon;
+		item->icon = s.icon;
 		item->current = module && module->stationName == name;
 		WeakPtr<ModuleWidget> w = mw;
 		item->onSelect = [w, path]() { if (w) w->loadAction(path); };
@@ -557,9 +562,9 @@ static void appendStationMenu(Menu* menu, ModuleWidget* mw) {
 	}
 }
 
-// (User stations are now created automatically by the importer when a URL is
-// entered — see Radio::importStation and net/StationImport — so there is no
-// manual save-by-name path here.)
+// (User stations are created automatically when a pasted URL is auditioned —
+// see Radio::auditionUrl and net/StationImport — so there is no manual
+// save-by-name path here beyond naming an unidentified stream.)
 
 // On-panel station artwork (the current station's bundled logo).
 struct StationArt : Widget {
@@ -567,8 +572,6 @@ struct StationArt : Widget {
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
 		const float w = box.size.x, h = box.size.y;
-		const std::string name = module ? module->stationName : "";
-
 		// Stream error: show the reason in place of the artwork, so a dead station
 		// isn't a silent mystery — the user sees why (e.g. "HLS needs macOS" on a
 		// non-mac build, "Connection failed", "Bad URL"). State stays Error until
@@ -580,7 +583,7 @@ struct StationArt : Widget {
 			nvgRoundedRect(vg, 0, 0, w, h, 5);
 			nvgFillColor(vg, nvgRGBA(0x50, 0x18, 0x18, 0x33));
 			nvgFill(vg);
-			std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system(RADIO_FONT_BOLD));
+			std::shared_ptr<window::Font> font = akLoadFont(FONT_BOLD);
 			if (font && font->handle >= 0) {
 				nvgFontFaceId(vg, font->handle);
 				nvgFillColor(vg, err);
@@ -601,23 +604,8 @@ struct StationArt : Widget {
 		nvgRoundedRect(vg, 0, 0, w, h, 5);
 		nvgFillColor(vg, nvgRGBA(0, 0, 0, 0x22));
 		nvgFill(vg);
-		bool drew = module && drawStationArt(vg, module->icon, 0, 0, w, h, 5);
-		if (!drew) {
-			if (name.empty()) {
-				// No station picked yet: faint ♪ placeholder.
-				std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system("res/fonts/DejaVuSans.ttf"));
-				if (font && font->handle >= 0) {
-					nvgFontFaceId(vg, font->handle);
-					nvgFontSize(vg, h * 0.5f);
-					nvgFillColor(vg, nvgRGBA(0x24, 0x27, 0x2b, 0x55));
-					nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-					nvgText(vg, w / 2, h / 2, "\xe2\x99\xaa", NULL); // ♪
-				}
-			} else {
-				// Station with no usable favicon: synthesize an avatar from its name.
-				drawSynthIcon(vg, 0, 0, w, h, name, 5);
-			}
-		}
+		drawStationBadge(vg, module ? module->icon : "", module ? module->stationName : "",
+			0, 0, w, h, 5);
 	}
 };
 
@@ -627,8 +615,16 @@ struct StationChoice : LedDisplayChoice {
 	ModuleWidget* mw = nullptr;
 
 	void step() override {
-		text = (module && !module->stationName.empty()) ? module->stationName : "Pick a station\xe2\x80\xa6";
+		// Assign only on change: this runs per UI frame and text is heap-allocating.
+		const std::string& want = (module && !module->stationName.empty())
+			? module->stationName : pickPrompt();
+		if (text != want)
+			text = want;
 		LedDisplayChoice::step();
+	}
+	static const std::string& pickPrompt() {
+		static const std::string s = "Pick a station\xe2\x80\xa6";
+		return s;
 	}
 	void onAction(const ActionEvent& e) override {
 		if (!mw)
@@ -636,62 +632,6 @@ struct StationChoice : LedDisplayChoice {
 		ui::Menu* menu = createMenu();
 		menu->addChild(createMenuLabel("Stations"));
 		appendStationMenu(menu, mw);
-	}
-};
-
-// Invisible helper (UI thread): drives the audition outcome — applies the live
-// importer status, then on completion either commits + saves (identified),
-// awaits a name (verified-but-unknown), or rolls back (failed). All saving and
-// rollback are centralised here so no failed audition leaves lingering state.
-struct ImportWatcher : Widget {
-	Radio* module = nullptr;
-	unsigned lastGen = 0;
-	bool inited = false;
-
-	void step() override {
-		if (module) {
-			// On first appearance, sync to the current generation so a stale result
-			// from before this widget existed isn't re-applied (e.g. patch reopen).
-			if (!inited) {
-				inited = true;
-				lastGen = module->importer.generation();
-			}
-
-			// Live status while a run is in flight; otherwise count the outcome down.
-			if (module->importer.running()) {
-				module->importMsg = module->importer.status();
-				module->importError = false;
-				module->importMsgTtl = 60 * 6;
-			} else if (module->importMsgTtl > 0 && --module->importMsgTtl == 0) {
-				module->importMsg = "";
-			}
-
-			unsigned g = module->importer.generation();
-			if (g != lastGen) {
-				lastGen = g;
-				akaudio::StationImporter::Result r = module->importer.result();
-				// Ignore if the user has navigated away from the auditioned URL.
-				if (r.url == module->url) {
-					if (!r.ok) {
-						module->setImportMsg("\xe2\x9c\x95 " + r.status, true); // ✕ reason
-						module->rollback();
-					} else if (r.identified) {
-						module->stationName = r.name;
-						module->icon = r.iconPath;
-						module->needName = false;
-						module->setImportMsg(saveUserStation(module, r.name, r.url, r.iconPath), false);
-					} else {
-						// Verified but unknown: play it, await a name to save.
-						module->stationName = "Unknown station";
-						module->icon = r.iconPath;
-						module->pendingIcon = r.iconPath;
-						module->needName = true;
-						module->setImportMsg(r.status, false);
-					}
-				}
-			}
-		}
-		Widget::step();
 	}
 };
 
@@ -704,8 +644,8 @@ struct StatusLine : Widget {
 			return;
 		NVGcolor col = module->importError ? nvgRGB(0xc0, 0x39, 0x2b) : nvgRGB(0x2e, 0x7d, 0x46);
 		nvgScissor(args.vg, 0, 0, box.size.x, box.size.y);
-		radioText(args.vg, RADIO_FONT_BOLD, box.size.x / 2, box.size.y / 2, 9.5f,
-			col, module->importMsg.c_str());
+		drawTxt(args.vg, FONT_BOLD, box.size.x / 2, box.size.y / 2, 9.5f,
+			col, module->importMsg, NVG_ALIGN_CENTER);
 		nvgResetScissor(args.vg);
 	}
 };
@@ -725,21 +665,9 @@ struct NameField : ui::TextField {
 };
 
 // Small triangular up/down button to step to the previous/next station.
-struct StepButton : OpaqueWidget {
+struct StepButton : HoverButton {
 	bool up = true;
-	bool hovered = false;
-	std::function<void()> onStep;
 
-	void onEnter(const EnterEvent& e) override { hovered = true; OpaqueWidget::onEnter(e); }
-	void onLeave(const LeaveEvent& e) override { hovered = false; OpaqueWidget::onLeave(e); }
-	void onButton(const ButtonEvent& e) override {
-		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT && onStep) {
-			onStep();
-			e.consume(this);
-			return;
-		}
-		OpaqueWidget::onButton(e);
-	}
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
 		const float w = box.size.x, h = box.size.y;
@@ -766,24 +694,76 @@ struct StepButton : OpaqueWidget {
 };
 
 struct RadioWidget : ModuleWidget {
+	// Audition-outcome tracking (was a dedicated invisible watcher widget).
+	unsigned importGen = 0;
+	bool importGenInited = false;
+
+	// UI thread, per frame: drive the audition outcome — apply the live importer
+	// status, then on completion either commit + save (identified), await a name
+	// (verified-but-unknown), or roll back (failed). All saving and rollback are
+	// centralised here so no failed audition leaves lingering state.
+	void step() override {
+		if (Radio* module = getModule<Radio>()) {
+			// On first appearance, sync to the current generation so a stale result
+			// from before this widget existed isn't re-applied (e.g. patch reopen).
+			if (!importGenInited) {
+				importGenInited = true;
+				importGen = module->importer.generation();
+			}
+
+			// Live status while a run is in flight; otherwise count the outcome down.
+			if (module->importer.running()) {
+				module->setImportMsg(module->importer.status(), false);
+			} else if (module->importMsgTtl > 0 && --module->importMsgTtl == 0) {
+				module->importMsg = "";
+			}
+
+			unsigned g = module->importer.generation();
+			if (g != importGen) {
+				importGen = g;
+				akaudio::StationImporter::Result r = module->importer.result();
+				// Ignore if the user has navigated away from the auditioned URL.
+				if (r.url == module->url) {
+					if (!r.ok) {
+						module->setImportMsg("\xe2\x9c\x95 " + r.status, true); // ✕ reason
+						module->rollback();
+					} else if (r.identified) {
+						module->stationName = r.name;
+						module->icon = r.iconPath;
+						module->needName = false;
+						module->setImportMsg(saveUserStation(module, r.name, r.url, r.iconPath), false);
+					} else {
+						// Verified but unknown: play it, await a name to save.
+						module->stationName = "Unknown station";
+						module->icon = r.iconPath;
+						module->pendingIcon = r.iconPath;
+						module->needName = true;
+						module->setImportMsg(r.status, false);
+					}
+				}
+			}
+		}
+		ModuleWidget::step();
+	}
+
 	// Load the previous/next station preset (bundled, then user), matching the
 	// current one by URL; wraps around. Uses Rack's preset loader, so it plays
 	// the station with full undo.
 	void stepStation(int dir) {
-		std::vector<std::string> paths = collectStations(this);
-		if (paths.empty())
+		std::vector<StationInfo> stations = collectStations(this);
+		if (stations.empty())
 			return;
 		Radio* m = getModule<Radio>();
 		std::string curUrl = m ? m->url : "";
 		int idx = -1;
-		for (int i = 0; i < (int) paths.size(); i++)
-			if (readPresetUrl(paths[i]) == curUrl) {
+		for (int i = 0; i < (int) stations.size(); i++)
+			if (stations[i].url == curUrl) {
 				idx = i;
 				break;
 			}
-		int n = (int) paths.size();
+		int n = (int) stations.size();
 		int next = (idx < 0) ? (dir > 0 ? 0 : n - 1) : (((idx + dir) % n) + n) % n;
-		loadAction(paths[next]);
+		loadAction(stations[next].path);
 	}
 
 	RadioWidget(Radio* module) {
@@ -821,7 +801,7 @@ struct RadioWidget : ModuleWidget {
 		};
 		led->isLive = [module, reallyLive]() { return reallyLive(module); };
 		led->isPending = [module, reallyLive]() { return module && module->playing && !reallyLive(module); };
-		led->onToggle = [module]() { if (module) module->togglePlay(); };
+		led->onClick = [module]() { if (module) module->togglePlay(); };
 		addChild(led);
 
 		// On-panel station picker (click to choose a bundled station). Dark text on a
@@ -843,24 +823,24 @@ struct RadioWidget : ModuleWidget {
 		up->up = true;
 		up->box.pos = mm2px(Vec(30.64, 26.5));
 		up->box.size = mm2px(Vec(6.0, 5.0));
-		up->onStep = [this]() { stepStation(-1); };
+		up->onClick = [this]() { stepStation(-1); };
 		addChild(up);
 
 		StepButton* down = new StepButton;
 		down->up = false;
 		down->box.pos = mm2px(Vec(30.64, 33.25));
 		down->box.size = mm2px(Vec(6.0, 5.0));
-		down->onStep = [this]() { stepStation(1); };
+		down->onClick = [this]() { stepStation(1); };
 		addChild(down);
 
 		// Built-in VCA: the AUDIO module's LEVEL knob (RoundLargeBlackKnob), with an
 		// optional CV cable below. "LEVEL"/"CV"/"−∞"/"+12" are drawn by RadioDecor.
 		addParam(createParamCentered<RoundLargeBlackKnob>(mm2px(Vec(20.32, 77.362)), module, Radio::LEVEL_PARAM));
-		addInput(createInputCentered<PJ301MPort>(mm2px(Vec(20.32, 96.859)), module, Radio::LEVEL_INPUT));
+		addInput(createInputCentered<PJ301MPort>(mm2px(Vec(20.32, AK_ROW_CV_MM)), module, Radio::LEVEL_INPUT));
 
 		// Stereo outputs on the dark plate (drawn by RadioDecor; LEFT/RIGHT labels too).
-		addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(OUT_L_X, OUT_Y)), module, Radio::LEFT_OUTPUT));
-		addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(OUT_R_X, OUT_Y)), module, Radio::RIGHT_OUTPUT));
+		addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(OUT_L_X, AK_ROW_OUT_MM)), module, Radio::LEFT_OUTPUT));
+		addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(OUT_R_X, AK_ROW_OUT_MM)), module, Radio::RIGHT_OUTPUT));
 
 		// Audition status line in the gap under the picker (empty when idle).
 		StatusLine* status = new StatusLine;
@@ -868,11 +848,7 @@ struct RadioWidget : ModuleWidget {
 		status->box.pos = mm2px(Vec(2.5, 55.5));
 		status->box.size = mm2px(Vec(35.64, 7.0));
 		addChild(status);
-
-		// Drives audition outcomes (commit/save/rollback) on the UI thread.
-		ImportWatcher* watcher = new ImportWatcher;
-		watcher->module = module;
-		addChild(watcher);
+		// (Audition outcomes are driven from RadioWidget::step().)
 	}
 
 	void appendContextMenu(Menu* menu) override {

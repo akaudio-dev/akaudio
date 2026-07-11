@@ -6,6 +6,7 @@
 #include "net/RoomDirectory.hpp"
 #include "net/ninjam/NjClient.hpp"
 #include "ClickableLed.hpp"
+#include "Theme.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -222,6 +223,33 @@ struct Ninjam : Module {
 		directory.refresh();
 	}
 
+	// The join server/credentials/history fields are persisted in two places — per
+	// patch (dataToJson) and cross-instance (saveGlobal) — through this one pair of
+	// helpers so the field lists can't drift.
+	void joinStateToJson(json_t* root) {
+		json_object_set_new(root, "joinHost", json_string(joinHost.c_str()));
+		json_object_set_new(root, "joinPort", json_integer(joinPort));
+		json_object_set_new(root, "joinUser", json_string(joinUser.c_str()));
+		json_object_set_new(root, "joinPass", json_string(joinPass.c_str()));
+		json_t* hist = json_array();
+		for (const std::string& s : serverHistory)
+			json_array_append_new(hist, json_string(s.c_str()));
+		json_object_set_new(root, "serverHistory", hist);
+	}
+	void joinStateFromJson(json_t* root) {
+		joinHost = jsonStr(json_object_get(root, "joinHost"), joinHost);
+		if (json_t* j = json_object_get(root, "joinPort"))
+			joinPort = (int) json_integer_value(j);
+		joinUser = jsonStr(json_object_get(root, "joinUser"), joinUser);
+		joinPass = jsonStr(json_object_get(root, "joinPass"), joinPass);
+		if (json_t* hist = json_object_get(root, "serverHistory")) {
+			serverHistory.clear();
+			size_t i; json_t* v;
+			json_array_foreach(hist, i, v)
+				if (const char* s = json_string_value(v)) serverHistory.push_back(s);
+		}
+	}
+
 	// Global (cross-instance) recall of the last server/credentials/history, so a brand-new
 	// module is prefilled. Stored in the Rack user dir. dataFromJson (a saved patch) still
 	// overrides these per-instance. Note: the password is stored here in plaintext (local).
@@ -232,29 +260,13 @@ struct Ninjam : Module {
 		json_t* root = json_load_file(globalConfigPath().c_str(), 0, &err);
 		if (!root)
 			return;
-		joinUser = jsonStr(json_object_get(root, "joinUser"), joinUser);
-		joinPass = jsonStr(json_object_get(root, "joinPass"), joinPass);
-		joinHost = jsonStr(json_object_get(root, "joinHost"), joinHost);
-		if (json_t* j = json_object_get(root, "joinPort")) joinPort = (int) json_integer_value(j);
-		if (json_t* hist = json_object_get(root, "serverHistory")) {
-			serverHistory.clear();
-			size_t i; json_t* v;
-			json_array_foreach(hist, i, v)
-				if (const char* s = json_string_value(v)) serverHistory.push_back(s);
-		}
+		joinStateFromJson(root);
 		json_decref(root);
 	}
 
 	void saveGlobal() {
 		json_t* root = json_object();
-		json_object_set_new(root, "joinUser", json_string(joinUser.c_str()));
-		json_object_set_new(root, "joinPass", json_string(joinPass.c_str()));
-		json_object_set_new(root, "joinHost", json_string(joinHost.c_str()));
-		json_object_set_new(root, "joinPort", json_integer(joinPort));
-		json_t* hist = json_array();
-		for (const std::string& s : serverHistory)
-			json_array_append_new(hist, json_string(s.c_str()));
-		json_object_set_new(root, "serverHistory", hist);
+		joinStateToJson(root);
 		json_dump_file(root, globalConfigPath().c_str(), JSON_INDENT(2));
 		json_decref(root);
 	}
@@ -662,19 +674,12 @@ struct Ninjam : Module {
 		json_object_set_new(root, "url", json_string(url.c_str()));
 		json_object_set_new(root, "roomLabel", json_string(roomLabel.c_str()));
 		json_object_set_new(root, "listening", json_boolean(listening));
-		json_object_set_new(root, "joinHost", json_string(joinHost.c_str()));
-		json_object_set_new(root, "joinPort", json_integer(joinPort));
-		json_object_set_new(root, "joinUser", json_string(joinUser.c_str()));
-		json_object_set_new(root, "joinPass", json_string(joinPass.c_str()));
+		joinStateToJson(root);
 		json_object_set_new(root, "joined", json_boolean(joined));
 		json_object_set_new(root, "clickEnabled", json_boolean(clickEnabled));
 		json_object_set_new(root, "clockPpqn", json_integer(clockPpqn.load(std::memory_order_relaxed)));
 		json_object_set_new(root, "transmitting", json_boolean(transmitting));
 		json_object_set_new(root, "txQuality", json_real(txQuality));
-		json_t* hist = json_array();
-		for (const std::string& s : serverHistory)
-			json_array_append_new(hist, json_string(s.c_str()));
-		json_object_set_new(root, "serverHistory", hist);
 		return root;
 	}
 
@@ -685,11 +690,7 @@ struct Ninjam : Module {
 		roomLabel = jsonStr(json_object_get(root, "roomLabel"), roomLabel);
 		if (json_t* j = json_object_get(root, "listening"))
 			listening = json_boolean_value(j);
-		joinHost = jsonStr(json_object_get(root, "joinHost"), joinHost);
-		if (json_t* j = json_object_get(root, "joinPort"))
-			joinPort = (int) json_integer_value(j);
-		joinUser = jsonStr(json_object_get(root, "joinUser"), joinUser);
-		joinPass = jsonStr(json_object_get(root, "joinPass"), joinPass);
+		joinStateFromJson(root);
 		if (json_t* j = json_object_get(root, "joined"))
 			joined = json_boolean_value(j);
 		if (json_t* j = json_object_get(root, "clickEnabled"))
@@ -700,15 +701,6 @@ struct Ninjam : Module {
 			transmitting = json_boolean_value(j);
 		if (json_t* j = json_object_get(root, "txQuality"))
 			txQuality = (float) json_real_value(j);
-		serverHistory.clear();
-		if (json_t* hist = json_object_get(root, "serverHistory")) {
-			size_t i;
-			json_t* v;
-			json_array_foreach(hist, i, v) {
-				if (const char* s = json_string_value(v))
-					serverHistory.push_back(s);
-			}
-		}
 
 		// Auto-resume on patch load.
 		if (mode == MODE_JOIN && joined) {
@@ -769,9 +761,8 @@ struct ServerField : ui::TextField {
 // reads the RoomDirectory cache (never the network) on the UI thread and only
 // rebuilds its rows when the cache generation or the filter text changes.
 
-static const char* FONT_BOLD = "res/fonts/Nunito-Bold.ttf";
-static const char* FONT_REG = "res/fonts/DejaVuSans.ttf";
-static const char* FONT_MONO = "res/fonts/ShareTechMono-Regular.ttf"; // TTY chat console
+// Fonts (FONT_BOLD/FONT_REG/FONT_MONO) + the cross-module colors and plate
+// geometry live in Theme.hpp — shared with Radio so the panels stay in lockstep.
 
 // Chat "console" palette: light monospace text on a dark recessed pane.
 static const NVGcolor TH_CON_BG    = nvgRGB(0x16, 0x1a, 0x17); // console background (near-black)
@@ -788,9 +779,8 @@ static const NVGcolor TH_TEXT_DIM = nvgRGB(0x5c, 0x61, 0x68); // secondary text
 static const NVGcolor TH_CARD     = nvgRGB(0xd6, 0xd9, 0xdc); // card/well fill (vs panel)
 static const NVGcolor TH_CARD_BD  = nvgRGBA(0x00, 0x00, 0x00, 0x26); // card/well border
 static const NVGcolor TH_WELL     = nvgRGBA(0x00, 0x00, 0x00, 0x10); // recessed area fill
-static const NVGcolor TH_OUT_PLATE= nvgRGB(0x1f, 0x1f, 0x1f); // black output plate (Fundamental/Radio #1f1f1f)
-static const NVGcolor TH_OUT_TEXT = nvgRGB(0xf0, 0xf0, 0xf0); // label on a black plate (matches Radio/AUDIO #f0f0f0)
 static const NVGcolor TH_IN_BD    = nvgRGB(0x3c, 0x6f, 0xc4); // input frame stroke (blue)
+// (Output-plate black/label colors: AK_PLATE / AK_PLATE_TEXT in Theme.hpp.)
 
 static std::string lower(std::string s) {
 	for (char& c : s)
@@ -807,47 +797,7 @@ static bool roomMatches(const akaudio::Room& r, const std::string& f) {
 	return false;
 }
 
-// Draw left-aligned (or centered) text, vertically centered on y, optionally
-// ellipsized to clipW. Loads the font by asset path each call (Rack caches it).
-static void drawTxt(NVGcontext* vg, const char* fontRes, float x, float y, float size,
-		NVGcolor col, const std::string& s, int halign = NVG_ALIGN_LEFT, float clipW = -1.f) {
-	std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system(fontRes));
-	if (!font || font->handle < 0)
-		return;
-	nvgFontFaceId(vg, font->handle);
-	nvgFontSize(vg, size);
-	nvgFillColor(vg, col);
-	nvgTextAlign(vg, halign | NVG_ALIGN_MIDDLE);
-
-	std::string t = s;
-	if (clipW > 0.f) {
-		float b[4];
-		nvgTextBounds(vg, 0, 0, t.c_str(), NULL, b);
-		if (b[2] - b[0] > clipW) {
-			while (t.size() > 1) {
-				t.pop_back();
-				std::string u = t + "\xe2\x80\xa6"; // …
-				nvgTextBounds(vg, 0, 0, u.c_str(), NULL, b);
-				if (b[2] - b[0] <= clipW) {
-					t = u;
-					break;
-				}
-			}
-		}
-	}
-	nvgText(vg, x, y, t.c_str(), NULL);
-}
-
-// Width in px of a string for a given font/size (for caret/column math in the chat console).
-static float textWidth(NVGcontext* vg, const char* fontRes, float size, const std::string& s) {
-	std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system(fontRes));
-	if (!font || font->handle < 0)
-		return 0.f;
-	nvgFontFaceId(vg, font->handle);
-	nvgFontSize(vg, size);
-	float b[4];
-	return nvgTextBounds(vg, 0, 0, s.c_str(), NULL, b);
-}
+// (drawTxt / textWidth live in Theme.hpp.)
 
 // Break `s` into rows that each fit `maxW` px at the given font/size (word wrap, falling
 // back to mid-word breaks for unbreakable runs — nanovg handles both). Used by the chat
@@ -855,7 +805,7 @@ static float textWidth(NVGcontext* vg, const char* fontRes, float size, const st
 static std::vector<std::string> wrapText(NVGcontext* vg, const char* fontRes, float size,
 		float maxW, const std::string& s) {
 	std::vector<std::string> out;
-	std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system(fontRes));
+	std::shared_ptr<window::Font> font = akLoadFont(fontRes);
 	if (!font || font->handle < 0 || maxW <= 0.f) {
 		out.push_back(s);
 		return out;
@@ -925,16 +875,32 @@ static void drawEnterIcon(NVGcontext* vg, float cx, float cy, float s, NVGcolor 
 
 // One room in the list. Two icons on the right: speaker = Listen (Icecast), door = Join
 // (protocol). Each toggles independently; the row highlights when this room is active.
-struct RoomRow : OpaqueWidget {
+struct RoomRow : HoverButton {
 	Ninjam* module = nullptr;
 	akaudio::Room room;
-	bool hovered = false;
 	int hoveredIcon = 0; // 0 none, 1 listen, 2 join
+	// Precomputed draw strings (a room is immutable once the row is built; don't
+	// re-format them per frame).
+	std::string statsText;
+	std::string usersText;
 
 	static constexpr float ICON = 15.f;
 	float listenCx() const { return box.size.x - 36.f; }
 	float joinCx() const { return box.size.x - 15.f; }
 	static constexpr float ICON_CY = 13.f;
+
+	void setRoom(const akaudio::Room& r) {
+		room = r;
+		std::string cap = r.userMax > 0 ? string::f("%d/%d", r.userCount, r.userMax)
+		                                : string::f("%d", r.userCount);
+		statsText = string::f("%d BPM \xc2\xb7 %d BPI \xc2\xb7 ", r.bpm, r.bpi) + cap + " here";
+		usersText.clear();
+		for (size_t i = 0; i < r.users.size(); i++) {
+			if (i)
+				usersText += ", ";
+			usersText += r.users[i];
+		}
+	}
 
 	// 1 = listen icon, 2 = join icon, 0 = neither, for a point in local coords.
 	int iconAt(math::Vec p) const {
@@ -944,14 +910,16 @@ struct RoomRow : OpaqueWidget {
 		return 0;
 	}
 
-	void onEnter(const EnterEvent& e) override { hovered = true; OpaqueWidget::onEnter(e); }
-	void onLeave(const LeaveEvent& e) override { hovered = false; hoveredIcon = 0; OpaqueWidget::onLeave(e); }
+	void onLeave(const LeaveEvent& e) override {
+		hoveredIcon = 0;
+		HoverButton::onLeave(e);
+	}
 	void onHover(const HoverEvent& e) override {
 		hoveredIcon = iconAt(e.pos);
-		OpaqueWidget::onHover(e);
+		HoverButton::onHover(e);
 	}
-	void onButton(const ButtonEvent& e) override {
-		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT && module) {
+	void onPress(const ButtonEvent& e) override {
+		if (module) {
 			int which = iconAt(e.pos);
 			if (which == 1 && Ninjam::roomCanListen(room)) {
 				module->toggleListenRoom(room);
@@ -964,7 +932,7 @@ struct RoomRow : OpaqueWidget {
 				return;
 			}
 		}
-		OpaqueWidget::onButton(e);
+		OpaqueWidget::onButton(e); // not on an icon: fall through (row itself is inert)
 	}
 
 	void draw(const DrawArgs& args) override {
@@ -1006,21 +974,11 @@ struct RoomRow : OpaqueWidget {
 		drawEnterIcon(vg, joinCx(), ICON_CY, ICON, jc);
 
 		// Stats line.
-		std::string cap = room.userMax > 0 ? string::f("%d/%d", room.userCount, room.userMax)
-		                                    : string::f("%d", room.userCount);
-		std::string stats = string::f("%d BPM \xc2\xb7 %d BPI \xc2\xb7 ", room.bpm, room.bpi) + cap + " here";
-		drawTxt(vg, FONT_REG, pad, 26, 11.5f, TH_TEXT_DIM, stats, NVG_ALIGN_LEFT, w - 2 * pad);
+		drawTxt(vg, FONT_REG, pad, 26, 11.5f, TH_TEXT_DIM, statsText, NVG_ALIGN_LEFT, w - 2 * pad);
 
 		// Players line (if anyone is in the room).
-		if (!room.users.empty()) {
-			std::string who;
-			for (size_t i = 0; i < room.users.size(); i++) {
-				if (i)
-					who += ", ";
-				who += room.users[i];
-			}
-			drawTxt(vg, FONT_REG, pad, 39, 10.f, nvgRGB(0x3a, 0x86, 0x55), who, NVG_ALIGN_LEFT, w - 2 * pad);
-		}
+		if (!usersText.empty())
+			drawTxt(vg, FONT_REG, pad, 39, 10.f, nvgRGB(0x3a, 0x86, 0x55), usersText, NVG_ALIGN_LEFT, w - 2 * pad);
 	}
 };
 
@@ -1048,7 +1006,7 @@ struct RoomBrowser : ui::ScrollWidget {
 				continue;
 			RoomRow* row = new RoomRow;
 			row->module = module;
-			row->room = room;
+			row->setRoom(room);
 			row->box.pos = Vec(0, y);
 			row->box.size = Vec(w, room.users.empty() ? 31.f : 45.f);
 			container->addChild(row);
@@ -1150,20 +1108,13 @@ struct ChatField : ui::TextField {
 };
 
 // Clickable refresh control (re-fetches the directory in the background).
-struct RefreshButton : OpaqueWidget {
+struct RefreshButton : HoverButton {
 	Ninjam* module = nullptr;
-	bool hovered = false;
 
-	void onEnter(const EnterEvent& e) override { hovered = true; OpaqueWidget::onEnter(e); }
-	void onLeave(const LeaveEvent& e) override { hovered = false; OpaqueWidget::onLeave(e); }
-	void onButton(const ButtonEvent& e) override {
-		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT) {
-			if (module)
-				module->directory.refresh();
-			e.consume(this);
-			return;
-		}
-		OpaqueWidget::onButton(e);
+	void onPress(const ButtonEvent& e) override {
+		if (module)
+			module->directory.refresh();
+		e.consume(this);
 	}
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
@@ -1180,18 +1131,12 @@ struct RefreshButton : OpaqueWidget {
 };
 
 // Transmit enable: lights green when broadcasting our input channels.
-struct TxToggle : OpaqueWidget {
+struct TxToggle : HoverButton {
 	Ninjam* module = nullptr;
-	bool hovered = false;
-	void onEnter(const EnterEvent& e) override { hovered = true; OpaqueWidget::onEnter(e); }
-	void onLeave(const LeaveEvent& e) override { hovered = false; OpaqueWidget::onLeave(e); }
-	void onButton(const ButtonEvent& e) override {
-		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT) {
-			if (module) module->transmitting = !module->transmitting;
-			e.consume(this);
-			return;
-		}
-		OpaqueWidget::onButton(e);
+	void onPress(const ButtonEvent& e) override {
+		if (module)
+			module->transmitting = !module->transmitting;
+		e.consume(this);
 	}
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
@@ -1241,18 +1186,12 @@ static void drawMetronomeIcon(NVGcontext* vg, float cx, float cy, float s, NVGco
 }
 
 // Metronome click toggle (lights green when on).
-struct MetronomeToggle : OpaqueWidget {
+struct MetronomeToggle : HoverButton {
 	Ninjam* module = nullptr;
-	bool hovered = false;
-	void onEnter(const EnterEvent& e) override { hovered = true; OpaqueWidget::onEnter(e); }
-	void onLeave(const LeaveEvent& e) override { hovered = false; OpaqueWidget::onLeave(e); }
-	void onButton(const ButtonEvent& e) override {
-		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT) {
-			if (module) module->clickEnabled = !module->clickEnabled;
-			e.consume(this);
-			return;
-		}
-		OpaqueWidget::onButton(e);
+	void onPress(const ButtonEvent& e) override {
+		if (module)
+			module->clickEnabled = !module->clickEnabled;
+		e.consume(this);
 	}
 	void draw(const DrawArgs& args) override {
 		bool on = module && module->clickEnabled;
@@ -1303,6 +1242,21 @@ struct JamView : Widget {
 	// new lines arrive while scrolled up. draw() clamps both against what currently fits.
 	int scrollUp = 0;
 	int lastTotal = -1;
+
+	// One physical line of the console. `name` (when set) prints at tpad in nameCol; the
+	// body prints at bodyX in bodyCol. Continuation rows of a wrapped message carry no
+	// name and hang-indent their body under where the first row's text began.
+	struct Row {
+		float size;
+		std::string name; NVGcolor nameCol;
+		float bodyX; NVGcolor bodyCol; std::string body;
+	};
+	// Wrapped-row cache: snapshotting + word-wrapping the whole log (up to 200 lines,
+	// to draw ~15) is far too much for every UI frame — rebuild only when the log
+	// (chatGen) or the pane width changes.
+	std::vector<Row> rows;
+	unsigned rowsGen = (unsigned) -1;
+	float rowsClip = -1.f;
 
 	// Mouse wheel scrolls the chat log. Wheel up (scrollDelta.y > 0, same sign Rack's
 	// ScrollWidget uses) reveals older lines; down returns toward the newest.
@@ -1391,43 +1345,38 @@ struct JamView : Widget {
 		// Message log — monospace, newest at the bottom. Each chat line is word-wrapped into
 		// one or more physical "rows"; we flatten them all, then show the window that fits.
 		const float tpad = pad + inset, tclip = avail - 2 * inset;
-		std::vector<Ninjam::ChatLine> lines = module->chatSnapshot();
-		if (lines.empty()) {
+		unsigned gen = module->chatGen.load(std::memory_order_acquire);
+		if (gen != rowsGen || tclip != rowsClip) {
+			rowsGen = gen;
+			rowsClip = tclip;
+			rows.clear();
+			for (const Ninjam::ChatLine& l : module->chatSnapshot()) {
+				if (l.kind == Ninjam::ChatLine::Topic) {
+					for (const std::string& s : wrapText(vg, FONT_MONO, 14.f, tclip, l.text))
+						rows.push_back({14.f, "", TH_CON_NAME, tpad, nvgRGB(0xe0, 0xc4, 0x6a), s});
+				} else if (l.kind == Ninjam::ChatLine::System) {
+					for (const std::string& s : wrapText(vg, FONT_MONO, 11.f, tclip, l.text))
+						rows.push_back({11.f, "", TH_CON_NAME, tpad, TH_CON_DIM, s});
+				} else if (l.who.empty()) {
+					for (const std::string& s : wrapText(vg, FONT_MONO, 11.5f, tclip, l.text))
+						rows.push_back({11.5f, "", TH_CON_NAME, tpad, TH_CON_TEXT, s});
+				} else {
+					// "name " coloured by ownership, then the wrapped message hung under the text.
+					std::string name = l.who + " ";
+					float indent = textWidth(vg, FONT_MONO, 11.5f, name);
+					if (indent > tclip * 0.5f) indent = tclip * 0.5f; // keep room for the message
+					NVGcolor nc = l.mine ? TH_CON_MINE : TH_CON_NAME;
+					std::vector<std::string> ws = wrapText(vg, FONT_MONO, 11.5f, tclip - indent, l.text);
+					for (size_t k = 0; k < ws.size(); k++)
+						rows.push_back({11.5f, k == 0 ? name : "", nc, tpad + indent, TH_CON_TEXT, ws[k]});
+				}
+			}
+		}
+		if (rows.empty()) {
 			drawTxt(vg, FONT_MONO, tpad, (logTop + logBot) / 2, 11.5f, TH_CON_DIM,
 				"\xe2\x80\x94 no messages yet \xe2\x80\x94", NVG_ALIGN_LEFT);
 			lastTotal = -1; // forget scroll state while empty so a fresh room starts pinned
 			return;
-		}
-
-		// One physical line of the console. `name` (when set) prints at tpad in nameCol; the
-		// body prints at bodyX in bodyCol. Continuation rows of a wrapped message carry no
-		// name and hang-indent their body under where the first row's text began.
-		struct Row {
-			float size;
-			std::string name; NVGcolor nameCol;
-			float bodyX; NVGcolor bodyCol; std::string body;
-		};
-		std::vector<Row> rows;
-		for (const Ninjam::ChatLine& l : lines) {
-			if (l.kind == Ninjam::ChatLine::Topic) {
-				for (const std::string& s : wrapText(vg, FONT_MONO, 14.f, tclip, l.text))
-					rows.push_back({14.f, "", TH_CON_NAME, tpad, nvgRGB(0xe0, 0xc4, 0x6a), s});
-			} else if (l.kind == Ninjam::ChatLine::System) {
-				for (const std::string& s : wrapText(vg, FONT_MONO, 11.f, tclip, l.text))
-					rows.push_back({11.f, "", TH_CON_NAME, tpad, TH_CON_DIM, s});
-			} else if (l.who.empty()) {
-				for (const std::string& s : wrapText(vg, FONT_MONO, 11.5f, tclip, l.text))
-					rows.push_back({11.5f, "", TH_CON_NAME, tpad, TH_CON_TEXT, s});
-			} else {
-				// "name " coloured by ownership, then the wrapped message hung under the text.
-				std::string name = l.who + " ";
-				float indent = textWidth(vg, FONT_MONO, 11.5f, name);
-				if (indent > tclip * 0.5f) indent = tclip * 0.5f; // keep room for the message
-				NVGcolor nc = l.mine ? TH_CON_MINE : TH_CON_NAME;
-				std::vector<std::string> ws = wrapText(vg, FONT_MONO, 11.5f, tclip - indent, l.text);
-				for (size_t k = 0; k < ws.size(); k++)
-					rows.push_back({11.5f, k == 0 ? name : "", nc, tpad + indent, TH_CON_TEXT, ws[k]});
-			}
 		}
 
 		// Clamp the scroll window. scrollUp counts rows lifted above the newest; 0 = pinned to
@@ -1457,26 +1406,23 @@ struct JamView : Widget {
 };
 
 // "▾" button beside the server field: opens a menu of previously-joined servers.
-struct ServerDropdownButton : OpaqueWidget {
+struct ServerDropdownButton : HoverButton {
 	Ninjam* module = nullptr;
 	ui::TextField* serverField = nullptr;
-	bool hovered = false;
-	void onEnter(const EnterEvent& e) override { hovered = true; OpaqueWidget::onEnter(e); }
-	void onLeave(const LeaveEvent& e) override { hovered = false; OpaqueWidget::onLeave(e); }
-	void onButton(const ButtonEvent& e) override {
-		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT && module) {
-			ui::Menu* menu = createMenu();
-			if (module->serverHistory.empty()) {
-				menu->addChild(createMenuLabel("No previous servers"));
-			} else {
-				ui::TextField* sf = serverField;
-				for (const std::string& hp : module->serverHistory)
-					menu->addChild(createMenuItem(hp, "", [sf, hp]() { if (sf) sf->text = hp; }));
-			}
-			e.consume(this);
+	void onPress(const ButtonEvent& e) override {
+		if (!module) {
+			OpaqueWidget::onButton(e);
 			return;
 		}
-		OpaqueWidget::onButton(e);
+		ui::Menu* menu = createMenu();
+		if (module->serverHistory.empty()) {
+			menu->addChild(createMenuLabel("No previous servers"));
+		} else {
+			ui::TextField* sf = serverField;
+			for (const std::string& hp : module->serverHistory)
+				menu->addChild(createMenuItem(hp, "", [sf, hp]() { if (sf) sf->text = hp; }));
+		}
+		e.consume(this);
 	}
 	void draw(const DrawArgs& args) override {
 		nvgBeginPath(args.vg);
@@ -1491,24 +1437,17 @@ struct ServerDropdownButton : OpaqueWidget {
 };
 
 // "JOIN" button — connects to the typed server with the entered credentials.
-struct JoinButton : OpaqueWidget {
+struct JoinButton : HoverButton {
 	Ninjam* module = nullptr;
 	ui::TextField* userField = nullptr;
 	ui::TextField* passField = nullptr;
 	ui::TextField* serverField = nullptr;
-	bool hovered = false;
-	void onEnter(const EnterEvent& e) override { hovered = true; OpaqueWidget::onEnter(e); }
-	void onLeave(const LeaveEvent& e) override { hovered = false; OpaqueWidget::onLeave(e); }
-	void onButton(const ButtonEvent& e) override {
-		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT) {
-			if (module && module->joined)
-				module->stopAll();          // already connected -> disconnect
-			else
-				directJoin(module, userField, passField, serverField);
-			e.consume(this);
-			return;
-		}
-		OpaqueWidget::onButton(e);
+	void onPress(const ButtonEvent& e) override {
+		if (module && module->joined)
+			module->stopAll();          // already connected -> disconnect
+		else
+			directJoin(module, userField, passField, serverField);
+		e.consume(this);
 	}
 	void draw(const DrawArgs& args) override {
 		bool connected = module && module->joined;
@@ -1620,10 +1559,10 @@ struct OutputSection : Widget {
 		const float jh = 13.f, pad = 5.f;
 		float x = w * xL - jh - pad, rx = w * xR + jh + pad;
 		nvgBeginPath(vg);
-		// Corner radius matches Radio's output plate (0.96 mm ≈ 2.84 px, the
-		// core/Fundamental value) so both modules read as one plugin family.
-		nvgRoundedRect(vg, x, top, rx - x, h, mm2px(0.96f));
-		nvgFillColor(vg, plate ? TH_OUT_PLATE : TH_WELL);
+		// Corner radius = Radio's output plate (the core/Fundamental value) so both
+		// modules read as one plugin family.
+		nvgRoundedRect(vg, x, top, rx - x, h, mm2px(AK_PLATE_R_MM));
+		nvgFillColor(vg, plate ? AK_PLATE : TH_WELL);
 		nvgFill(vg);
 		nvgStrokeColor(vg, border);
 		nvgStrokeWidth(vg, 1.f);
@@ -1632,16 +1571,18 @@ struct OutputSection : Widget {
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
 		const float w = box.size.x;
-		// Plates mirror Radio's output plate exactly (top 104.66 mm, height 13.26 mm) so the
-		// two modules read identically. The CV row matches Radio's plate/jack; the audio row
-		// is the same plate raised to Radio's CV-input row (96.859 mm), so the IN/MAIN/PLY
-		// jacks line up with the neighbours' input row and the CV row with their output row.
+		// Plates mirror Radio's output plate exactly (Theme.hpp AK_PLATE_* constants) so
+		// the two modules read identically. The CV row matches Radio's plate/jack; the
+		// audio row is the same plate raised by one row spacing, so the IN/MAIN/PLY jacks
+		// line up with the neighbours' input row and the CV row with their output row.
 		// Y() converts an absolute-panel mm to this section's local coords; H() is a mm span.
 		auto Y = [&](float mm) { return mm2px(mm) - box.pos.y; };
 		auto H = [&](float mm) { return mm2px(mm); };
-		const float pTopHi = Y(104.66f - 16.256f), pTopLo = Y(104.66f); // plate tops: audio / CV
-		const float pH = H(13.26f);                                     // Radio's PLATE_H
-		const float labHi = Y(91.504f), labLo = Y(107.76f);            // labels = plate top + 3.1 mm
+		const float rowSpan = AK_ROW_OUT_MM - AK_ROW_CV_MM;                              // one jack-row spacing
+		const float pTopHi = Y(AK_PLATE_TOP_MM - rowSpan), pTopLo = Y(AK_PLATE_TOP_MM);  // plate tops: audio / CV
+		const float pH = H(AK_PLATE_H_MM);
+		const float labHi = Y(AK_PLATE_TOP_MM - rowSpan + AK_PLATE_LABEL_DY_MM);
+		const float labLo = Y(AK_PLATE_TOP_MM + AK_PLATE_LABEL_DY_MM);
 
 		// INPUT group: light well, blue border, dark bold labels — same row as the outputs.
 		groupBox(vg, w, xInL, xInR, pTopHi, pH, false, TH_IN_BD);
@@ -1671,21 +1612,21 @@ struct OutputSection : Widget {
 		const NVGcolor bd = nvgRGBA(0, 0, 0, 0x55);
 		groupBox(vg, w, xMainL, xMainR, pTopHi, pH, true, bd);
 		groupBox(vg, w, xPolyL, xPolyR, pTopHi, pH, true, bd);
-		drawTxt(vg, FONT_BOLD, w * xMainL, labHi, 11.f, TH_OUT_TEXT, "MAIN L", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, w * xMainR, labHi, 11.f, TH_OUT_TEXT, "MAIN R", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, w * xPolyL, labHi, 11.f, TH_OUT_TEXT, "PLY L", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, w * xPolyR, labHi, 11.f, TH_OUT_TEXT, "PLY R", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xMainL, labHi, 11.f, AK_PLATE_TEXT, "MAIN L", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xMainR, labHi, 11.f, AK_PLATE_TEXT, "MAIN R", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xPolyL, labHi, 11.f, AK_PLATE_TEXT, "PLY L", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xPolyR, labHi, 11.f, AK_PLATE_TEXT, "PLY R", NVG_ALIGN_CENTER);
 
 		groupBox(vg, w, xClick, xPhase, pTopLo, pH, true, bd);
-		drawTxt(vg, FONT_BOLD, w * xClick, labLo, 9.5f, TH_OUT_TEXT, "CLICK", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, w * xClock, labLo, 9.5f, TH_OUT_TEXT, "CLOCK", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, w * xReset, labLo, 9.5f, TH_OUT_TEXT, "RESET", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, w * xRun, labLo, 9.5f, TH_OUT_TEXT, "RUN", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, w * xPhase, labLo, 9.5f, TH_OUT_TEXT, "PHASE", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xClick, labLo, 9.5f, AK_PLATE_TEXT, "CLICK", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xClock, labLo, 9.5f, AK_PLATE_TEXT, "CLOCK", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xReset, labLo, 9.5f, AK_PLATE_TEXT, "RESET", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xRun, labLo, 9.5f, AK_PLATE_TEXT, "RUN", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w * xPhase, labLo, 9.5f, AK_PLATE_TEXT, "PHASE", NVG_ALIGN_CENTER);
 
 		// "AK" maker mark below the output jacks, in the spot VCV uses for its logo —
-		// large + bold, at Radio's exact AK row (121 mm).
-		drawTxt(vg, FONT_BOLD, w / 2.f, Y(121.0f), 16.f, TH_TEXT, "AK", NVG_ALIGN_CENTER);
+		// large + bold, at Radio's exact AK row.
+		drawTxt(vg, FONT_BOLD, w / 2.f, Y(AK_MARK_Y_MM), 16.f, TH_TEXT, "AK", NVG_ALIGN_CENTER);
 	}
 };
 
@@ -1725,7 +1666,7 @@ struct NinjamWidget : ModuleWidget {
 		led->box.pos = Vec(W - 6 - 4 - 13, 22);
 		led->isLive = [module]() { return module && module->ledLive(); };
 		led->isPending = [module]() { return module && module->ledPending(); };
-		led->onToggle = [module]() { if (module && module->isActive()) module->stopAll(); };
+		led->onClick = [module]() { if (module && module->isActive()) module->stopAll(); };
 		addChild(led);
 
 		// Metronome toggle (left of the LED) — shown only when joined.
@@ -1792,9 +1733,9 @@ struct NinjamWidget : ModuleWidget {
 		out->box.size = Vec(W, 180); // down to the panel bottom, room for the "AK" mark
 		addChild(out);
 
-		// Jack rows at Radio's exact grid: audio/IN row = Radio's CV-input row (96.859 mm),
-		// CV row = Radio's output row (113.115 mm) — absolute panel mm, independent of oy.
-		const float rowA = mm2px(96.859f), rowB = mm2px(113.115f);
+		// Jack rows at Radio's exact grid: audio/IN row = Radio's CV-input row, CV row =
+		// Radio's output row (Theme.hpp) — absolute panel mm, independent of oy.
+		const float rowA = mm2px(AK_ROW_CV_MM), rowB = mm2px(AK_ROW_OUT_MM);
 		// One row: TRANSMIT IN (poly) + TX LED, MAIN out, PLY out.
 		addInput(createInputCentered<PJ301MPort>(Vec(W * OutputSection::xInL, rowA), module, Ninjam::LEFT_INPUT));
 		addInput(createInputCentered<PJ301MPort>(Vec(W * OutputSection::xInR, rowA), module, Ninjam::RIGHT_INPUT));
@@ -1802,8 +1743,9 @@ struct NinjamWidget : ModuleWidget {
 		txBtn->module = module;
 		txBtn->box.size = Vec(11, 11);
 		// Center it in the IN well: horizontally between the two jacks, vertically between
-		// the L/R label row (91.504 mm) and the jack row (rowA), nudged up a few px off the jacks.
-		txBtn->box.pos = Vec(W * OutputSection::xTx - 5.5f, (mm2px(91.504f) + rowA) / 2.f - 5.5f - 4.f);
+		// the L/R label row and the jack row (rowA), nudged up a few px off the jacks.
+		const float labelRow = mm2px(AK_PLATE_TOP_MM - (AK_ROW_OUT_MM - AK_ROW_CV_MM) + AK_PLATE_LABEL_DY_MM);
+		txBtn->box.pos = Vec(W * OutputSection::xTx - 5.5f, (labelRow + rowA) / 2.f - 5.5f - 4.f);
 		addChild(txBtn);
 		// Outputs: MAIN L/R + PLAYERS poly L/R, then CLICK/CLOCK/RESET/RUN/PHASE.
 		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xMainL, rowA), module, Ninjam::LEFT_OUTPUT));
