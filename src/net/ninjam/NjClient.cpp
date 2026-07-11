@@ -150,6 +150,13 @@ void NjClient::sendPrivate(const std::string& toUser, const std::string& text) {
 
 bool NjClient::sendAll(const std::vector<uint8_t>& data) {
 	std::lock_guard<std::mutex> lock(sendMutex); // whole NINJAM messages stay atomic on the wire
+	// KNOWN, ACCEPTED RACE: sock.fd() is an unguarded atomic read; a UI/TX-thread send
+	// can load the fd, then run()'s closeOwned() closes it and the OS recycles that fd
+	// number before ::send runs — writing a stray NINJAM frame to an unrelated socket.
+	// Not closed deliberately: taking sock's mutex across a (blocking) send would let a
+	// wedged peer block stop()'s shutdown() for the send timeout, reintroducing a UI
+	// freeze. The window is tiny and gated by the abort check below; chat/keepalive
+	// payloads are harmless if lost. Revisit only with a non-blocking send + fd re-check.
 	int fd = sock.fd();
 	if (fd < 0) return false;
 	size_t off = 0;
