@@ -210,23 +210,14 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 	std::map<std::string, uint32_t> subMask;
 	setState(State::Connecting, host + ":" + std::to_string(port));
 
-	// Resolve + connect, abort-pollable (netConnectAbortable) — a blocking
+	// Resolve + connect, abort-pollable (netResolveConnect) — a blocking
 	// connect() here would make stop() on a dead host hang the UI thread in
 	// join() for the full OS connect timeout.
-	addrinfo hints{};
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	addrinfo* res = nullptr;
-	if (::getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0 || !res) {
-		setState(State::Error, "Cannot resolve host");
-		running.store(false, std::memory_order_release);
-		return;
-	}
-	int fd = netConnectAbortable(res, &abort, 8000);
-	::freeaddrinfo(res);
+	std::string connErr;
+	int fd = netResolveConnect(host, std::to_string(port), &abort, 8000, &connErr);
 	if (fd < 0) {
 		bool wasAborted = abort.load(std::memory_order_acquire);
-		setState(wasAborted ? State::Stopped : State::Error, wasAborted ? "" : "Connection failed");
+		setState(wasAborted ? State::Stopped : State::Error, wasAborted ? "" : connErr);
 		running.store(false, std::memory_order_release);
 		return;
 	}

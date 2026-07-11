@@ -5,6 +5,8 @@
 #include <string>
 #include <atomic>
 
+#include "Tls.hpp"
+
 // Tiny HTTP(S)/1.0 GET for small text/binary bodies (room/station directory JSON,
 // playlists, favicons). Reads the whole response into a string — meant for
 // kilobyte-sized replies, NOT for audio streams (those go through StreamClient).
@@ -35,5 +37,41 @@ Url parseUrl(const std::string& url);
 
 // Case-insensitive suffix check (used for playlist/HLS extension sniffing).
 bool endsWithCI(const std::string& s, const std::string& suffix);
+
+// Path part of a URL, without the query string (for extension checks).
+std::string pathNoQuery(const std::string& url);
+
+// Resolve a possibly-relative reference (redirect Location, playlist/segment URI)
+// against a base URL: absolute, scheme-relative (//…), host-rooted (/…), or
+// relative to the base's directory.
+std::string urlJoin(const std::string& base, const std::string& ref);
+
+// Bounded, abortable read over a (possibly TLS) socket whose SO_RCVTIMEO is set
+// to sliceMs: each timed-out slice polls `abort` and accumulates toward budgetMs.
+// Returns >0 data, 0 on EOF / abort / idle-budget-exhausted, -1 on a real error.
+long httpReadIdle(const Tls& tls, int fd, void* buf, size_t n,
+                  const std::atomic<bool>* abort, int sliceMs, int budgetMs);
+
+// A connected, header-parsed HTTP(S) exchange, shared by httpGet (small bodies)
+// and StreamClient (endless audio bodies).
+struct HttpConn {
+	int fd = -1;          // connected socket; <0 = never connected
+	Tls tls;              // active for https (tlsRead/tlsWrite no-op through it for http)
+	std::string headers;  // status line + headers (block before the blank line)
+	std::string leftover; // body bytes that arrived with the headers
+};
+
+// Resolve+connect (abortable), TLS handshake for https, send "GET path HTTP/1.0"
+// (Host/User-Agent/Connection: close + the optional extraHeader line), and read
+// the response headers. recvSliceMs also becomes the socket's recv/send timeout.
+// If sockOut is non-null the fd is published there the moment it connects, so
+// another thread can netShutdown() it to interrupt any later blocking call.
+// OWNERSHIP: once out.fd >= 0 the CALLER owns the socket + TLS state and must
+// clean up (tlsFree + netClose) on both success and failure — httpOpen never
+// closes a connected fd (a publisher's stop() may be racing us on it).
+// Returns true when the headers were read; false with a reason in *err.
+bool httpOpen(const Url& u, const char* extraHeader, const std::atomic<bool>* abort,
+              int connectTimeoutMs, int recvSliceMs, int idleBudgetMs,
+              std::atomic<int>* sockOut, HttpConn& out, std::string* err = nullptr);
 
 } // namespace akaudio

@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Andrei Kozlov
 
 #include "Hls.hpp"
+#include "Http.hpp" // endsWithCI, pathNoQuery, urlJoin — shared across net/
 
-#include <cctype>
 #include <cstdlib>
 
 namespace akaudio {
@@ -21,15 +21,6 @@ std::string trimCR(const std::string& s) {
 
 bool startsWith(const std::string& s, const char* p) {
 	return s.rfind(p, 0) == 0;
-}
-
-bool endsWithCI(const std::string& s, const std::string& suf) {
-	if (s.size() < suf.size())
-		return false;
-	for (size_t i = 0; i < suf.size(); i++)
-		if (std::tolower((unsigned char) s[s.size() - suf.size() + i]) != std::tolower((unsigned char) suf[i]))
-			return false;
-	return true;
 }
 
 } // namespace
@@ -75,34 +66,8 @@ HlsPlaylist parseHlsPlaylist(const std::string& body) {
 	return pl;
 }
 
-std::string urlJoin(const std::string& base, const std::string& ref) {
-	if (startsWith(ref, "http://") || startsWith(ref, "https://"))
-		return ref;
-	if (startsWith(ref, "//")) { // scheme-relative
-		size_t s = base.find("://");
-		std::string scheme = (s == std::string::npos) ? "http:" : base.substr(0, s + 1);
-		return scheme + ref;
-	}
-	if (!ref.empty() && ref[0] == '/') { // host-rooted
-		size_t s = base.find("://");
-		if (s != std::string::npos) {
-			size_t h = base.find('/', s + 3);
-			std::string origin = (h == std::string::npos) ? base : base.substr(0, h);
-			return origin + ref;
-		}
-	}
-	// relative to the playlist's directory
-	size_t slash = base.rfind('/');
-	return (slash == std::string::npos ? base : base.substr(0, slash + 1)) + ref;
-}
-
 bool looksLikeHls(const std::string& url) {
-	// strip a query string before the extension check
-	std::string path = url;
-	size_t q = path.find('?');
-	if (q != std::string::npos)
-		path = path.substr(0, q);
-	return endsWithCI(path, ".m3u8");
+	return endsWithCI(pathNoQuery(url), ".m3u8");
 }
 
 void tsExtractAdts(const uint8_t* d, size_t n, std::string& out) {

@@ -168,6 +168,15 @@ inline bool netInterrupted() {
 // Socket.cpp; shared by Http, StreamClient, and NjClient.
 int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeoutMs = 6000);
 
+// Resolve host:port and connect abortably (getaddrinfo + netConnectAbortable).
+// Returns the connected fd, or -1 with a human-readable reason in *errOut
+// ("Cannot resolve host" / "Connection failed"; check `abort` yourself to tell
+// an abort apart). Defined in Socket.cpp; the single resolve+connect preamble
+// shared by Http, StreamClient, and NjClient.
+int netResolveConnect(const std::string& host, const std::string& port,
+                      const std::atomic<bool>* abort, int timeoutMs,
+                      std::string* errOut = nullptr);
+
 // Human-readable last socket error (for logs).
 inline std::string netErrorStr() {
 #ifdef _WIN32

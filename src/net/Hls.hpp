@@ -29,8 +29,7 @@ struct HlsPlaylist {
 // Parse an .m3u8 body into the struct above.
 HlsPlaylist parseHlsPlaylist(const std::string& body);
 
-// Resolve a possibly-relative playlist/segment ref against the playlist URL.
-std::string urlJoin(const std::string& base, const std::string& ref);
+// (urlJoin — resolving a relative playlist/segment ref — lives in Http.hpp now.)
 
 // Does this look like HLS? (.m3u8 path, query string ignored.)
 bool looksLikeHls(const std::string& url);

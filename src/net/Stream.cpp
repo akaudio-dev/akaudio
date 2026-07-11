@@ -20,15 +20,9 @@ namespace akaudio {
 
 namespace {
 
-// URL parsing + endsWithCI live in Http.{hpp,cpp} (one parser shared by the
-// whole net/ layer).
-
-// Path part of a URL, without the query string (for extension checks).
-std::string pathNoQuery(const std::string& url) {
-	std::string p = parseUrl(url).path;
-	size_t q = p.find('?');
-	return q == std::string::npos ? p : p.substr(0, q);
-}
+// URL parsing, endsWithCI, pathNoQuery and the HTTP request core (httpOpen /
+// httpReadIdle) live in Http.{hpp,cpp} — one HTTP client shared by the whole
+// net/ layer.
 
 // True if the URL points at a .pls or .m3u playlist (NOT .m3u8, which is HLS).
 bool isPlaylistUrl(const std::string& url) {
@@ -69,19 +63,10 @@ constexpr int kRecvSliceMs = 2000;
 constexpr int kIdleBudgetMs = 30000;
 
 // Bounded read: data / EOF / error / abort / idle-budget-exhausted (the last two
-// return 0, i.e. treated as end of stream).
+// return 0, i.e. treated as end of stream). Thin wrapper binding this file's
+// slice/budget constants to the shared httpReadIdle.
 long readIdle(const Tls& tls, int fd, void* buf, size_t n, const std::atomic<bool>& abort) {
-	int idleMs = 0;
-	for (;;) {
-		if (abort.load(std::memory_order_acquire))
-			return 0;
-		long r = tlsRead(tls, fd, buf, n);
-		if (r != -2)
-			return r; // >0 data, 0 EOF, -1 error
-		idleMs += kRecvSliceMs;
-		if (idleMs >= kIdleBudgetMs)
-			return 0;
-	}
+	return httpReadIdle(tls, fd, buf, n, &abort, kRecvSliceMs, kIdleBudgetMs);
 }
 
 // Shared decode→ring plumbing for all three decode paths (MP3, AAC, HLS): the
@@ -163,7 +148,7 @@ struct ResampleCtx {
 struct ReadCtx {
 	int fd;
 	const Tls* tls;
-	std::vector<char> leftover;
+	std::string leftover;
 	size_t leftoverPos = 0;
 	const std::atomic<bool>* abort;
 };
@@ -264,79 +249,28 @@ void StreamClient::run(std::string url) {
 		return;
 	}
 
-	// Resolve + connect. netConnectAbortable polls `abort` every 100 ms, so
-	// stop() (called on the UI thread on every station switch) never blocks on a
-	// slow/dead host's connect timeout — the old cause of UI freezes when
-	// stepping quickly between stations.
-	addrinfo hints{};
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	addrinfo* res = nullptr;
-	if (::getaddrinfo(u.host.c_str(), u.port.c_str(), &hints, &res) != 0 || !res) {
-		setStatus(State::Error, "Cannot resolve host");
-		running.store(false, std::memory_order_release);
-		return;
-	}
-	int fd = netConnectAbortable(res, &abort, 8000);
-	::freeaddrinfo(res);
-
-	if (fd < 0) {
-		bool aborted = abort.load(std::memory_order_acquire);
-		setStatus(aborted ? State::Stopped : State::Error, aborted ? "Stopped" : "Connection failed");
-		running.store(false, std::memory_order_release);
-		return;
-	}
-	// Publish so stop() can interrupt a blocked recv; bound each recv so a
-	// silent-but-open stream is noticed (readIdle retries -2 up to its budget).
-	sock.store(fd, std::memory_order_release);
-	netSetRcvTimeout(fd, kRecvSliceMs);
-
-	// For https, wrap the socket in TLS before any HTTP I/O. Declared here (before
-	// the first `goto cleanup`) so it's in scope at the cleanup label, which frees
-	// it. tlsRead/tlsWrite fall back to plain recv/send when tls is inactive (http).
-	Tls tls;
-	if (u.tls && !tlsHandshake(tls, fd, u.host)) {
-		setStatus(State::Error, "TLS handshake failed");
+	// Shared HTTP open (Http.cpp): abortable resolve+connect (netConnectAbortable
+	// polls `abort` every 100 ms, so stop() on the UI thread can never be wedged
+	// by a slow/dead host), TLS for https, GET, header read. The fd is published
+	// into `sock` the moment it connects so stop() can netShutdown() a blocked
+	// recv; per the httpOpen contract, we own the socket from then on and clean
+	// up at the `cleanup` label (which stop() races via sockMutex).
+	// Icy-MetaData:0 keeps the MP3 body free of interleaved metadata.
+	// Declared before the first `goto cleanup` so both are in scope at the label.
+	HttpConn conn;
+	std::string openErr;
+	if (!httpOpen(u, "Icy-MetaData: 0", &abort, 8000, kRecvSliceMs, kIdleBudgetMs,
+			&sock, conn, &openErr)) {
+		bool wasAborted = abort.load(std::memory_order_acquire);
+		setStatus(wasAborted ? State::Stopped : State::Error, wasAborted ? "Stopped" : openErr);
 		goto cleanup;
 	}
 
-	// Send the request. Icy-MetaData:0 keeps the MP3 body free of interleaved
-	// metadata. Scoped in its own block so `req` isn't live at the cleanup label
-	// (the goto above would otherwise bypass its initialization).
 	{
-		std::string req =
-			"GET " + u.path + " HTTP/1.0\r\n"
-			"Host: " + u.host + "\r\n"
-			"User-Agent: AKAudio-VCVRack/2.0\r\n"
-			"Icy-MetaData: 0\r\n"
-			"Connection: close\r\n"
-			"\r\n";
-		if (tlsWrite(tls, fd, req.data(), req.size()) < 0) {
-			setStatus(State::Error, "Send failed");
-			goto cleanup;
-		}
-	}
+		Tls& tls = conn.tls;
+		const int fd = conn.fd;
 
-	{
-		// Read HTTP headers up to the blank line; keep any body bytes already read.
-		std::string head;
-		char tmp[2048];
-		size_t headerEnd = std::string::npos;
-		while (!abort.load(std::memory_order_acquire) && head.size() < (1 << 16)) {
-			long n = readIdle(tls, fd, tmp, sizeof(tmp), abort);
-			if (n <= 0)
-				break;
-			head.append(tmp, n);
-			headerEnd = head.find("\r\n\r\n");
-			if (headerEnd != std::string::npos)
-				break;
-		}
-		if (headerEnd == std::string::npos) {
-			setStatus(State::Error, "No HTTP response");
-			goto cleanup;
-		}
-
-		std::string statusLine = head.substr(0, head.find("\r\n"));
+		std::string statusLine = conn.headers.substr(0, conn.headers.find("\r\n"));
 		if (statusLine.find("200") == std::string::npos) {
 			setStatus(State::Error, "HTTP: " + statusLine);
 			goto cleanup;
@@ -344,15 +278,14 @@ void StreamClient::run(std::string url) {
 
 		// Pick the decoder dynamically from the response headers. Icecast sends a
 		// Content-Type (audio/mpeg, audio/aac, …); default to MP3 when unspecified.
-		std::string hl = head.substr(0, headerEnd);
+		std::string hl = conn.headers;
 		for (char& c : hl)
 			c = (char) std::tolower((unsigned char) c);
 		const bool isAac = hl.find("audio/aac") != std::string::npos
 			|| hl.find("audio/aacp") != std::string::npos
 			|| hl.find("application/aac") != std::string::npos;
 
-		const size_t bodyStart = headerEnd + 4;
-		std::vector<char> leftover(head.begin() + bodyStart, head.end());
+		std::string& leftover = conn.leftover;
 
 		// Decode → resample → blocking ring push, shared by both decoders.
 		ResampleCtx rs{ring, running, abort, produced, sampleRate};
@@ -448,7 +381,7 @@ void StreamClient::run(std::string url) {
 	}
 
 cleanup:
-	tlsFree(tls);
+	tlsFree(conn.tls);
 	{
 		// Atomic with stop()'s shutdown (see stop()).
 		std::lock_guard<std::mutex> lock(sockMutex);

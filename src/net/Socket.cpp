@@ -60,4 +60,22 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 	return -1;
 }
 
+int netResolveConnect(const std::string& host, const std::string& port,
+		const std::atomic<bool>* abort, int timeoutMs, std::string* errOut) {
+	addrinfo hints{};
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	addrinfo* res = nullptr;
+	if (::getaddrinfo(host.c_str(), port.c_str(), &hints, &res) != 0 || !res) {
+		if (errOut)
+			*errOut = "Cannot resolve host";
+		return -1;
+	}
+	int fd = netConnectAbortable(res, abort, timeoutMs);
+	::freeaddrinfo(res);
+	if (fd < 0 && errOut)
+		*errOut = "Connection failed";
+	return fd;
+}
+
 } // namespace akaudio

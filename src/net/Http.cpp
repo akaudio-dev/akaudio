@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Andrei Kozlov
 
+#include "Socket.hpp"
 #include "Http.hpp"
 #include "Tls.hpp"
-#include "Socket.hpp"
 
 #include <cctype>
 #include <cstring>
@@ -56,6 +56,53 @@ bool endsWithCI(const std::string& s, const std::string& suffix) {
 	return true;
 }
 
+std::string pathNoQuery(const std::string& url) {
+	std::string p = parseUrl(url).path;
+	size_t q = p.find('?');
+	return q == std::string::npos ? p : p.substr(0, q);
+}
+
+std::string urlJoin(const std::string& base, const std::string& ref) {
+	if (ref.rfind("http://", 0) == 0 || ref.rfind("https://", 0) == 0)
+		return ref; // absolute
+	if (ref.rfind("//", 0) == 0) { // scheme-relative
+		size_t s = base.find("://");
+		std::string scheme = (s == std::string::npos) ? "http:" : base.substr(0, s + 1);
+		return scheme + ref;
+	}
+	if (!ref.empty() && ref[0] == '/') { // host-rooted
+		size_t s = base.find("://");
+		if (s != std::string::npos) {
+			size_t h = base.find('/', s + 3);
+			std::string origin = (h == std::string::npos) ? base : base.substr(0, h);
+			return origin + ref;
+		}
+	}
+	// Relative to the base's directory. A base with no path ("http://host") gets a
+	// "/" first — without this the rfind would split inside "http://".
+	size_t s = base.find("://");
+	size_t from = (s == std::string::npos) ? 0 : s + 3;
+	size_t slash = base.find('/', from);
+	if (slash == std::string::npos)
+		return base + "/" + ref;
+	return base.substr(0, base.rfind('/') + 1) + ref;
+}
+
+long httpReadIdle(const Tls& tls, int fd, void* buf, size_t n,
+		const std::atomic<bool>* abort, int sliceMs, int budgetMs) {
+	int idleMs = 0;
+	for (;;) {
+		if (abort && abort->load(std::memory_order_acquire))
+			return 0;
+		long r = tlsRead(tls, fd, buf, n);
+		if (r != -2)
+			return r; // >0 data, 0 EOF, -1 error
+		idleMs += sliceMs; // recv timed out with no data; retry within the budget
+		if (idleMs >= budgetMs)
+			return 0;
+	}
+}
+
 namespace {
 
 // Case-insensitive search for a header value (e.g. "location"). Returns "" if
@@ -79,101 +126,80 @@ std::string headerValue(const std::string& headers, const std::string& name) {
 	return (a == std::string::npos) ? "" : v.substr(a, b - a + 1);
 }
 
-// Resolve a redirect Location against the request URL (absolute, scheme-relative,
-// or absolute-path forms — enough for the redirects favicons/APIs actually use).
-std::string resolveRedirect(const Url& base, const std::string& loc) {
-	if (loc.rfind("http://", 0) == 0 || loc.rfind("https://", 0) == 0)
-		return loc;
-	std::string scheme = base.tls ? "https://" : "http://";
-	std::string authority = base.host + (base.port == "80" || base.port == "443" ? "" : ":" + base.port);
-	if (loc.rfind("//", 0) == 0)
-		return (base.tls ? "https:" : "http:") + loc;
-	if (!loc.empty() && loc[0] == '/')
-		return scheme + authority + loc;
-	return scheme + authority + "/" + loc;
-}
-
 bool aborted(const std::atomic<bool>* abort) {
 	return abort && abort->load(std::memory_order_acquire);
 }
 
-void setRcvTimeout(int fd, int ms) {
-	netSetRcvTimeout(fd, ms);
-	netSetSndTimeout(fd, ms);
+// httpGet's per-recv timeout / idle ceiling: short enough that an abort during a
+// station switch is noticed quickly, long enough for slow directory APIs.
+constexpr int kGetSliceMs = 700;
+constexpr int kGetIdleBudgetMs = 8000;
+
+void closeConn(HttpConn& c) {
+	if (c.fd < 0)
+		return;
+	tlsFree(c.tls);
+	netClose(c.fd);
+	c.fd = -1;
 }
 
-// One request; returns the raw response (headers + body) or "" on error/abort.
-std::string fetchOnce(const Url& u, const std::atomic<bool>* abort) {
-	addrinfo hints{};
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	addrinfo* res = nullptr;
-	if (::getaddrinfo(u.host.c_str(), u.port.c_str(), &hints, &res) != 0 || !res)
-		return "";
-	int fd = netConnectAbortable(res, abort, 6000);
-	::freeaddrinfo(res);
+} // namespace
+
+bool httpOpen(const Url& u, const char* extraHeader, const std::atomic<bool>* abort,
+		int connectTimeoutMs, int recvSliceMs, int idleBudgetMs,
+		std::atomic<int>* sockOut, HttpConn& out, std::string* err) {
+	auto fail = [&](const std::string& e) {
+		if (err)
+			*err = e;
+		return false;
+	};
+
+	std::string connErr;
+	int fd = netResolveConnect(u.host, u.port, abort, connectTimeoutMs, &connErr);
 	if (fd < 0)
-		return "";
+		return fail(connErr);
+	// From here on the caller owns the socket (see the header contract) — publish
+	// it first so a concurrent stop() can netShutdown() any blocking call below.
+	out.fd = fd;
+	if (sockOut)
+		sockOut->store(fd, std::memory_order_release);
+	// Bound every recv (and send) so a silent peer can't hang us.
+	netSetRcvTimeout(fd, recvSliceMs);
+	netSetSndTimeout(fd, recvSliceMs);
 
-	// Bound every recv so a silent peer can't hang us; short enough that an abort
-	// during a station switch is noticed quickly.
-	setRcvTimeout(fd, 700);
-
-	Tls tls;
-	if (u.tls && !tlsHandshake(tls, fd, u.host)) {
-		netClose(fd);
-		return "";
-	}
+	if (u.tls && !tlsHandshake(out.tls, fd, u.host))
+		return fail("TLS handshake failed");
 
 	std::string req =
 		"GET " + u.path + " HTTP/1.0\r\n"
 		"Host: " + u.host + "\r\n"
 		"User-Agent: AKAudio-VCVRack/2.0\r\n"
-		"Accept: */*\r\n"
+		+ (extraHeader && *extraHeader ? std::string(extraHeader) + "\r\n" : std::string()) +
 		"Connection: close\r\n"
 		"\r\n";
-	if (tlsWrite(tls, fd, req.data(), req.size()) < 0) {
-		tlsFree(tls);
-		netClose(fd);
-		return "";
-	}
+	if (tlsWrite(out.tls, fd, req.data(), req.size()) < 0)
+		return fail("Send failed");
 
-	std::string resp;
-	char buf[4096];
-	const size_t maxResp = 4 << 20;            // 4 MiB ceiling
-	const int maxIdleMs = 8000;                // give up if no data for this long
-	int idleMs = 0;
-	for (;;) {
-		if (aborted(abort)) {
-			resp.clear();
+	// Read headers up to the blank line; keep any body bytes already read.
+	std::string head;
+	char tmp[2048];
+	size_t headerEnd = std::string::npos;
+	while (!aborted(abort) && head.size() < (1 << 16)) {
+		long n = httpReadIdle(out.tls, fd, tmp, sizeof(tmp), abort, recvSliceMs, idleBudgetMs);
+		if (n <= 0)
 			break;
-		}
-		long n = tlsRead(tls, fd, buf, sizeof(buf));
-		if (n > 0) {
-			resp.append(buf, n);
-			idleMs = 0;
-			if (resp.size() > maxResp) {
-				// Over the ceiling: this is not a "small body" — treat it as a
-				// failure rather than silently handing back a truncated payload.
-				resp.clear();
-				break;
-			}
-		} else if (n == -2) {
-			// recv timed out (no data this slice): keep waiting unless we've been
-			// idle too long or were aborted.
-			idleMs += 700;
-			if (idleMs >= maxIdleMs)
-				break;
-		} else {
-			break; // EOF (0) or real error (-1)
-		}
+		head.append(tmp, n);
+		headerEnd = head.find("\r\n\r\n");
+		if (headerEnd != std::string::npos)
+			break;
 	}
-	tlsFree(tls);
-	netClose(fd);
-	return resp;
-}
+	if (headerEnd == std::string::npos)
+		return fail("No HTTP response");
 
-} // namespace
+	out.headers = head.substr(0, headerEnd);
+	out.leftover = head.substr(headerEnd + 4);
+	return true;
+}
 
 bool httpGet(const std::string& url, std::string& out, const std::atomic<bool>* abort) {
 	out.clear();
@@ -183,26 +209,48 @@ bool httpGet(const std::string& url, std::string& out, const std::atomic<bool>* 
 		if (!u.ok)
 			return false;
 
-		std::string resp = fetchOnce(u, abort);
-		size_t headerEnd = resp.find("\r\n\r\n");
-		if (headerEnd == std::string::npos)
+		HttpConn c;
+		if (!httpOpen(u, "Accept: */*", abort, 6000, kGetSliceMs, kGetIdleBudgetMs, nullptr, c)) {
+			closeConn(c);
 			return false;
-
-		std::string headers = resp.substr(0, headerEnd);
-		std::string statusLine = headers.substr(0, headers.find("\r\n"));
+		}
+		std::string statusLine = c.headers.substr(0, c.headers.find("\r\n"));
 
 		// Redirects: 301/302/303/307/308 with a Location header.
 		if (statusLine.find(" 30") != std::string::npos) {
-			std::string loc = headerValue(headers, "location");
+			std::string loc = headerValue(c.headers, "location");
+			closeConn(c);
 			if (loc.empty())
 				return false;
-			current = resolveRedirect(u, loc);
+			current = urlJoin(current, loc);
 			continue;
 		}
-		if (statusLine.find("200") == std::string::npos)
+		if (statusLine.find("200") == std::string::npos) {
+			closeConn(c);
 			return false;
+		}
 
-		out = resp.substr(headerEnd + 4);
+		// Drain the body (bounded — this is for kilobyte-sized replies).
+		std::string body = std::move(c.leftover);
+		const size_t maxResp = 4 << 20; // 4 MiB ceiling
+		bool tooBig = false;
+		char buf[4096];
+		for (;;) {
+			long n = httpReadIdle(c.tls, c.fd, buf, sizeof(buf), abort, kGetSliceMs, kGetIdleBudgetMs);
+			if (n <= 0)
+				break; // EOF, error, abort, or idle budget exhausted
+			body.append(buf, n);
+			if (body.size() > maxResp) {
+				// Over the ceiling: this is not a "small body" — treat it as a
+				// failure rather than silently handing back a truncated payload.
+				tooBig = true;
+				break;
+			}
+		}
+		closeConn(c);
+		if (tooBig || aborted(abort))
+			return false;
+		out = std::move(body);
 		return true;
 	}
 	return false; // too many redirects
