@@ -4,7 +4,7 @@
   "version": "2.0.0",
   "params": [],
   "data": {
-    "url": "http://direct.franceinfo.fr/live/franceinfo-midfi.mp3",
+    "url": "http://icecast.radiofrance.fr/franceinfo-midfi.mp3",
     "stationName": "France Info",
     "icon": "stations/franceinfo.png",
     "playing": true
