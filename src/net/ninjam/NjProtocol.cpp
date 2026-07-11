@@ -196,13 +196,22 @@ std::vector<uint8_t> buildUploadBegin(const unsigned char guid[16], uint32_t fou
 
 std::vector<uint8_t> buildUploadWrite(const unsigned char guid[16], uint8_t flags,
                                       const uint8_t* data, size_t len) {
-	// guid[16] + flags u8 + audio bytes.
-	std::vector<uint8_t> p;
-	p.insert(p.end(), guid, guid + 16);
-	p.push_back(flags);
+	// guid[16] + flags u8 + audio bytes. This is the only builder that carries bulk
+	// data (the whole encoded interval streams through it in 8K chunks), so emit
+	// the framed message directly instead of paying frame()'s payload copy.
+	const uint32_t sz = (uint32_t)(17 + ((data && len) ? len : 0));
+	std::vector<uint8_t> f;
+	f.reserve(5 + sz);
+	f.push_back(MSG_CLIENT_UPLOAD_WRITE);
+	f.push_back(sz & 0xff);
+	f.push_back((sz >> 8) & 0xff);
+	f.push_back((sz >> 16) & 0xff);
+	f.push_back((sz >> 24) & 0xff);
+	f.insert(f.end(), guid, guid + 16);
+	f.push_back(flags);
 	if (data && len)
-		p.insert(p.end(), data, data + len);
-	return frame(MSG_CLIENT_UPLOAD_WRITE, p);
+		f.insert(f.end(), data, data + len);
+	return f;
 }
 
 std::vector<uint8_t> buildChat(const std::vector<std::string>& parts) {
