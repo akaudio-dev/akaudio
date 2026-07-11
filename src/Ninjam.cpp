@@ -337,6 +337,11 @@ struct Ninjam : Module {
 		joined = false;
 		jamBpm.store(0, std::memory_order_relaxed);
 		jamBpi.store(0, std::memory_order_relaxed);
+		// Disarm transmit capture: a room switch never lets a widget step() observe the
+		// joined=false gap (stopAll+joinStart run in one click), so without this txArmed
+		// stays true from the old session and the next room's uploads start mid-interval
+		// instead of on a downbeat — other clients hear us out of sync.
+		txArmed.store(false, std::memory_order_relaxed);
 		std::lock_guard<std::mutex> lock(rosterMutex);
 		roster.clear();
 	}
@@ -364,13 +369,6 @@ struct Ninjam : Module {
 		}
 		disconnectNote = reason;
 		teardownJoin(); // njclient.stop() just joins the already-exited thread
-	}
-
-	void setMode(int m) {
-		if (m == mode)
-			return;
-		stopAll();
-		mode = m;
 	}
 
 	// ---- Per-room actions (the loudspeaker / enter icons on each row) ----
@@ -684,6 +682,13 @@ struct Ninjam : Module {
 	}
 
 	void dataFromJson(json_t* root) override {
+		// Loading a preset/patch onto a live module: tear down whatever is currently
+		// playing FIRST, before overwriting the mode/joined/listening flags below.
+		// Otherwise a running LISTEN stream or JOIN session is orphaned — its bg
+		// thread keeps going, unreachable because stopAll() now sees the new flags.
+		// (UI/main thread here, per the contract; stopAll joins the bg threads.)
+		stopAll();
+
 		if (json_t* j = json_object_get(root, "mode"))
 			mode = (int) json_integer_value(j);
 		url = jsonStr(json_object_get(root, "url"), url);
@@ -1016,7 +1021,10 @@ struct RoomBrowser : ui::ScrollWidget {
 	}
 
 	void step() override {
-		if (module) {
+		// Rack steps hidden widgets too; the browser is hidden while joined/listening,
+		// so gate the background directory refresh (and the row rebuild) on visibility —
+		// no point fetching ninbot every 30 s for a list nobody can see.
+		if (module && visible) {
 			if (++refreshTimer >= 60 * 30) { // ~30 s at 60 fps
 				refreshTimer = 0;
 				module->directory.refresh();

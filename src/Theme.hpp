@@ -4,6 +4,7 @@
 #pragma once
 #include <rack.hpp>
 
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <string>
@@ -58,30 +59,37 @@ inline void drawTxt(NVGcontext* vg, const char* fontRes, float x, float y, float
 	nvgFontFaceId(vg, font->handle);
 	nvgFontSize(vg, size);
 	nvgFillColor(vg, col);
-	nvgTextAlign(vg, halign | NVG_ALIGN_MIDDLE);
 
-	std::string t = s;
 	if (clipW > 0.f) {
+		// Measure under LEFT alignment: nvgTextGlyphPositions/nvgTextBounds shift the
+		// reported x by the alignment (RIGHT subtracts the full width, CENTER half), so
+		// measuring under the caller's `halign` would give <=0 positions and never clip.
+		nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
 		float b[4];
-		nvgTextBounds(vg, 0, 0, t.c_str(), NULL, b);
+		nvgTextBounds(vg, 0, 0, s.c_str(), NULL, b);
 		if (b[2] - b[0] > clipW) {
 			// One glyph-position pass finds the cut point (never splits a UTF-8
 			// sequence — glyph starts are code-point starts).
 			nvgTextBounds(vg, 0, 0, "\xe2\x80\xa6", NULL, b); // …
 			const float fitW = clipW - (b[2] - b[0]);
-			std::vector<NVGglyphPosition> pos(t.size());
-			int n = nvgTextGlyphPositions(vg, 0, 0, t.c_str(), NULL, pos.data(), (int) t.size());
+			NVGglyphPosition pos[256];
+			int n = nvgTextGlyphPositions(vg, 0, 0, s.c_str(), NULL, pos,
+				(int) std::min<size_t>(s.size(), 256));
 			size_t keep = 0;
 			for (int i = 0; i < n; i++) {
 				if (pos[i].maxx > fitW)
 					break;
-				const char* next = (i + 1 < n) ? pos[i + 1].str : t.c_str() + t.size();
-				keep = (size_t) (next - t.c_str());
+				const char* next = (i + 1 < n) ? pos[i + 1].str : s.c_str() + s.size();
+				keep = (size_t) (next - s.c_str());
 			}
-			t = t.substr(0, keep) + "\xe2\x80\xa6";
+			std::string t = s.substr(0, keep) + "\xe2\x80\xa6";
+			nvgTextAlign(vg, halign | NVG_ALIGN_MIDDLE);
+			nvgText(vg, x, y, t.c_str(), NULL);
+			return;
 		}
 	}
-	nvgText(vg, x, y, t.c_str(), NULL);
+	nvgTextAlign(vg, halign | NVG_ALIGN_MIDDLE);
+	nvgText(vg, x, y, s.c_str(), NULL);
 }
 
 // Width in px of a string for a given font/size (for caret/column math).

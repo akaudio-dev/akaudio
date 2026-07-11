@@ -140,6 +140,17 @@ struct Radio : Module {
 		playing = true;
 	}
 	void stopStream() {
+		// If the user stops mid-audition (LED click while "Auditioning…"), abandon the
+		// audition and restore the pre-audition identity, staying stopped — otherwise the
+		// importer would time out ~10 s later and rollback() would auto-restart playback.
+		if (importer.running()) {
+			importer.cancel();
+			url = prevUrl;
+			stationName = prevName;
+			icon = prevIcon;
+			needName = false;
+			importMsg.clear();
+		}
 		stream.stop();
 		playing = false;
 	}
@@ -158,6 +169,13 @@ struct Radio : Module {
 	void auditionUrl(const std::string& u) {
 		if (u.empty())
 			return;
+		// One audition at a time: the importer no-ops while running, so starting a
+		// second here would overwrite the snapshot with the first's provisional
+		// "Auditioning…" state and wedge the panel there forever. Refuse instead.
+		if (importer.running()) {
+			setImportMsg("Audition already in progress\xe2\x80\xa6", true);
+			return;
+		}
 		prevUrl = url;
 		prevName = stationName;
 		prevIcon = icon;
@@ -220,16 +238,22 @@ struct Radio : Module {
 	}
 
 	void dataFromJson(json_t* root) override {
+		// Stop first (also cancels any in-flight audition), then clear the audition-only
+		// UI state so a pending "name this station" prompt from a previous audition can't
+		// misfire onto the newly loaded station.
+		stopStream();
+		needName = false;
+		pendingIcon.clear();
+		importMsg.clear();
+
 		url = jsonStr(json_object_get(root, "url"), url);
 		stationName = jsonStr(json_object_get(root, "stationName"), stationName);
 		icon = jsonStr(json_object_get(root, "icon"), icon);
-		// Loading a preset/patch: apply its playing state. Stop first so switching
-		// to a "stopped" station preset actually stops current playback, and so
-		// play() restarts cleanly on the new URL.
+		// Loading a preset/patch: apply its playing state. (Stream already stopped above,
+		// so play() restarts cleanly on the new URL.)
 		bool wantPlay = false;
 		if (json_t* j = json_object_get(root, "playing"))
 			wantPlay = json_boolean_value(j);
-		stopStream();
 		if (wantPlay)
 			play();
 	}
@@ -491,6 +515,22 @@ static std::string saveUserStation(Module* module, const std::string& name,
 // by URL (keeping the first), so a duplicate station — e.g. a stale leftover
 // preset folder — can't make prev/next bounce within one region instead of
 // advancing.
+// Load a station preset with the same crash-safety Rack's own preset menu uses:
+// ModuleWidget::loadAction throws rack::Exception on an unparseable/corrupt .vcvm
+// (e.g. a truncated importer write), which would otherwise propagate through the
+// event loop and terminate the host. Report it instead.
+static void loadStation(ModuleWidget* mw, const std::string& path) {
+	if (!mw)
+		return;
+	try {
+		mw->loadAction(path);
+	} catch (rack::Exception& e) {
+		if (Radio* m = dynamic_cast<Radio*>(mw->module))
+			m->setImportMsg("\xe2\x9c\x95 Bad preset", true);
+		WARN("akaudio.Radio: loadAction(%s): %s", path.c_str(), e.what());
+	}
+}
+
 static std::vector<StationInfo> collectStations(ModuleWidget* mw) {
 	std::vector<StationInfo> raw;
 	scanStationDir(mw->model->getFactoryPresetDirectory(), raw);
@@ -538,7 +578,7 @@ static void appendStationDir(Menu* menu, ModuleWidget* mw, const std::string& di
 		item->icon = s.icon;
 		item->current = module && module->stationName == name;
 		WeakPtr<ModuleWidget> w = mw;
-		item->onSelect = [w, path]() { if (w) w->loadAction(path); };
+		item->onSelect = [w, path]() { if (w) loadStation(w, path); };
 		menu->addChild(item);
 		count++;
 	}
@@ -763,7 +803,7 @@ struct RadioWidget : ModuleWidget {
 			}
 		int n = (int) stations.size();
 		int next = (idx < 0) ? (dir > 0 ? 0 : n - 1) : (((idx + dir) % n) + n) % n;
-		loadAction(stations[next].path);
+		loadStation(this, stations[next].path);
 	}
 
 	RadioWidget(Radio* module) {
