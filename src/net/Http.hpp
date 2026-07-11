@@ -21,8 +21,12 @@ namespace akaudio {
 
 // GET the url; on success returns true and fills out with the response body. On
 // any failure returns false (out cleared). If abort is non-null and becomes true,
-// the request is abandoned and false returned.
-bool httpGet(const std::string& url, std::string& out, const std::atomic<bool>* abort = nullptr);
+// the request is abandoned and false returned. A body larger than maxBytes is a
+// failure, not a truncation — callers fetching something known-small (a playlist)
+// can pass a tight cap to bail out fast when the URL turns out to be an endless
+// audio stream.
+bool httpGet(const std::string& url, std::string& out, const std::atomic<bool>* abort = nullptr,
+             size_t maxBytes = 4 << 20);
 
 // Parsed http(s)://host[:port][/path]. Shared by Http and StreamClient (one
 // parser, one set of quirks).
@@ -45,6 +49,10 @@ std::string pathNoQuery(const std::string& url);
 // against a base URL: absolute, scheme-relative (//…), host-rooted (/…), or
 // relative to the base's directory.
 std::string urlJoin(const std::string& base, const std::string& ref);
+
+// Case-insensitive lookup of a response-header value (e.g. "location") in a
+// header block; "" if absent.
+std::string headerValue(const std::string& headers, const std::string& name);
 
 // Bounded, abortable read over a (possibly TLS) socket whose SO_RCVTIMEO is set
 // to sliceMs: each timed-out slice polls `abort` and accumulates toward budgetMs.

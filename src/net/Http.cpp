@@ -103,8 +103,6 @@ long httpReadIdle(const Tls& tls, int fd, void* buf, size_t n,
 	}
 }
 
-namespace {
-
 // Case-insensitive search for a header value (e.g. "location"). Returns "" if
 // absent. `headers` is the block before the blank line.
 std::string headerValue(const std::string& headers, const std::string& name) {
@@ -125,6 +123,8 @@ std::string headerValue(const std::string& headers, const std::string& name) {
 	size_t b = v.find_last_not_of(" \t\r\n");
 	return (a == std::string::npos) ? "" : v.substr(a, b - a + 1);
 }
+
+namespace {
 
 bool aborted(const std::atomic<bool>* abort) {
 	return abort && abort->load(std::memory_order_acquire);
@@ -201,7 +201,8 @@ bool httpOpen(const Url& u, const char* extraHeader, const std::atomic<bool>* ab
 	return true;
 }
 
-bool httpGet(const std::string& url, std::string& out, const std::atomic<bool>* abort) {
+bool httpGet(const std::string& url, std::string& out, const std::atomic<bool>* abort,
+		size_t maxBytes) {
 	out.clear();
 	std::string current = url;
 	for (int hop = 0; hop < 5 && !aborted(abort); hop++) { // follow up to 5 redirects
@@ -232,7 +233,6 @@ bool httpGet(const std::string& url, std::string& out, const std::atomic<bool>* 
 
 		// Drain the body (bounded — this is for kilobyte-sized replies).
 		std::string body = std::move(c.leftover);
-		const size_t maxResp = 4 << 20; // 4 MiB ceiling
 		bool tooBig = false;
 		char buf[4096];
 		for (;;) {
@@ -240,7 +240,7 @@ bool httpGet(const std::string& url, std::string& out, const std::atomic<bool>* 
 			if (n <= 0)
 				break; // EOF, error, abort, or idle budget exhausted
 			body.append(buf, n);
-			if (body.size() > maxResp) {
+			if (body.size() > maxBytes) {
 				// Over the ceiling: this is not a "small body" — treat it as a
 				// failure rather than silently handing back a truncated payload.
 				tooBig = true;

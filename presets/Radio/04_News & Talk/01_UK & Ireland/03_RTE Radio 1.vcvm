@@ -4,7 +4,7 @@
   "version": "2.0.0",
   "params": [],
   "data": {
-    "url": "https://liveaudio.rte.ie/hls-radio/radio1/chunklist.m3u8",
+    "url": "http://icecast.rte.ie/radio1",
     "stationName": "RT\u00c9 Radio 1",
     "icon": "",
     "playing": true

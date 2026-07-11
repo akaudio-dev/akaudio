@@ -111,4 +111,25 @@ void tsExtractAdts(const uint8_t* d, size_t n, std::string& out) {
 	}
 }
 
+void hlsSegmentToAdts(const uint8_t* d, size_t n, std::string& out) {
+	if (n >= 1 && d[0] == 0x47) { // MPEG-TS sync byte
+		tsExtractAdts(d, n, out);
+		return;
+	}
+	// Raw AAC segment: skip any leading ID3v2 tags (10-byte header with a
+	// syncsafe 28-bit size), then require an ADTS syncword before appending.
+	size_t off = 0;
+	while (n - off >= 10 && d[off] == 'I' && d[off + 1] == 'D' && d[off + 2] == '3') {
+		size_t sz = ((size_t)(d[off + 6] & 0x7f) << 21) | ((size_t)(d[off + 7] & 0x7f) << 14)
+		          | ((size_t)(d[off + 8] & 0x7f) << 7) | (size_t)(d[off + 9] & 0x7f);
+		off += 10 + sz;
+		if (off > n) {
+			off = n;
+			break;
+		}
+	}
+	if (n - off >= 2 && d[off] == 0xff && (d[off + 1] & 0xf0) == 0xf0)
+		out.append(reinterpret_cast<const char*>(d) + off, n - off);
+}
+
 } // namespace akaudio

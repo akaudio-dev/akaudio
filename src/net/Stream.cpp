@@ -226,8 +226,11 @@ void StreamClient::run(std::string url) {
 		if (abort.load(std::memory_order_acquire))
 			break;
 		setStatus(State::Connecting, "Reading playlist\xe2\x80\xa6");
+		// Tight size cap: some stations (KQED) serve the audio stream itself from
+		// a ".m3u" URL — without the cap this "playlist" download would run for
+		// minutes. Over the cap → not a playlist → play the URL directly.
 		std::string body;
-		if (!httpGet(url, body, &abort))
+		if (!httpGet(url, body, &abort, 16 << 10))
 			break;
 		std::string next = firstPlaylistUrl(body);
 		if (next.empty() || next == url)
@@ -259,11 +262,46 @@ void StreamClient::run(std::string url) {
 	// Declared before the first `goto cleanup` so both are in scope at the label.
 	HttpConn conn;
 	std::string openErr;
-	if (!httpOpen(u, "Icy-MetaData: 0", &abort, 8000, kRecvSliceMs, kIdleBudgetMs,
-			&sock, conn, &openErr)) {
-		bool wasAborted = abort.load(std::memory_order_acquire);
-		setStatus(wasAborted ? State::Stopped : State::Error, wasAborted ? "Stopped" : openErr);
-		goto cleanup;
+
+	// Follow up to 5 redirects. Many broadcasters front their streams with a
+	// redirector (streamtheworld/iheart "livestream-redirect" APIs 302 every
+	// request to a rotating edge server), so the audio path must chase Location
+	// like httpGet does — a fixed target URL would be wrong, not just stale.
+	for (int hop = 0; ; hop++) {
+		if (!httpOpen(u, "Icy-MetaData: 0", &abort, 8000, kRecvSliceMs, kIdleBudgetMs,
+				&sock, conn, &openErr)) {
+			bool wasAborted = abort.load(std::memory_order_acquire);
+			setStatus(wasAborted ? State::Stopped : State::Error, wasAborted ? "Stopped" : openErr);
+			goto cleanup;
+		}
+		std::string statusLine = conn.headers.substr(0, conn.headers.find("\r\n"));
+		std::string loc = (statusLine.find(" 30") != std::string::npos)
+			? headerValue(conn.headers, "location") : "";
+		if (loc.empty() || hop >= 5)
+			break;
+
+		// Close this hop (guarded against stop()'s concurrent shutdown, same as
+		// the cleanup label) and chase the redirect.
+		{
+			std::lock_guard<std::mutex> lock(sockMutex);
+			int f = sock.exchange(-1, std::memory_order_acq_rel);
+			if (f >= 0)
+				netClose(f);
+		}
+		tlsFree(conn.tls);
+		conn = HttpConn{};
+
+		url = urlJoin(url, loc);
+		if (looksLikeHls(url)) { // a redirector may land on an HLS playlist
+			runHls(url);
+			running.store(false, std::memory_order_release);
+			return;
+		}
+		u = parseUrl(url);
+		if (!u.ok) {
+			setStatus(State::Error, "Bad redirect: " + loc);
+			goto cleanup;
+		}
 	}
 
 	{
@@ -445,7 +483,7 @@ void StreamClient::runHls(std::string url) {
 			if (!httpGet(urlJoin(mediaUrl, pl.segments[k]), seg, &abort))
 				continue;
 			std::string adts;
-			tsExtractAdts(reinterpret_cast<const uint8_t*>(seg.data()), seg.size(), adts);
+			hlsSegmentToAdts(reinterpret_cast<const uint8_t*>(seg.data()), seg.size(), adts);
 			if (!playing) {
 				setStatus(State::Playing, "Playing (HLS)");
 				playing = true;

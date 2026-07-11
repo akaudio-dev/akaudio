@@ -39,4 +39,10 @@ bool looksLikeHls(const std::string& url);
 // concatenates its payload (which is ADTS) — no PAT/PMT needed for our feeds.
 void tsExtractAdts(const uint8_t* data, size_t n, std::string& out);
 
+// Normalize one HLS media segment to a bare ADTS byte stream: MPEG-TS segments
+// (0x47 sync) go through tsExtractAdts; raw AAC/ADTS segments — possibly
+// prefixed with ID3v2 timestamp tags, Apple-style (.aac segments, e.g. CBC) —
+// are appended directly with the tags stripped. Anything else appends nothing.
+void hlsSegmentToAdts(const uint8_t* data, size_t n, std::string& out);
+
 } // namespace akaudio
