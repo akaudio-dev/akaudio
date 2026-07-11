@@ -178,7 +178,9 @@ with undo).
   Scanners & ATC, News & Talk, Spoken & Stories (see `presets/Radio/`).
 - **Liveness is mandatory** — niche feeds rot; confirm `audio/mpeg` (or AAC/HLS) live
   before shipping (drive the URL through `test/play_test.cpp` and check it decodes real
-  audio, not just connects).
+  audio, not just connects). `tools/check_stations.sh` sweeps **all** bundled presets
+  through play_test (run before a Library release); it reports scanner feeds that
+  decode but are silent this window as `~ silent-but-alive`, not failures.
 - **Add a station = drop a verified `.vcvm` in `presets/Radio/<Category>/`** (named
   `NN_<Name>.vcvm`). `appendStationDir()` recurses subfolders → submenus, mirroring
   Rack's factory-preset folder convention. At runtime, users add their own by pasting a
