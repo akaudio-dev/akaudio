@@ -76,9 +76,14 @@ public:
 	void setTransmit(int channels, float quality);
 	// Audio thread: push one captured stereo frame for local channel `ch`.
 	void captureFrame(int ch, float l, float r) {
-		if (!txActive.load(std::memory_order_acquire) || ch < 0 || ch >= nTx.load(std::memory_order_relaxed))
+		// txRings (acquire) pairs with start()'s release after building the rings, so we
+		// never index a not-yet-built or partially-built vector — and the vector is never
+		// resized after that first build, so txCapture[ch] is a stable pointer read.
+		if (!txActive.load(std::memory_order_acquire) || ch < 0
+		        || ch >= nTx.load(std::memory_order_relaxed)
+		        || ch >= txRings.load(std::memory_order_acquire))
 			return;
-		txCapture[ch]->push(l, r); // txCapture is built once (size MAX_TX) before txActive=true
+		txCapture[ch]->push(l, r);
 	}
 	// Called on the TX thread once per channel per interval with the encoded OGG.
 	std::function<void(int chidx, const std::vector<uint8_t>&)> onUploadInterval;
@@ -136,8 +141,9 @@ private:
 	// Transmit state.
 	std::atomic<bool> txActive{false};
 	std::atomic<int> nTx{0};
-	float txQuality = 0.5f;
-	std::vector<std::unique_ptr<StereoRingBuffer>> txCapture; // MAX_TX rings, built once
+	std::atomic<float> txQuality{0.5f}; // UI writes, txLoop reads — atomic to avoid a torn read
+	std::vector<std::unique_ptr<StereoRingBuffer>> txCapture; // MAX_TX rings, built once in start()
+	std::atomic<int> txRings{0}; // # rings actually built; release-published by start()
 
 	std::atomic<double> sampleRate{48000.0};
 	std::atomic<int> intervalSamples{0};
@@ -147,6 +153,11 @@ private:
 	// re-gridded mid-flight (matches njclient/JamTaba). Guarded by mu.
 	int pendingBpm = 0, pendingBpi = 0;
 	bool tempoPending = false;
+	// A sample-rate change can arrive on the audio DEVICE thread (Rack dispatches
+	// onSampleRateChange from the RtAudio callback on auto-rate), which must not take
+	// `mu` or free queued intervals. setSampleRate just stores the rate + sets this;
+	// mixLoop does the locked recompute/drop at the next boundary.
+	std::atomic<bool> ratePending{false};
 
 	std::mutex mu; // guards channels, slots, tempo fields
 	std::map<std::string, Channel> channels;

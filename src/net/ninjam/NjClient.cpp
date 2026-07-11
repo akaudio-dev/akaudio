@@ -8,6 +8,7 @@
 #include <cstring>
 #include <ctime>
 #include <map>
+#include <random>
 
 namespace akaudio {
 namespace nj {
@@ -69,9 +70,18 @@ void NjClient::stop() {
 }
 
 void NjClient::makeGuid(unsigned char out[16]) {
+	// A per-process random seed mixed into every GUID. Receiving clients key their
+	// transfer map by GUID alone (no username), so two akaudio users transmitting in
+	// one room MUST NOT generate the same GUID sequence — a pure counter did, and
+	// their interval chunks collided into one buffer (garbled/silent audio). Seeded
+	// once from the OS RNG so the sequences diverge per install/session.
+	static const uint64_t seed = [] {
+		std::random_device rd;
+		return ((uint64_t)rd() << 32) ^ rd() ^ 0xD1B54A32D192ED03ULL;
+	}();
 	static std::atomic<uint64_t> ctr{0};
-	uint64_t a = ctr.fetch_add(1, std::memory_order_relaxed);
-	uint64_t b = a * 0x9E3779B97F4A7C15ULL ^ 0xD1B54A32D192ED03ULL;
+	uint64_t a = seed + ctr.fetch_add(1, std::memory_order_relaxed);
+	uint64_t b = a * 0x9E3779B97F4A7C15ULL ^ seed;
 	std::memcpy(out, &a, 8);
 	std::memcpy(out + 8, &b, 8);
 }
@@ -197,6 +207,14 @@ int NjClient::recvFrame(uint8_t& type, std::vector<uint8_t>& payload) {
 	type = hdr[0];
 	uint32_t size = (uint32_t)hdr[1] | ((uint32_t)hdr[2] << 8) |
 	                ((uint32_t)hdr[3] << 16) | ((uint32_t)hdr[4] << 24);
+	// The size is an unvalidated wire field. A NINJAM message is never remotely this
+	// large (the biggest is a ~8K interval DOWNLOAD_WRITE chunk); treat anything huge
+	// as a corrupt/hostile frame and disconnect rather than trying to allocate up to
+	// 4 GiB (which would throw bad_alloc → terminate the host).
+	if (size > (16u << 20)) {
+		log("disconnect: absurd frame size " + std::to_string(size));
+		return 0;
+	}
 	payload.resize(size);
 	if (size > 0) {
 		int b = recvExact(payload.data(), size, /*allowIdle=*/false);
@@ -223,9 +241,13 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 	}
 
 	// TCP_NODELAY (small protocol messages) + a 1s recv timeout so we can service
-	// keepalives without a second thread.
+	// keepalives without a second thread. A send timeout too: without it a wedged
+	// peer (dropped link, no RST) with a full TCP send buffer blocks ::send inside
+	// sendAll indefinitely — and since sendAll holds sendMutex, a UI-thread chat send
+	// would then freeze the UI. The timeout turns that into a bounded would-block.
 	netSetTcpNoDelay(fd);
 	netSetRcvTimeout(fd, 1000);
+	netSetSndTimeout(fd, 2000);
 	sock.store(fd, std::memory_order_release);
 
 	setState(State::Authenticating);

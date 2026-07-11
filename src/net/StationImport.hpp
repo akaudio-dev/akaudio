@@ -57,6 +57,10 @@ public:
 	// favicon is written. No-op if one is already running. Returns immediately.
 	void start(const std::string& url, std::function<Probe()> probe, const std::string& cacheDir);
 
+	// Abort an in-flight audition and join it (UI thread). Leaves the importer reusable.
+	// The result it produces (if any) is ignored by the caller via its URL guard.
+	void cancel();
+
 	bool running() const { return running_.load(std::memory_order_acquire); }
 	// Bumped once when a run finishes (success or failure).
 	unsigned generation() const { return generation_.load(std::memory_order_acquire); }

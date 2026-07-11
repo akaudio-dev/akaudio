@@ -69,6 +69,16 @@ void StationImporter::start(const std::string& url, std::function<Probe()> probe
 	thread = std::thread(&StationImporter::run, this);
 }
 
+void StationImporter::cancel() {
+	abort_.store(true, std::memory_order_release);
+	if (thread.joinable())
+		thread.join();
+	// Reusable again. run() already set running_=false in finish(); the generation it
+	// bumped is harmless — the caller drops the stale result by URL.
+	abort_.store(false, std::memory_order_release);
+	running_.store(false, std::memory_order_release);
+}
+
 std::string StationImporter::status() {
 	std::lock_guard<std::mutex> lock(mutex);
 	return status_;

@@ -21,8 +21,12 @@ std::string NjAudio::chanKey(const std::string& user, int chidx) {
 }
 
 void NjAudio::setSampleRate(double sr) {
+	// May run on the audio device thread (see ratePending): store + flag only, never
+	// lock. mixLoop recomputes the interval length + drops mismatched queued audio at
+	// its next boundary. If mixLoop isn't running (pre-join), the flag simply waits;
+	// join's setTempo does the first real compute with this rate anyway.
 	sampleRate.store(sr, std::memory_order_relaxed);
-	recomputeInterval();
+	ratePending.store(true, std::memory_order_release);
 }
 
 void NjAudio::recomputeIntervalLocked() {
@@ -127,6 +131,14 @@ void NjAudio::beginInterval(const std::string& user, int chidx, const uint8_t gu
 	// fourcc 'OGGv' (and 'OGG' family) = OGG Vorbis. Anything else (e.g. Opus) is
 	// unsupported in v1 -> we just won't decode it (channel stays silent that interval).
 	bool ogg = ((fourcc & 0xffffff) == ('O' | ('G' << 8) | ('G' << 16)));
+	// The protocol allows one in-flight transfer per channel. If a previous interval on
+	// this channel never got its last-flagged WRITE (remote user dropped mid-interval),
+	// its entry would leak forever — drop any pending transfer for the same channel so
+	// the map can't accumulate abandoned buffers.
+	for (auto it = transfers.begin(); it != transfers.end(); ) {
+		if (it->second.chanKey == key) it = transfers.erase(it);
+		else ++it;
+	}
 	Transfer t;
 	t.chanKey = key;
 	t.ogg = ogg;
@@ -142,8 +154,16 @@ void NjAudio::writeInterval(const uint8_t guid[16], const uint8_t* data, size_t 
 	if (it == transfers.end())
 		return; // unknown/zero-guid transfer
 	Transfer& t = it->second;
-	if (data && len)
+	// Bound the accumulated interval: a legit OGG interval is a few MB (worst ~5 MB at
+	// the ~87 s cap), so a stream that keeps sending past this is broken/hostile —
+	// abandon it as a silence interval rather than growing t.bytes unboundedly.
+	if (data && len && t.bytes.size() + len <= (16u << 20))
 		t.bytes.insert(t.bytes.end(), data, data + len);
+	else if (data && len) {
+		enqueue(t.chanKey, std::vector<float>()); // keep cadence
+		transfers.erase(it);
+		return;
+	}
 	if (!last)
 		return;
 
@@ -179,14 +199,20 @@ std::vector<float> NjAudio::decodeOgg(const uint8_t* data, size_t len, int frame
 	stb_vorbis_info info = stb_vorbis_get_info(v);
 	int nch = info.channels;
 	int srcRate = (int)info.sample_rate;
-	if (nch < 1) { stb_vorbis_close(v); return {}; }
+	// channels and sample_rate come straight off the wire (unvalidated in the OGG
+	// header). Reject junk before it drives buffer sizing below — a lying rate would
+	// otherwise size a multi-hundred-GB allocation (bad_alloc -> host crash).
+	if (nch < 1 || nch > 2 || srcRate < 8000 || srcRate > 192000) {
+		stb_vorbis_close(v);
+		return {};
+	}
 
 	// Decode the whole interval to interleaved float at the source rate, straight into
 	// `in` (no per-chunk bounce buffer): pre-size from the expected source length —
 	// known up front from the interval grid and the rate ratio — and grow in large
 	// steps only if the estimate falls short.
 	double engineRate = sampleRate.load(std::memory_order_relaxed);
-	const int CHUNK = 4096;
+	const size_t CHUNK = 4096;
 	size_t expectFrames = (engineRate > 0)
 		? (size_t)((double)frames * srcRate / engineRate)
 		: (size_t)frames;
@@ -194,9 +220,13 @@ std::vector<float> NjAudio::decodeOgg(const uint8_t* data, size_t len, int frame
 	size_t used = 0; // floats written so far
 	int got;
 	for (;;) {
-		if (in.size() - used < (size_t)CHUNK * nch)
-			in.resize(in.size() + in.size() / 2);
-		got = stb_vorbis_get_samples_float_interleaved(v, nch, in.data() + used, CHUNK * nch);
+		// Guarantee at least CHUNK*nch floats of headroom before each decode call —
+		// stb_vorbis writes up to that many and doesn't know the remaining capacity,
+		// so a single +50% grow (which only restores CHUNK*nch when the buffer is
+		// already large) is not enough; take the max with the exact requirement.
+		if (in.size() - used < CHUNK * nch)
+			in.resize(std::max(in.size() + in.size() / 2, used + CHUNK * nch));
+		got = stb_vorbis_get_samples_float_interleaved(v, nch, in.data() + used, (int)(CHUNK * nch));
 		if (got <= 0)
 			break;
 		used += (size_t)got * nch;
@@ -244,15 +274,10 @@ std::vector<float> NjAudio::decodeOgg(const uint8_t* data, size_t len, int frame
 
 void NjAudio::setTransmit(int channels, float quality) {
 	if (channels > MAX_TX) channels = MAX_TX;
-	txQuality = quality;
-	// One-time allocation of the capture rings (never resized afterwards, so the audio
-	// thread can index them lock-free). ~21 s @ 48 kHz headroom each.
-	if ((int) txCapture.size() < MAX_TX) {
-		txActive.store(false, std::memory_order_release);
-		txCapture.clear();
-		for (int i = 0; i < MAX_TX; i++)
-			txCapture.push_back(std::unique_ptr<StereoRingBuffer>(new StereoRingBuffer(1 << 20)));
-	}
+	// Atomics only — the capture rings are built once in start() (see below), never here,
+	// so this can't race txLoop iterating the vector. captureFrame gates on txRings, so
+	// setting txActive before the rings exist (setTransmit called pre-join) is harmless.
+	txQuality.store(quality, std::memory_order_relaxed);
 	nTx.store(channels, std::memory_order_release);
 	txActive.store(channels > 0, std::memory_order_release);
 }
@@ -261,6 +286,15 @@ void NjAudio::start() {
 	if (running.exchange(true, std::memory_order_acq_rel))
 		return; // already running
 	abort.store(false, std::memory_order_release);
+	// Build the capture rings ONCE, here, before spawning txThread — so the only
+	// concurrent reader (txLoop) and the audio-thread producer (captureFrame, gated on
+	// txRings) never see the vector being mutated. ~21 s @ 48 kHz headroom each.
+	if (txRings.load(std::memory_order_relaxed) < MAX_TX) {
+		txCapture.clear();
+		for (int i = 0; i < MAX_TX; i++)
+			txCapture.push_back(std::unique_ptr<StereoRingBuffer>(new StereoRingBuffer(1 << 20)));
+		txRings.store(MAX_TX, std::memory_order_release);
+	}
 	mixThread = std::thread(&NjAudio::mixLoop, this);
 	txThread = std::thread(&NjAudio::txLoop, this);
 }
@@ -322,7 +356,8 @@ void NjAudio::txLoop() {
 				interleaved[(size_t) i * 2] = l;
 				interleaved[(size_t) i * 2 + 1] = r;
 			}
-			std::vector<uint8_t> ogg = encodeOggInterval(interleaved.data(), N, 2, (int) sr, txQuality, serial++);
+			std::vector<uint8_t> ogg = encodeOggInterval(interleaved.data(), N, 2, (int) sr,
+				txQuality.load(std::memory_order_relaxed), serial++);
 			if (!ogg.empty() && onUploadInterval)
 				onUploadInterval(ch, ogg);
 			didAny = true;
@@ -351,6 +386,14 @@ void NjAudio::mixLoop() {
 				bpm = pendingBpm;
 				bpi = pendingBpi;
 				tempoPending = false;
+				recomputeIntervalLocked();
+				started = false;
+				sawReady = false;
+			}
+			// Deferred sample-rate change (may have been posted from the audio device
+			// thread): recompute the grid + drop mismatched queued audio here, off that
+			// thread. recomputeIntervalLocked reads the already-stored sampleRate.
+			if (ratePending.exchange(false, std::memory_order_acquire)) {
 				recomputeIntervalLocked();
 				started = false;
 				sawReady = false;

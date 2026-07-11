@@ -78,14 +78,18 @@ std::string urlJoin(const std::string& base, const std::string& ref) {
 			return origin + ref;
 		}
 	}
-	// Relative to the base's directory. A base with no path ("http://host") gets a
-	// "/" first — without this the rfind would split inside "http://".
+	// Relative to the base's directory. The directory is taken from the PATH only:
+	// strip the base's query/fragment first, else the last '/' could land inside a
+	// "?tok=ab/cd" query (garbage segment URLs) or after the authority of a
+	// query-only base. Per RFC 3986 a relative ref also drops the base's query.
 	size_t s = base.find("://");
 	size_t from = (s == std::string::npos) ? 0 : s + 3;
-	size_t slash = base.find('/', from);
-	if (slash == std::string::npos)
-		return base + "/" + ref;
-	return base.substr(0, base.rfind('/') + 1) + ref;
+	size_t pathEnd = base.find_first_of("?#", from);
+	size_t authEnd = base.find('/', from); // first '/' after the authority
+	if (authEnd == std::string::npos || (pathEnd != std::string::npos && authEnd >= pathEnd))
+		return base.substr(0, pathEnd) + "/" + ref; // no path segment → root the ref
+	size_t slash = base.rfind('/', pathEnd == std::string::npos ? std::string::npos : pathEnd - 1);
+	return base.substr(0, slash + 1) + ref;
 }
 
 long httpReadIdle(const Tls& tls, int fd, void* buf, size_t n,

@@ -40,6 +40,14 @@ std::string firstPlaylistUrl(const std::string& body) {
 		std::string line = body.substr(i, (e == std::string::npos ? n : e) - i);
 		i = (e == std::string::npos ? n : e + 1);
 
+		// Skip comment/directive lines (M3U "#EXTINF", PLS "[playlist]") — their free
+		// text can contain a URL (e.g. "visit http://station.example") that would
+		// otherwise be mistaken for the stream. Real entries are "FileN=http://…" or a
+		// bare URL, neither of which starts with '#'.
+		size_t nb = line.find_first_not_of(" \t");
+		if (nb != std::string::npos && line[nb] == '#')
+			continue;
+
 		size_t h = line.find("http://");
 		if (h == std::string::npos)
 			h = line.find("https://");
@@ -314,14 +322,16 @@ void StreamClient::run(std::string url) {
 			goto cleanup;
 		}
 
-		// Pick the decoder dynamically from the response headers. Icecast sends a
-		// Content-Type (audio/mpeg, audio/aac, …); default to MP3 when unspecified.
-		std::string hl = conn.headers;
-		for (char& c : hl)
+		// Pick the decoder dynamically from the Content-Type header (Icecast sends
+		// audio/mpeg, audio/aac, …); default to MP3 when unspecified. Match on the
+		// actual header value, not the whole header block — an icy-url/icy-name that
+		// merely mentions "aac" must not flip us to the AAC decoder.
+		std::string ct = headerValue(conn.headers, "content-type");
+		for (char& c : ct)
 			c = (char) std::tolower((unsigned char) c);
-		const bool isAac = hl.find("audio/aac") != std::string::npos
-			|| hl.find("audio/aacp") != std::string::npos
-			|| hl.find("application/aac") != std::string::npos;
+		const bool isAac = ct.find("audio/aac") != std::string::npos
+			|| ct.find("audio/aacp") != std::string::npos
+			|| ct.find("application/aac") != std::string::npos;
 
 		std::string& leftover = conn.leftover;
 
@@ -462,13 +472,25 @@ void StreamClient::runHls(std::string url) {
 	bool playing = false;
 	bool haveLast = false;
 	uint64_t lastSeq = 0;
+	int pollFails = 0;
 
 	while (running.load(std::memory_order_acquire) && !abort.load(std::memory_order_acquire) && !rs.stopped) {
 		std::string body;
 		if (!httpGet(mediaUrl, body, &abort)) {
-			setStatus(State::Error, "Playlist fetch failed");
-			break;
+			// A user stop aborts httpGet — don't paint it as an error (stop() owns the
+			// terminal status). A genuine fetch failure is often a transient network
+			// blip; the ring still has buffered audio, so retry a few times before
+			// declaring the stream dead rather than killing it on the first miss.
+			if (abort.load(std::memory_order_acquire))
+				break;
+			if (++pollFails >= 3) {
+				setStatus(State::Error, "Playlist fetch failed");
+				break;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(500));
+			continue;
 		}
+		pollFails = 0;
 		HlsPlaylist pl = parseHlsPlaylist(body);
 
 		int played = 0;
