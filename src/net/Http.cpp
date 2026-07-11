@@ -151,7 +151,7 @@ void closeConn(HttpConn& c) {
 
 bool httpOpen(const Url& u, const char* extraHeader, const std::atomic<bool>* abort,
 		int connectTimeoutMs, int recvSliceMs, int idleBudgetMs,
-		std::atomic<int>* sockOut, HttpConn& out, std::string* err) {
+		GuardedFd* sockOut, HttpConn& out, std::string* err) {
 	auto fail = [&](const std::string& e) {
 		if (err)
 			*err = e;
@@ -163,10 +163,10 @@ bool httpOpen(const Url& u, const char* extraHeader, const std::atomic<bool>* ab
 	if (fd < 0)
 		return fail(connErr);
 	// From here on the caller owns the socket (see the header contract) — publish
-	// it first so a concurrent stop() can netShutdown() any blocking call below.
+	// it first so a concurrent stop() can shutdown() any blocking call below.
 	out.fd = fd;
 	if (sockOut)
-		sockOut->store(fd, std::memory_order_release);
+		sockOut->publish(fd);
 	// Bound every recv (and send) so a silent peer can't hang us.
 	netSetRcvTimeout(fd, recvSliceMs);
 	netSetSndTimeout(fd, recvSliceMs);

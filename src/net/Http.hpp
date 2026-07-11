@@ -7,6 +7,8 @@
 
 #include "Tls.hpp"
 
+namespace akaudio { class GuardedFd; } // Socket.hpp; only a pointer is needed here
+
 // Tiny HTTP(S)/1.0 GET for small text/binary bodies (room/station directory JSON,
 // playlists, favicons). Reads the whole response into a string — meant for
 // kilobyte-sized replies, NOT for audio streams (those go through StreamClient).
@@ -72,14 +74,15 @@ struct HttpConn {
 // Resolve+connect (abortable), TLS handshake for https, send "GET path HTTP/1.0"
 // (Host/User-Agent/Connection: close + the optional extraHeader line), and read
 // the response headers. recvSliceMs also becomes the socket's recv/send timeout.
-// If sockOut is non-null the fd is published there the moment it connects, so
-// another thread can netShutdown() it to interrupt any later blocking call.
+// If sockOut is non-null the fd is published into it the moment it connects, so
+// another thread can sockOut->shutdown() it to interrupt any later blocking call.
 // OWNERSHIP: once out.fd >= 0 the CALLER owns the socket + TLS state and must
-// clean up (tlsFree + netClose) on both success and failure — httpOpen never
-// closes a connected fd (a publisher's stop() may be racing us on it).
-// Returns true when the headers were read; false with a reason in *err.
+// clean up (tlsFree + netClose, or sockOut->closeOwned()) on both success and
+// failure — httpOpen never closes a connected fd (a publisher's stop() may be
+// racing us on it). Returns true when the headers were read; false with a reason
+// in *err.
 bool httpOpen(const Url& u, const char* extraHeader, const std::atomic<bool>* abort,
               int connectTimeoutMs, int recvSliceMs, int idleBudgetMs,
-              std::atomic<int>* sockOut, HttpConn& out, std::string* err = nullptr);
+              GuardedFd* sockOut, HttpConn& out, std::string* err = nullptr);
 
 } // namespace akaudio

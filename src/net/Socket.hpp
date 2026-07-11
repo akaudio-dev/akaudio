@@ -17,6 +17,7 @@
 #pragma once
 
 #include <atomic>
+#include <mutex>
 #include <string>
 #include <cstring>
 
@@ -176,6 +177,41 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 int netResolveConnect(const std::string& host, const std::string& port,
                       const std::atomic<bool>* abort, int timeoutMs,
                       std::string* errOut = nullptr);
+
+// A socket fd shared between its owning background thread and another thread that
+// must interrupt a blocked recv/send on it (the UI thread's stop()). The owner
+// publish()es the connected fd, reads it via fd() for its own send/recv, and
+// closeOwned()s it when done; the other thread calls shutdown() to break the
+// blocking call. The mutex makes shutdown() atomic with closeOwned() so a shutdown
+// can never fire on an fd the owner has already closed — which the OS may have
+// recycled to an unrelated socket. This is the one place that idiom lives; every
+// StreamClient/NjClient teardown path goes through it.
+class GuardedFd {
+public:
+	// Owner: publish the freshly-connected fd (or pass to httpOpen's sockOut).
+	void publish(int fd) { sock_.store(fd, std::memory_order_release); }
+	// Owner: the current fd for send/recv (unguarded atomic read), or -1.
+	int fd() const { return sock_.load(std::memory_order_acquire); }
+
+	// Another thread: interrupt a blocked recv/send on the owner. No-op if closed.
+	void shutdown() {
+		std::lock_guard<std::mutex> lock(mu_);
+		int fd = sock_.load(std::memory_order_acquire);
+		if (fd >= 0)
+			netShutdown(fd);
+	}
+	// Owner: close + clear the fd, atomic with a concurrent shutdown().
+	void closeOwned() {
+		std::lock_guard<std::mutex> lock(mu_);
+		int fd = sock_.exchange(-1, std::memory_order_acq_rel);
+		if (fd >= 0)
+			netClose(fd);
+	}
+
+private:
+	std::atomic<int> sock_{-1};
+	std::mutex mu_;
+};
 
 // Human-readable last socket error (for logs).
 inline std::string netErrorStr() {

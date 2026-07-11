@@ -56,14 +56,9 @@ void NjClient::start(const std::string& host, int port, const std::string& user,
 
 void NjClient::stop() {
 	abort.store(true, std::memory_order_release);
-	// Interrupt a blocked recv; run() owns the close. sockMutex makes this
-	// atomic with that close so we can't shutdown() a recycled fd number.
-	{
-		std::lock_guard<std::mutex> lock(sockMutex);
-		int fd = sock.load(std::memory_order_acquire);
-		if (fd >= 0)
-			netShutdown(fd);
-	}
+	// Interrupt a blocked recv; run() owns the close. GuardedFd makes this atomic
+	// with that close so we can't shutdown() a recycled fd number.
+	sock.shutdown();
 	if (thread.joinable())
 		thread.join();
 	running.store(false, std::memory_order_release);
@@ -155,7 +150,7 @@ void NjClient::sendPrivate(const std::string& toUser, const std::string& text) {
 
 bool NjClient::sendAll(const std::vector<uint8_t>& data) {
 	std::lock_guard<std::mutex> lock(sendMutex); // whole NINJAM messages stay atomic on the wire
-	int fd = sock.load(std::memory_order_acquire);
+	int fd = sock.fd();
 	if (fd < 0) return false;
 	size_t off = 0;
 	while (off < data.size()) {
@@ -171,7 +166,7 @@ bool NjClient::sendAll(const std::vector<uint8_t>& data) {
 }
 
 int NjClient::recvExact(uint8_t* buf, size_t n, bool allowIdle) {
-	int fd = sock.load(std::memory_order_acquire);
+	int fd = sock.fd();
 	if (fd < 0) {
 		if (!abort.load(std::memory_order_acquire)) log("recvExact: socket invalid (fd<0)");
 		return 0;
@@ -248,7 +243,7 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 	netSetTcpNoDelay(fd);
 	netSetRcvTimeout(fd, 1000);
 	netSetSndTimeout(fd, 2000);
-	sock.store(fd, std::memory_order_release);
+	sock.publish(fd);
 
 	setState(State::Authenticating);
 
@@ -381,12 +376,7 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 
 done:
 	audio.stop();
-	{
-		// Atomic with stop()'s shutdown (see stop()).
-		std::lock_guard<std::mutex> lock(sockMutex);
-		int f = sock.exchange(-1, std::memory_order_acq_rel);
-		if (f >= 0) netClose(f);
-	}
+	sock.closeOwned(); // atomic with stop()'s shutdown (see stop())
 	// Terminal state, in priority order: a specific Error (auth/protocol failure) set via
 	// `goto done` stands as-is; otherwise distinguish who ended the session. abort set => the
 	// UI called stop() (user pressed Leave) => Stopped. abort clear => the loop fell out because

@@ -22,6 +22,7 @@
 
 #include "NjProtocol.hpp"
 #include "NjAudio.hpp"
+#include "../Socket.hpp" // GuardedFd
 
 namespace akaudio {
 namespace nj {
@@ -103,14 +104,13 @@ private:
 	std::thread thread;
 	std::atomic<bool> running{false};
 	std::atomic<bool> abort{false};
-	std::atomic<int> sock{-1};
+	GuardedFd sock; // stop() shutdown()s it to interrupt recv; run() closeOwned()s it
 	std::atomic<State> st{State::Idle};
 
 	Callbacks cb;
 	NjAudio audio;
 	std::vector<std::string> txChannels;     // declared local broadcast channels (names)
 	std::mutex sendMutex;                     // serialize socket sends across net + TX threads
-	std::mutex sockMutex;                     // makes stop()'s shutdown atomic with run()'s close
 	std::mutex txMutex;                       // guards txChannels (UI writes vs net-thread reads)
 	int keepAliveSecs = 3; // from server caps; refreshed after the challenge
 };

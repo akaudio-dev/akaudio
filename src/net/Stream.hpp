@@ -9,6 +9,7 @@
 #include <mutex>
 
 #include "RingBuffer.hpp"
+#include "Socket.hpp" // GuardedFd
 
 // Shared networked-audio layer for AK Audio modules (Ninjam, Radio, future modules).
 //
@@ -69,8 +70,7 @@ private:
 	std::thread thread;
 	std::atomic<bool> running{false};
 	std::atomic<bool> abort{false};
-	std::atomic<int> sock{-1};  // open socket fd, or -1; shutdown by stop() to interrupt recv
-	std::mutex sockMutex;       // makes stop()'s shutdown atomic with run()'s close (no fd reuse race)
+	GuardedFd sock; // socket fd; stop() shutdown()s it to interrupt recv, run() closeOwned()s it
 	std::atomic<float> sampleRate{44100.f};
 	std::atomic<State> state{State::Stopped};
 	std::atomic<uint64_t> produced{0}; // stereo frames pushed since start(); resets on start()

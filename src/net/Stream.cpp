@@ -209,16 +209,9 @@ void StreamClient::start(const std::string& url) {
 void StreamClient::stop() {
 	abort.store(true, std::memory_order_release);
 	running.store(false, std::memory_order_release);
-	// Interrupt a blocked recv() by shutting the socket down; run() owns the
-	// close. sockMutex makes shutdown atomic with that close — otherwise we
-	// could load the fd, lose the race to run()'s netClose, and shutdown() an fd
-	// number the OS had already recycled for an unrelated connection.
-	{
-		std::lock_guard<std::mutex> lock(sockMutex);
-		int fd = sock.load(std::memory_order_acquire);
-		if (fd >= 0)
-			netShutdown(fd);
-	}
+	// Interrupt a blocked recv() by shutting the socket down; run() owns the close.
+	// GuardedFd makes the two atomic (no shutdown() on an fd run() already recycled).
+	sock.shutdown();
 	if (thread.joinable())
 		thread.join();
 	ring.requestClear();
@@ -263,9 +256,9 @@ void StreamClient::run(std::string url) {
 	// Shared HTTP open (Http.cpp): abortable resolve+connect (netConnectAbortable
 	// polls `abort` every 100 ms, so stop() on the UI thread can never be wedged
 	// by a slow/dead host), TLS for https, GET, header read. The fd is published
-	// into `sock` the moment it connects so stop() can netShutdown() a blocked
-	// recv; per the httpOpen contract, we own the socket from then on and clean
-	// up at the `cleanup` label (which stop() races via sockMutex).
+	// into `sock` (a GuardedFd) the moment it connects so stop() can shutdown() a
+	// blocked recv; per the httpOpen contract, we own the socket from then on and
+	// close it via sock.closeOwned() (atomic with stop()'s shutdown).
 	// Icy-MetaData:0 keeps the MP3 body free of interleaved metadata.
 	// Declared before the first `goto cleanup` so both are in scope at the label.
 	HttpConn conn;
@@ -288,14 +281,9 @@ void StreamClient::run(std::string url) {
 		if (loc.empty() || hop >= 5)
 			break;
 
-		// Close this hop (guarded against stop()'s concurrent shutdown, same as
-		// the cleanup label) and chase the redirect.
-		{
-			std::lock_guard<std::mutex> lock(sockMutex);
-			int f = sock.exchange(-1, std::memory_order_acq_rel);
-			if (f >= 0)
-				netClose(f);
-		}
+		// Close this hop (atomic with stop()'s concurrent shutdown) and chase the
+		// redirect.
+		sock.closeOwned();
 		tlsFree(conn.tls);
 		conn = HttpConn{};
 
@@ -430,13 +418,7 @@ void StreamClient::run(std::string url) {
 
 cleanup:
 	tlsFree(conn.tls);
-	{
-		// Atomic with stop()'s shutdown (see stop()).
-		std::lock_guard<std::mutex> lock(sockMutex);
-		int f = sock.exchange(-1, std::memory_order_acq_rel);
-		if (f >= 0)
-			netClose(f);
-	}
+	sock.closeOwned(); // atomic with stop()'s shutdown (see stop())
 	running.store(false, std::memory_order_release);
 }
 
