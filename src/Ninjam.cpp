@@ -94,6 +94,12 @@ struct Ninjam : Module {
 	double beatPhase = 0.0;
 	int beatIndex = 0;
 	float clickEnv = 0.f, clickPhase = 0.f, clickFreq = 880.f, clickAmp = 0.f;
+	// Cached per-rate/per-tempo values so process() pays a compare per frame instead of
+	// an exp() (peak release) and a division (samples per beat):
+	float cachedRate = 0.f;
+	float peakDecay = 0.f;
+	double spb = 0.0; // samples per beat
+	int spbBpm = 0;
 
 	// Human label for the picked room (room name, or host). Shown on the panel and
 	// persisted; shared across modes since only one is active at a time.
@@ -312,25 +318,30 @@ struct Ninjam : Module {
 
 	// ---- Mode-agnostic helpers (dispatch on `mode`) ----
 
+	// Tear down the JOIN session: stop/join the protocol client and clear all jam state.
+	// Shared by the explicit stop (stopAll) and the server-drop path (handleServerDrop).
+	void teardownJoin() {
+		njclient.stop();
+		joined = false;
+		jamBpm.store(0, std::memory_order_relaxed);
+		jamBpi.store(0, std::memory_order_relaxed);
+		std::lock_guard<std::mutex> lock(rosterMutex);
+		roster.clear();
+	}
+
 	// Stop whatever is currently playing.
 	void stopAll() {
 		disconnectNote.clear(); // explicit user stop — nothing to report
 		if (listening) { stream.stop(); listening = false; }
-		if (joined) {
-			njclient.stop();
-			joined = false;
-			jamBpm.store(0, std::memory_order_relaxed);
-			jamBpi.store(0, std::memory_order_relaxed);
-			std::lock_guard<std::mutex> lock(rosterMutex);
-			roster.clear();
-		}
+		if (joined)
+			teardownJoin();
 	}
 
 	// UI thread. The JOIN bg thread exited on its own while we still believe we're joined —
 	// i.e. the server dropped us (kick / shutdown / network loss) or auth was rejected. Tear
 	// down the dead session (so the panel returns to the connect view) and record a reason to
 	// show on the status bar. Prefer the server's own words (the kick line) over the generic
-	// terminal message. Mirrors stopAll()'s JOIN cleanup, minus clearing the note.
+	// terminal message.
 	void handleServerDrop() {
 		std::string reason;
 		{
@@ -340,12 +351,7 @@ struct Ninjam : Module {
 			                                : std::string("Disconnected by server");
 		}
 		disconnectNote = reason;
-		njclient.stop(); // join the already-exited thread
-		joined = false;
-		jamBpm.store(0, std::memory_order_relaxed);
-		jamBpi.store(0, std::memory_order_relaxed);
-		std::lock_guard<std::mutex> lock(rosterMutex);
-		roster.clear();
+		teardownJoin(); // njclient.stop() just joins the already-exited thread
 	}
 
 	void setMode(int m) {
@@ -554,6 +560,11 @@ struct Ninjam : Module {
 		// ---- Beat clock + metronome (only when joined to a tempo) ----
 		int bpmL = jamBpm.load(std::memory_order_relaxed);
 		int bpiL = jamBpi.load(std::memory_order_relaxed);
+		if (args.sampleRate != cachedRate) {
+			cachedRate = args.sampleRate;
+			peakDecay = std::exp(-args.sampleTime / 0.15f);
+			spbBpm = 0; // force samples-per-beat recompute
+		}
 		float click = 0.f, clockG = 0.f, resetG = 0.f, runG = 0.f, phaseV = 0.f;
 		if (bpmL > 0 && bpiL > 0) {
 			// Cheap relaxed load first; the RMW runs only on the rare resync frame.
@@ -564,7 +575,10 @@ struct Ninjam : Module {
 				currentBeat.store(0, std::memory_order_relaxed);
 				clickEnv = 0.f;
 			}
-			double spb = 60.0 * args.sampleRate / (double) bpmL; // samples per beat
+			if (bpmL != spbBpm) {
+				spbBpm = bpmL;
+				spb = 60.0 * args.sampleRate / (double) bpmL; // samples per beat
+			}
 			beatPhase += 1.0;
 			if (beatPhase >= spb) {
 				beatPhase -= spb;
@@ -632,7 +646,7 @@ struct Ninjam : Module {
 		// Peak meter: fast attack, ~150 ms exponential release.
 		float amp = std::max(std::fabs(l), std::fabs(r));
 		float p = peak.load(std::memory_order_relaxed);
-		p = amp > p ? amp : p * std::exp(-args.sampleTime / 0.15f);
+		p = amp > p ? amp : p * peakDecay;
 		peak.store(p, std::memory_order_relaxed);
 
 		outputs[CLICK_OUTPUT].setVoltage(click * 5.f);
@@ -737,25 +751,9 @@ static void directJoin(Ninjam* module, ui::TextField* userF, ui::TextField* pass
 		passF ? passF->text : module->joinPass);
 }
 
-// Text field that moves focus to the next/previous field on TAB / Shift-TAB.
-struct TabField : ui::TextField {
-	Widget* nextField = nullptr;
-	Widget* prevField = nullptr;
-	void onSelectKey(const SelectKeyEvent& e) override {
-		if ((e.action == GLFW_PRESS || e.action == GLFW_REPEAT) && e.key == GLFW_KEY_TAB) {
-			Widget* t = (e.mods & GLFW_MOD_SHIFT) ? prevField : nextField;
-			if (t) {
-				APP->event->setSelectedWidget(t);
-				e.consume(this);
-				return;
-			}
-		}
-		ui::TextField::onSelectKey(e);
-	}
-};
-
 // Server "host:port" field — pressing Enter connects, same as the Join button.
-struct ServerField : TabField {
+// (TAB focus cycling comes free with ui::TextField's nextField/prevField.)
+struct ServerField : ui::TextField {
 	Ninjam* module = nullptr;
 	ui::TextField* userField = nullptr;
 	ui::TextField* passField = nullptr;
@@ -1458,16 +1456,6 @@ struct JamView : Widget {
 	}
 };
 
-// Password text field — masks the displayed characters but keeps the real value in `text`.
-struct NjPasswordField : TabField {
-	void draw(const DrawArgs& args) override {
-		std::string real = text;
-		text = std::string(real.size(), '*');
-		ui::TextField::draw(args);
-		text = real;
-	}
-};
-
 // "▾" button beside the server field: opens a menu of previously-joined servers.
 struct ServerDropdownButton : OpaqueWidget {
 	Ninjam* module = nullptr;
@@ -1543,8 +1531,8 @@ struct JoinCard : Widget {
 		box.size = Vec(width, 48);
 		const float inner = 8.f, gap = 5.f;
 
-		TabField* userField = new TabField;
-		NjPasswordField* passField = new NjPasswordField;
+		ui::TextField* userField = new ui::TextField;
+		ui::PasswordField* passField = new ui::PasswordField;
 		ServerField* serverField = new ServerField;
 
 		// Row 1: server host:port + history dropdown (where the old label was).

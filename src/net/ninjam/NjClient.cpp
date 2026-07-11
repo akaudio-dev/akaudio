@@ -7,6 +7,7 @@
 
 #include <cstring>
 #include <ctime>
+#include <map>
 
 namespace akaudio {
 namespace nj {
@@ -114,28 +115,32 @@ void NjClient::sendUploadInterval(int chidx, const std::vector<uint8_t>& ogg) {
 	} while (off < ogg.size()); // at least one WRITE (the last flag), even if ogg is empty
 }
 
-void NjClient::sendChat(const std::string& text) {
+void NjClient::sendChatParts(const std::vector<std::string>& parts) {
 	// UI thread. sendAll is mutex-guarded and no-ops if the socket is gone, so a send
-	// while disconnected is harmless. The server echoes our line back (with our name),
-	// so we don't append locally. "!vote bpi/bpm N" rides this public path too.
-	if (text.empty() || st.load(std::memory_order_acquire) != State::Connected)
+	// while disconnected is harmless.
+	if (st.load(std::memory_order_acquire) != State::Connected)
 		return;
-	sendAll(buildChat({"MSG", text}));
+	sendAll(buildChat(parts));
+}
+
+void NjClient::sendChat(const std::string& text) {
+	// The server echoes our line back (with our name), so we don't append locally.
+	// "!vote bpi/bpm N" rides this public path too.
+	if (!text.empty())
+		sendChatParts({"MSG", text});
 }
 
 void NjClient::sendAdmin(const std::string& command) {
 	// Server admin command (topic/bpm/bpi/kick). The server enacts it only if we hold
 	// admin rights; otherwise it is ignored. `command` is the text with the leading '/'
 	// already stripped (e.g. "bpm 120"), matching njclient/JamTaba.
-	if (command.empty() || st.load(std::memory_order_acquire) != State::Connected)
-		return;
-	sendAll(buildChat({"ADMIN", command}));
+	if (!command.empty())
+		sendChatParts({"ADMIN", command});
 }
 
 void NjClient::sendPrivate(const std::string& toUser, const std::string& text) {
-	if (toUser.empty() || text.empty() || st.load(std::memory_order_acquire) != State::Connected)
-		return;
-	sendAll(buildChat({"PRIVMSG", toUser, text}));
+	if (!toUser.empty() && !text.empty())
+		sendChatParts({"PRIVMSG", toUser, text});
 }
 
 bool NjClient::sendAll(const std::vector<uint8_t>& data) {
@@ -201,7 +206,8 @@ int NjClient::recvFrame(uint8_t& type, std::vector<uint8_t>& payload) {
 }
 
 void NjClient::run(std::string host, int port, std::string user, std::string pass) {
-	subMask.clear();
+	// Per-user subscribed-channel bitmask (SET_USERMASK); session-local by construction.
+	std::map<std::string, uint32_t> subMask;
 	setState(State::Connecting, host + ":" + std::to_string(port));
 
 	// Resolve + connect, abort-pollable (netConnectAbortable) — a blocking
@@ -243,7 +249,6 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 		wireUser = user;
 	}
 
-	bool authed = false;
 	time_t lastSend = ::time(nullptr);
 
 	uint8_t type = 0;
@@ -288,7 +293,6 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 					setState(State::Error, "Send auth failed");
 					goto done;
 				}
-				lastSend = ::time(nullptr);
 				break;
 			}
 			case MSG_SERVER_AUTH_REPLY: {
@@ -298,13 +302,11 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 					setState(State::Error, ar.errmsg.empty() ? "Auth rejected" : ar.errmsg);
 					goto done;
 				}
-				authed = true;
 				// log("auth ok" + (ar.errmsg.empty() ? std::string() : " as \"" + ar.errmsg + "\"") +
 				//     " maxchan=" + std::to_string(ar.maxchan)); // normal
 				// Announce our channels (real broadcast channels if transmitting, else a
 				// listen-only filler).
 				sendChannelDecl();
-				lastSend = ::time(nullptr);
 				audio.start(); // launch the interval mixer + transmit thread
 				setState(State::Connected);
 				break;
@@ -335,7 +337,6 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 						if (mask != before) {
 							// log("subscribe " + u.user + " chanmask=" + std::to_string(mask)); // normal
 							sendAll(buildSetUserMask(u.user, mask));
-							lastSend = ::time(nullptr);
 						}
 					}
 					if (cb.onUserInfo) cb.onUserInfo(users);
@@ -351,7 +352,7 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 			case MSG_SERVER_DOWNLOAD_BEGIN: {
 				DownloadBegin db;
 				if (parseDownloadBegin(payload.data(), payload.size(), db))
-					audio.beginInterval(db.user, db.chidx, db.guid, db.fourcc);
+					audio.beginInterval(db.user, db.chidx, db.guid, db.fourcc, db.estSize);
 				break;
 			}
 			case MSG_SERVER_DOWNLOAD_WRITE: {
@@ -366,7 +367,6 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 	}
 
 done:
-	(void)authed;
 	audio.stop();
 	{
 		// Atomic with stop()'s shutdown (see stop()).

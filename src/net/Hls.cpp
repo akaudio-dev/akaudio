@@ -96,15 +96,13 @@ std::string urlJoin(const std::string& base, const std::string& ref) {
 	return (slash == std::string::npos ? base : base.substr(0, slash + 1)) + ref;
 }
 
-bool looksLikeHls(const std::string& url, const std::string& body) {
+bool looksLikeHls(const std::string& url) {
 	// strip a query string before the extension check
 	std::string path = url;
 	size_t q = path.find('?');
 	if (q != std::string::npos)
 		path = path.substr(0, q);
-	if (endsWithCI(path, ".m3u8"))
-		return true;
-	return startsWith(trimCR(body.substr(0, body.find('\n') == std::string::npos ? body.size() : body.find('\n'))), "#EXTM3U");
+	return endsWithCI(path, ".m3u8");
 }
 
 void tsExtractAdts(const uint8_t* d, size_t n, std::string& out) {

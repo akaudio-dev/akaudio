@@ -115,7 +115,8 @@ void NjAudio::refreshSlots() {
 	nPoly.store(hi, std::memory_order_relaxed);
 }
 
-void NjAudio::beginInterval(const std::string& user, int chidx, const uint8_t guid[16], uint32_t fourcc) {
+void NjAudio::beginInterval(const std::string& user, int chidx, const uint8_t guid[16], uint32_t fourcc,
+		uint32_t estSize) {
 	static const uint8_t zero[16] = {0};
 	std::string key = chanKey(user, chidx);
 	if (std::memcmp(guid, zero, 16) == 0) {
@@ -128,8 +129,11 @@ void NjAudio::beginInterval(const std::string& user, int chidx, const uint8_t gu
 	bool ogg = ((fourcc & 0xffffff) == ('O' | ('G' << 8) | ('G' << 16)));
 	Transfer t;
 	t.chanKey = key;
-	t.fourcc = fourcc;
 	t.ogg = ogg;
+	// estSize is the server's advertised interval size; reserving up front avoids repeated
+	// reallocs as DOWNLOAD_WRITE chunks stream in. Cap it — it's an unvalidated wire value.
+	if (estSize > 0)
+		t.bytes.reserve(std::min<uint32_t>(estSize, 4u << 20));
 	transfers[std::string((const char*)guid, 16)] = std::move(t);
 }
 
@@ -177,16 +181,29 @@ std::vector<float> NjAudio::decodeOgg(const uint8_t* data, size_t len, int frame
 	int srcRate = (int)info.sample_rate;
 	if (nch < 1) { stb_vorbis_close(v); return {}; }
 
-	// Decode the whole interval to interleaved float at the source rate.
-	std::vector<float> in;
+	// Decode the whole interval to interleaved float at the source rate, straight into
+	// `in` (no per-chunk bounce buffer): pre-size from the expected source length —
+	// known up front from the interval grid and the rate ratio — and grow in large
+	// steps only if the estimate falls short.
+	double engineRate = sampleRate.load(std::memory_order_relaxed);
 	const int CHUNK = 4096;
-	std::vector<float> tmp((size_t)CHUNK * nch);
+	size_t expectFrames = (engineRate > 0)
+		? (size_t)((double)frames * srcRate / engineRate)
+		: (size_t)frames;
+	std::vector<float> in((expectFrames + CHUNK) * nch);
+	size_t used = 0; // floats written so far
 	int got;
-	while ((got = stb_vorbis_get_samples_float_interleaved(v, nch, tmp.data(), CHUNK * nch)) > 0)
-		in.insert(in.end(), tmp.begin(), tmp.begin() + (size_t)got * nch);
+	for (;;) {
+		if (in.size() - used < (size_t)CHUNK * nch)
+			in.resize(in.size() + in.size() / 2);
+		got = stb_vorbis_get_samples_float_interleaved(v, nch, in.data() + used, CHUNK * nch);
+		if (got <= 0)
+			break;
+		used += (size_t)got * nch;
+	}
 	stb_vorbis_close(v);
 
-	int srcFrames = (int)(in.size() / nch);
+	int srcFrames = (int)(used / nch);
 	if (srcFrames <= 0)
 		return {};
 
@@ -196,7 +213,6 @@ std::vector<float> NjAudio::decodeOgg(const uint8_t* data, size_t len, int frame
 	// padding with silence if the recording is shorter or truncating if longer (e.g. a
 	// pre-change interval landing after a BPI change). This decouples pitch from the grid,
 	// so a BPI change no longer doubles/halves the tempo.
-	double engineRate = sampleRate.load(std::memory_order_relaxed);
 	double ratio = (srcRate > 0 && engineRate > 0)
 		? (double)srcRate / engineRate          // samples to advance per output sample
 		: (double)srcFrames / (double)frames;   // fallback if rates unknown (old behaviour)

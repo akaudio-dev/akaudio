@@ -32,8 +32,8 @@ HlsPlaylist parseHlsPlaylist(const std::string& body);
 // Resolve a possibly-relative playlist/segment ref against the playlist URL.
 std::string urlJoin(const std::string& base, const std::string& ref);
 
-// Does this look like HLS? (.m3u8 path, or a body beginning with #EXTM3U.)
-bool looksLikeHls(const std::string& url, const std::string& body);
+// Does this look like HLS? (.m3u8 path, query string ignored.)
+bool looksLikeHls(const std::string& url);
 
 // Append the AAC ADTS elementary stream carried in MPEG-TS bytes to out.
 // Single-audio-program demux: finds the audio PES (stream_id 0xC0–0xDF) and

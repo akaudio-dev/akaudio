@@ -15,7 +15,6 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
-#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -88,6 +87,7 @@ private:
 	void run(std::string host, int port, std::string user, std::string pass);
 	void setState(State s, const std::string& msg = "");
 	void log(const std::string& msg);
+	void sendChatParts(const std::vector<std::string>& parts); // shared connected-guard + build + send
 	void sendChannelDecl();                               // SET_CHANNEL_INFO (real or filler)
 	void sendUploadInterval(int chidx, const std::vector<uint8_t>& ogg); // TX thread
 	static void makeGuid(unsigned char out[16]);
@@ -108,7 +108,6 @@ private:
 
 	Callbacks cb;
 	NjAudio audio;
-	std::map<std::string, uint32_t> subMask; // per-user subscribed-channel bitmask (SET_USERMASK)
 	std::vector<std::string> txChannels;     // declared local broadcast channels (names)
 	std::mutex sendMutex;                     // serialize socket sends across net + TX threads
 	std::mutex sockMutex;                     // makes stop()'s shutdown atomic with run()'s close

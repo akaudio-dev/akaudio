@@ -24,6 +24,7 @@ struct AacDecoder::Impl {
 	std::vector<uint8_t> inData;
 	std::vector<AudioStreamPacketDescription> inDescs;
 	bool consumed = false; // batch already returned by the input callback?
+	std::vector<float> out; // reused decode output buffer (capacity stabilizes after first batch)
 
 	std::function<void(const float*, int, double)>* onPCM = nullptr;
 
@@ -114,7 +115,8 @@ static void packetsProc(void* userData, UInt32 numBytes, UInt32 numPackets,
 	UInt32 framesPerPacket = impl->srcFmt.mFramesPerPacket ? impl->srcFmt.mFramesPerPacket : 1024;
 	UInt32 wantFrames = numPackets * framesPerPacket;
 
-	std::vector<float> out(static_cast<size_t>(wantFrames) * 2);
+	std::vector<float>& out = impl->out;
+	out.resize(static_cast<size_t>(wantFrames) * 2);
 	AudioBufferList abl;
 	abl.mNumberBuffers = 1;
 	abl.mBuffers[0].mNumberChannels = 2;

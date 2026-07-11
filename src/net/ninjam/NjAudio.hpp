@@ -63,7 +63,8 @@ public:
 
 	void onUserChannel(const std::string& user, int chidx, bool active, int volDb10, int pan);
 
-	void beginInterval(const std::string& user, int chidx, const uint8_t guid[16], uint32_t fourcc);
+	void beginInterval(const std::string& user, int chidx, const uint8_t guid[16], uint32_t fourcc,
+	                   uint32_t estSize = 0);
 	void writeInterval(const uint8_t guid[16], const uint8_t* data, size_t len, bool last);
 
 	void start();
@@ -112,7 +113,6 @@ private:
 	};
 	struct Transfer {
 		std::string chanKey;
-		uint32_t fourcc = 0;
 		bool ogg = false;
 		std::vector<uint8_t> bytes;
 	};

@@ -161,7 +161,6 @@ struct ResampleCtx {
 // Context handed to dr_mp3's read callback: serves the post-header leftover bytes
 // first, then reads directly from the socket (idle-bounded).
 struct ReadCtx {
-	StreamClient* self;
 	int fd;
 	const Tls* tls;
 	std::vector<char> leftover;
@@ -252,7 +251,7 @@ void StreamClient::run(std::string url) {
 	}
 
 	// HLS (.m3u8) is segment-based, not a continuous stream — handle separately.
-	if (looksLikeHls(url, "")) {
+	if (looksLikeHls(url)) {
 		runHls(url);
 		running.store(false, std::memory_order_release);
 		return;
@@ -385,8 +384,6 @@ void StreamClient::run(std::string url) {
 					break;
 			}
 			dec.close();
-			if (!abort.load(std::memory_order_acquire))
-				setStatus(State::Stopped, "Stream ended");
 #else
 			setStatus(State::Error, "AAC needs macOS");
 			goto cleanup;
@@ -394,11 +391,10 @@ void StreamClient::run(std::string url) {
 		}
 		else {
 			ReadCtx ctx;
-			ctx.self = this;
 			ctx.fd = fd;
 			ctx.tls = &tls;
 			ctx.abort = &abort;
-			ctx.leftover.assign(leftover.begin(), leftover.end());
+			ctx.leftover = std::move(leftover); // branches are exclusive; AAC never gets here
 
 			// Pass NULL seek/tell: this is a non-seekable live socket. With a seek
 			// callback dr_mp3 tries to rewind the first 10 bytes after its ID3v2
@@ -444,9 +440,11 @@ void StreamClient::run(std::string url) {
 			}
 
 			drmp3_uninit(&mp3);
-			if (!abort.load(std::memory_order_acquire))
-				setStatus(State::Stopped, "Stream ended");
 		}
+		// Shared epilogue for both decode paths: the loop fell out because the stream
+		// ended (on abort, stop() owns the terminal status).
+		if (!abort.load(std::memory_order_acquire))
+			setStatus(State::Stopped, "Stream ended");
 	}
 
 cleanup:

@@ -171,7 +171,7 @@ struct Radio : Module {
 		setImportMsg("Auditioning\xe2\x80\xa6", false);
 		importer.start(u, [this]() {
 			akaudio::StationImporter::Probe p;
-			p.state = (int) stream.getState();
+			p.state = stream.getState();
 			p.frames = stream.producedFrames();
 			p.status = stream.getStatusText();
 			return p;

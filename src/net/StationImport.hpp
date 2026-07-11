@@ -9,6 +9,8 @@
 #include <mutex>
 #include <atomic>
 
+#include "Stream.hpp"
+
 // Background "audition this stream URL" worker.
 //
 // Flow (off the UI thread): VERIFY the stream actually produces audio — not just
@@ -28,10 +30,10 @@ namespace akaudio {
 class StationImporter {
 public:
 	// A snapshot of the live stream, supplied by the caller each poll: the
-	// StreamClient state int (2 == Playing, 3 == Error), the producedFrames()
-	// counter, and the human status text (for a precise failure reason).
+	// StreamClient state, the producedFrames() counter, and the human status
+	// text (for a precise failure reason).
 	struct Probe {
-		int state = 0;
+		StreamClient::State state = StreamClient::State::Stopped;
 		uint64_t frames = 0;
 		std::string status;
 	};

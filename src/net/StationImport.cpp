@@ -17,10 +17,6 @@ namespace akaudio {
 
 namespace {
 
-// StreamClient::State values as the ints Probe carries.
-constexpr int kPlaying = (int) StreamClient::State::Playing;
-constexpr int kError = (int) StreamClient::State::Error;
-
 // Verification gate: how many stereo frames must flow before we trust the stream.
 // ~30k frames is ~0.7 s of real audio at 44.1/48 kHz, drained at playback speed.
 constexpr uint64_t kMinFrames = 30000;
@@ -123,13 +119,13 @@ void StationImporter::run() {
 		if (probe)
 			p = probe();
 		else
-			p.state = kError;
-		if (p.state == kError) {
+			p.state = StreamClient::State::Error;
+		if (p.state == StreamClient::State::Error) {
 			sawError = true;
 			errText = p.status;
 			break;
 		}
-		if (p.state == kPlaying)
+		if (p.state == StreamClient::State::Playing)
 			sawPlaying = true;
 		if (p.frames > 0 && !started) {
 			started = true;
