@@ -371,6 +371,25 @@ struct Ninjam : Module {
 		teardownJoin(); // njclient.stop() just joins the already-exited thread
 	}
 
+	// UI thread. The LISTEN (Icecast) stream hit a terminal error while we still believe we're
+	// listening. The common case: the room's listen mount is unpublished (HTTP 404) — people can
+	// be jamming on the NINJAM port while no source feeds Icecast, so there is simply nothing to
+	// play. Without this the socket connected (no connect-failure logged), the decoder produced
+	// zero frames, and the LED sat amber ("connecting") forever with no reason shown. Reconcile
+	// like handleServerDrop(): read the reason, tear the dead stream down (so the panel returns
+	// to the room browser and the LED leaves amber → red), and post the reason to the status bar.
+	bool listenFailed() {
+		return listening && stream.getState() == akaudio::StreamClient::State::Error;
+	}
+	void handleListenError() {
+		std::string why = stream.getStatusText(); // read before stop() (which resets status)
+		stream.stop();
+		listening = false;
+		disconnectNote = why.find("404") != std::string::npos
+			? std::string("Room's listen stream is offline")
+			: why.empty() ? std::string("Stream unavailable") : why;
+	}
+
 	// ---- Per-room actions (the loudspeaker / enter icons on each row) ----
 	void startListen(const akaudio::Room& room) {
 		stopAll();
@@ -1774,6 +1793,11 @@ struct NinjamWidget : ModuleWidget {
 		// the UI thread so the panel returns to the connect view and reports the reason.
 		if (nj && nj->joined && !nj->njclient.isRunning())
 			nj->handleServerDrop();
+		// Same idea for LISTEN: a terminal Icecast error (unpublished mount / 404 / server drop)
+		// while we still think we're listening → reconcile so the LED leaves amber, the reason
+		// shows on the status bar, and the room browser returns for another pick.
+		if (nj && nj->listenFailed())
+			nj->handleListenError();
 		bool joined = nj && nj->joined;
 		if (joinCard) joinCard->visible = !joined;
 		if (search) search->visible = !joined;
