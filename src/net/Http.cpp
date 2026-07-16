@@ -3,13 +3,11 @@
 
 #include "Socket.hpp"
 #include "Http.hpp"
+#include "Log.hpp"
 #include "Tls.hpp"
 
 #include <cctype>
 #include <cstring>
-#include <chrono>
-#include <thread>
-#include <vector>
 
 namespace akaudio {
 
@@ -102,8 +100,10 @@ long httpReadIdle(const Tls& tls, int fd, void* buf, size_t n,
 		if (r != -2)
 			return r; // >0 data, 0 EOF, -1 error
 		idleMs += sliceMs; // recv timed out with no data; retry within the budget
-		if (idleMs >= budgetMs)
+		if (idleMs >= budgetMs) {
+			netLog("read idle for " + std::to_string(budgetMs) + " ms — treating as end of stream");
 			return 0;
+		}
 	}
 }
 
@@ -171,7 +171,7 @@ bool httpOpen(const Url& u, const char* extraHeader, const std::atomic<bool>* ab
 	netSetRcvTimeout(fd, recvSliceMs);
 	netSetSndTimeout(fd, recvSliceMs);
 
-	if (u.tls && !tlsHandshake(out.tls, fd, u.host))
+	if (u.tls && !tlsHandshake(out.tls, fd, u.host)) // tlsHandshake logs the reason
 		return fail("TLS handshake failed");
 
 	std::string req =
@@ -197,11 +197,21 @@ bool httpOpen(const Url& u, const char* extraHeader, const std::atomic<bool>* ab
 		if (headerEnd != std::string::npos)
 			break;
 	}
-	if (headerEnd == std::string::npos)
+	if (headerEnd == std::string::npos) {
+		netLog("no HTTP response from " + u.host + ":" + u.port + u.path);
 		return fail("No HTTP response");
+	}
 
 	out.headers = head.substr(0, headerEnd);
 	out.leftover = head.substr(headerEnd + 4);
+	// Log only an ABNORMAL status line (4xx/5xx — e.g. a rotted station's 410
+	// Gone). Healthy 2xx/3xx are the expected case and stay silent, so log.txt
+	// volume scales with problems, not with traffic (HLS re-fetches segments
+	// every few seconds for hours).
+	std::string statusLine = out.headers.substr(0, out.headers.find("\r\n"));
+	if (statusLine.find(" 20") == std::string::npos
+			&& statusLine.find(" 30") == std::string::npos)
+		netLog("HTTP " + u.host + u.path + " → " + statusLine);
 	return true;
 }
 

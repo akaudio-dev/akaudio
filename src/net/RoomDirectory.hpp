@@ -68,6 +68,7 @@ private:
 	std::mutex mutex;
 	std::vector<Room> rooms_;
 	std::string status_ = "Not loaded";
+	std::string lastLogged_; // last netLog'd outcome (fetch thread only; log on change)
 
 	std::thread thread;
 	std::atomic<bool> loading_{false};

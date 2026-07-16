@@ -5,6 +5,7 @@
 #include "Http.hpp"
 #include "ImageCache.hpp"
 #include "Json.hpp"
+#include "Log.hpp"
 #include "Stream.hpp"
 
 #include <chrono>
@@ -115,6 +116,8 @@ void StationImporter::run() {
 			result_ = r;
 			status_ = status;
 		}
+		if (!ok) // successes are the expected case; only failures are log-worthy
+			netLog("audition FAILED (" + status + "): " + url);
 		generation_.fetch_add(1, std::memory_order_acq_rel);
 		running_.store(false, std::memory_order_release);
 	};

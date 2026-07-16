@@ -87,7 +87,7 @@ leakcheck: all
 	@echo "== build leak_stress (StreamClient: TLS/HTTP/HLS/AAC/MP3) =="
 	$(CXX) -std=c++11 -g -I src -I $(RACK_DIR)/dep/include test/leak_stress.cpp \
 	  build/src/net/Stream.cpp.o build/src/net/Http.cpp.o build/src/net/Tls.cpp.o \
-	  build/src/net/Socket.cpp.o \
+	  build/src/net/Socket.cpp.o build/src/net/Log.cpp.o \
 	  build/src/net/Hls.cpp.o build/src/net/AacDecoder.cpp.o build/src/dep/dr_mp3_impl.cpp.o \
 	  "$(RACK_ABS)/libRack.dylib" -undefined dynamic_lookup \
 	  -framework AudioToolbox -framework CoreFoundation -o "$(LEAKDIR)/leak_stress"
@@ -97,7 +97,7 @@ leakcheck: all
 	$(CXX) -std=c++11 -g $(LEAK_INC) test/njclient_test.cpp \
 	  build/src/net/ninjam/NjClient.cpp.o build/src/net/ninjam/NjProtocol.cpp.o \
 	  build/src/net/ninjam/NjAudio.cpp.o build/src/net/ninjam/NjEncoder.cpp.o \
-	  build/src/net/Socket.cpp.o \
+	  build/src/net/Socket.cpp.o build/src/net/Log.cpp.o \
 	  build/src/dep/stb_vorbis_impl.cpp.o $(OGGVORBIS_OBJ) \
 	  "$(RACK_ABS)/libRack.dylib" -undefined dynamic_lookup -o "$(LEAKDIR)/njclient_test"
 	install_name_tool -change libRack.dylib "$(RACK_ABS)/libRack.dylib" "$(LEAKDIR)/njclient_test"

@@ -4,6 +4,7 @@
 #include "RoomDirectory.hpp"
 #include "Http.hpp"
 #include "Json.hpp"
+#include "Log.hpp"
 
 #include <algorithm>
 
@@ -114,11 +115,25 @@ void RoomDirectory::fetch(unsigned bust) {
 		return a.pri < b.pri;
 	});
 
+	const bool healthy = ok && !parsed.empty();
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		if (ok)
 			rooms_ = std::move(parsed);
 		status_ = status;
+	}
+	// Log only FAILURES (fetch/parse failed, or an implausible empty directory),
+	// and only when the outcome changes — the 30 s re-poll must not tick
+	// identical lines into log.txt ("Fetch failed" logs once, not every 30 s
+	// until the network heals; a healthy fetch just clears the memory).
+	// fetch() runs one-at-a-time (loading_ guards it): plain member is fine.
+	if (!healthy) {
+		if (status != lastLogged_) {
+			netLog("room directory: " + status);
+			lastLogged_ = status;
+		}
+	} else {
+		lastLogged_.clear();
 	}
 	if (ok)
 		generation_.fetch_add(1, std::memory_order_acq_rel);

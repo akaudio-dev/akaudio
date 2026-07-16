@@ -119,6 +119,12 @@ Control flow rules:
   one path. `tlsRead` returns `-2` on would-block/timeout (vs `0` EOF / `-1` error) so
   `httpGet` can poll `abort` and retry. Cert verification **not enforced**
   (`SSL_VERIFY_NONE`) — fine for public audio; tighten if we ship a CA bundle.
+- `Log.{hpp,cpp}` — `netLog(msg)`: pluggable diagnostics for the Rack-free net/ layer.
+  **Logs only the abnormal** (failures with reasons+timings, unexpected stream endings,
+  idle timeouts) — the healthy path is silent, so a quiet `log.txt` means a healthy
+  plugin and every logged line deserves attention. plugin `init()` routes it into
+  Rack's `log.txt` (`akaudio.net:` lines); play_test routes it to stderr. Failure
+  triage = grep the log, no debugger. Never per-packet, never on the audio thread.
 - `ImageCache.{hpp,cpp}` — `cacheImage(bytes, dir, key)`: normalize a downloaded favicon
   to a stb-loadable file on disk. PNG/JPG/GIF pass through; `.ico` is parsed (embedded
   PNG used as-is, or a DIB frame wrapped in a BMP header) since NanoVG/stb can't read the
@@ -200,7 +206,7 @@ with undo).
   ```bash
   c++ -std=c++11 -I src -I $RACK_DIR/dep/include test/play_test.cpp \
     src/net/Stream.cpp src/net/Http.cpp src/net/Tls.cpp src/net/Hls.cpp src/net/AacDecoder.cpp \
-    src/net/Socket.cpp \
+    src/net/Socket.cpp src/net/Log.cpp \
     src/dep/dr_mp3_impl.cpp \
     $RACK_DIR/dep/lib/libssl.a $RACK_DIR/dep/lib/libcrypto.a \
     -framework AudioToolbox -framework CoreFoundation \

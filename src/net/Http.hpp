@@ -26,7 +26,7 @@ namespace akaudio {
 // the request is abandoned and false returned. A body larger than maxBytes is a
 // failure, not a truncation — callers fetching something known-small (a playlist)
 // can pass a tight cap to bail out fast when the URL turns out to be an endless
-// audio stream.
+// audio stream. Failures netLog their reason; success is silent.
 bool httpGet(const std::string& url, std::string& out, const std::atomic<bool>* abort = nullptr,
              size_t maxBytes = 4 << 20);
 

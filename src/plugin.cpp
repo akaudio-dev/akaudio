@@ -4,9 +4,11 @@
 #include "plugin.hpp"
 
 #include <csignal>
+#include <string>
 
 namespace akaudio {
 void netStartup(); // net/Socket.cpp — one-time Winsock init (no-op on POSIX)
+void netLogSetSink(void (*)(const std::string&)); // net/Log.cpp — diagnostics sink
 }
 
 Plugin* pluginInstance;
@@ -18,6 +20,11 @@ void init(Plugin* p) {
 
 	// Initialize Winsock once before any networking (no-op on macOS/Linux).
 	akaudio::netStartup();
+
+	// Route net-layer lifecycle diagnostics (connects, TLS/HTTP failures, stream
+	// endings — one-liners, never per-packet) into Rack's log.txt, so "why won't
+	// this station play?" is answerable from a user's log instead of a debugger.
+	akaudio::netLogSetSink([](const std::string& m) { INFO("akaudio.net: %s", m.c_str()); });
 
 	// Safety net: never let a write to a closed/shutdown socket terminate the host
 	// via SIGPIPE. Our sockets also set SO_NOSIGPIPE; this covers everything else

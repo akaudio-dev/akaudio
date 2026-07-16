@@ -7,10 +7,11 @@
 //
 // Build + run (from the plugin root; R = your RACK_DIR):
 //   c++ -std=c++11 -I src -I "$R/dep/include" \
-//     test/play_test.cpp src/net/Stream.cpp src/net/Tls.cpp \
-//     src/net/AacDecoder.cpp src/net/Http.cpp src/dep/dr_mp3_impl.cpp \
+//     test/play_test.cpp src/net/Stream.cpp src/net/Tls.cpp src/net/Hls.cpp \
+//     src/net/AacDecoder.cpp src/net/Http.cpp src/net/Socket.cpp src/net/Log.cpp \
+//     src/dep/dr_mp3_impl.cpp \
 //     "$R/dep/lib/libssl.a" "$R/dep/lib/libcrypto.a" \
-//     -framework AudioToolbox -framework CoreFoundation -framework AudioUnit \
+//     -framework AudioToolbox -framework CoreFoundation \
 //     -o build/play_test
 //   build/play_test [url] [seconds]
 //
@@ -19,6 +20,7 @@
 // Works for http/https, MP3/AAC, and .pls/.m3u playlist URLs.
 
 #include "../src/net/Stream.hpp"
+#include "../src/net/Log.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -30,6 +32,12 @@ int main(int argc, char** argv) {
 	std::string url = argc > 1 ? argv[1] : "http://ninbot.com/radio/2049";
 	double seconds = argc > 2 ? std::atof(argv[2]) : 5.0;
 	const double sr = 48000.0;
+
+	// Surface the net layer's lifecycle diagnostics (resolve/connect timings,
+	// HTTP status lines, failure reasons) — the same lines Rack puts in log.txt.
+	akaudio::netLogSetSink([](const std::string& m) {
+		std::fprintf(stderr, "  [net] %s\n", m.c_str());
+	});
 
 	std::printf("Stream: %s\n", url.c_str());
 	std::printf("Target: %.0f Hz for %.1f s\n\n", sr, seconds);

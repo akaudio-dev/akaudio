@@ -172,7 +172,8 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 // Resolve host:port and connect abortably (getaddrinfo + netConnectAbortable).
 // Returns the connected fd, or -1 with a human-readable reason in *errOut
 // ("Cannot resolve host" / "Connection failed"; check `abort` yourself to tell
-// an abort apart). Defined in Socket.cpp; the single resolve+connect preamble
+// an abort apart). Failures netLog with timings; success is silent (we log only
+// the abnormal). Defined in Socket.cpp; the single resolve+connect preamble
 // shared by Http, StreamClient, and NjClient.
 int netResolveConnect(const std::string& host, const std::string& port,
                       const std::atomic<bool>* abort, int timeoutMs,

@@ -4,6 +4,9 @@
 #include "Tls.hpp"
 
 #include "Socket.hpp"
+#include "Log.hpp"
+
+#include <chrono>
 
 #include <openssl/ssl.h>
 
@@ -35,7 +38,26 @@ bool tlsHandshake(Tls& t, int fd, const std::string& host) {
 	// SNI — most shared hosts need it to return the right certificate/vhost.
 	SSL_set_tlsext_host_name(ssl, host.c_str());
 
-	if (SSL_connect(ssl) != 1) {
+	// The socket carries SO_RCVTIMEO, so each timeout slice that expires
+	// mid-handshake surfaces as WANT_READ/WANT_WRITE. Retry within a wall-clock
+	// budget instead of failing on the first slice — a handshake on a slow or
+	// loaded network legitimately spans several slices, and giving up on the
+	// first was a source of spurious "TLS handshake failed". A concurrent stop()
+	// shutdown()s the fd, which turns the retry into a hard error immediately.
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+	for (;;) {
+		int r = SSL_connect(ssl);
+		if (r == 1)
+			break;
+		int err = SSL_get_error(ssl, r);
+		// SYSCALL+wouldblock = Windows WSAETIMEDOUT on an SO_RCVTIMEO slice (see
+		// tlsRead) — retryable exactly like WANT_READ/WANT_WRITE.
+		bool retryable = err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE
+			|| (err == SSL_ERROR_SYSCALL && netWouldBlock());
+		if (retryable && std::chrono::steady_clock::now() < deadline)
+			continue;
+		netLog("TLS handshake failed: " + host
+			+ (std::chrono::steady_clock::now() >= deadline ? " (timed out)" : ""));
 		SSL_free(ssl);
 		return false;
 	}
@@ -64,6 +86,12 @@ long tlsRead(const Tls& t, int fd, void* buf, size_t n) {
 		int err = SSL_get_error((SSL*) t.ssl, r);
 		if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
 			return -2; // timed out / would block
+		// Windows: an SO_RCVTIMEO expiry inside SSL_read surfaces as WSAETIMEDOUT,
+		// which OpenSSL's BIO does NOT consider retryable — it reports SYSCALL, not
+		// WANT_READ (POSIX EAGAIN takes the WANT_READ path above). Treat it as the
+		// same would-block so a ≥slice silent gap on an https stream isn't fatal.
+		if (err == SSL_ERROR_SYSCALL && netWouldBlock())
+			return -2;
 		if (err == SSL_ERROR_ZERO_RETURN)
 			return 0; // clean TLS close
 		return -1; // real error

@@ -15,6 +15,7 @@
 #include "AacDecoder.hpp"
 #include "Http.hpp"
 #include "Hls.hpp"
+#include "Log.hpp"
 
 namespace akaudio {
 
@@ -186,6 +187,12 @@ StreamClient::~StreamClient() {
 }
 
 void StreamClient::setStatus(State s, const std::string& text) {
+	// Log only the ABNORMAL: errors here, unexpected stream endings at the call
+	// sites that detect them. Playing/Stopped/Connecting are expected lifecycle
+	// and stay silent — a quiet log.txt means a healthy plugin. (Never on the
+	// audio thread; setStatus is only called from the bg thread and UI stop().)
+	if (s == State::Error)
+		netLog("stream ERROR: " + text);
 	state.store(s, std::memory_order_release);
 	std::lock_guard<std::mutex> lock(statusMutex);
 	statusText = text;
@@ -411,9 +418,13 @@ void StreamClient::run(std::string url) {
 			drmp3_uninit(&mp3);
 		}
 		// Shared epilogue for both decode paths: the loop fell out because the stream
-		// ended (on abort, stop() owns the terminal status).
-		if (!abort.load(std::memory_order_acquire))
+		// ended (on abort, stop() owns the terminal status). A live radio stream
+		// ending on its own is abnormal — worth a line (EOF, server drop, or the
+		// 30 s idle budget; httpReadIdle logs which when it was idleness).
+		if (!abort.load(std::memory_order_acquire)) {
+			netLog("stream ended unexpectedly: " + u.host);
 			setStatus(State::Stopped, "Stream ended");
+		}
 	}
 
 cleanup:
@@ -514,8 +525,12 @@ void StreamClient::runHls(std::string url) {
 	}
 
 	dec.close();
-	if (!abort.load(std::memory_order_acquire) && state.load(std::memory_order_acquire) != State::Error)
+	if (!abort.load(std::memory_order_acquire) && state.load(std::memory_order_acquire) != State::Error) {
+		// endList (a VOD finishing) is the one normal way here; anything else is
+		// an unexpected end of a live playlist.
+		netLog("HLS stream ended: " + mediaUrl);
 		setStatus(State::Stopped, "Stream ended");
+	}
 }
 
 } // namespace akaudio
