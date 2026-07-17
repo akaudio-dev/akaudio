@@ -162,10 +162,15 @@ inline bool netInterrupted() {
 }
 
 // Non-blocking connect across a getaddrinfo result that polls `abort` every
-// 100 ms, up to ~timeoutMs per address. Returns the connected fd (restored to
-// blocking mode) or -1. This is THE way to connect in this plugin: a dead/slow
-// host can never wedge a stop()/join() on the UI thread, because the loop
-// notices `abort` within 100 ms. Sets SO_NOSIGPIPE where available. Defined in
+// 100 ms, within ~timeoutMs TOTAL. Candidates are raced in PARALLEL with a
+// 300 ms stagger (happy-eyeballs, RFC 8305 in spirit): the first handshake to
+// complete wins and the rest are closed. This is what makes hosts with partly
+// dead DNS round-robin pools (RFI's live02 reflector: 5 of 12 addresses
+// black-holed, dead ones sorted first) connect in ~one RTT instead of eating
+// the whole timeout serially. Returns the connected fd (restored to blocking
+// mode) or -1. This is THE way to connect in this plugin: a dead/slow host can
+// never wedge a stop()/join() on the UI thread, because the loop notices
+// `abort` within 100 ms. Sets SO_NOSIGPIPE where available. Defined in
 // Socket.cpp; shared by Http, StreamClient, and NjClient.
 int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeoutMs = 6000);
 
