@@ -88,6 +88,12 @@ struct Ninjam : Module {
 	// The jam's Icecast/HTTP listen-stream URL (MP3). Set by picking a room or typing
 	// one; empty by default since rooms come and go.
 	std::string url = "";
+	// A second listen mount to try if `url` fails to connect: some rooms advertise a
+	// plain-http mount on a non-standard port that is firewalled/dead while their
+	// https mount (or vice-versa) is live. playUrl() prefers plain http, so this holds
+	// the room's ssl_stream (when it differs) as a one-shot fallback. Cleared once the
+	// primary connects or the fallback has been tried.
+	std::string listenAltUrl = "";
 	std::atomic<bool> listening{false};
 
 	// ---- JOIN (protocol) state ----
@@ -422,6 +428,7 @@ struct Ninjam : Module {
 	// Stop whatever is currently playing.
 	void stopAll() {
 		disconnectNote.clear(); // explicit user stop — nothing to report
+		listenAltUrl.clear();
 		if (listening) { stream.stop(); listening = false; }
 		if (joined)
 			teardownJoin();
@@ -458,6 +465,17 @@ struct Ninjam : Module {
 		std::string why = stream.getStatusText(); // read before stop() (which resets status)
 		stream.stop();
 		listening = false;
+		// One-shot fallback: if the primary mount was unreachable but the room also
+		// offers an https mount, try that before surfacing failure. Skip it on a 404 —
+		// an empty mount means nobody is feeding Icecast (jam happening on the NINJAM
+		// port only), and the alternate mount serves the same missing source.
+		if (!listenAltUrl.empty() && why.find("404") == std::string::npos) {
+			url = listenAltUrl;
+			listenAltUrl.clear();
+			listen();
+			return;
+		}
+		listenAltUrl.clear();
 		disconnectNote = why.find("404") != std::string::npos
 			? std::string("Room's listen stream is offline")
 			: why.empty() ? std::string("Stream unavailable") : why;
@@ -468,6 +486,10 @@ struct Ninjam : Module {
 		stopAll();
 		mode = MODE_LISTEN;
 		url = room.playUrl();
+		// If the room also advertises an https mount that differs from the one we're
+		// about to try, keep it as a fallback: the preferred plain-http mount is often
+		// on a non-standard port that a firewall drops while :443 stays reachable.
+		listenAltUrl = (!room.sslStream.empty() && room.sslStream != url) ? room.sslStream : "";
 		roomLabel = room.name.empty() ? room.host : room.name;
 		listen();
 	}
@@ -571,7 +593,9 @@ struct Ninjam : Module {
 	bool isActive() const { return listening || joined; }
 
 	bool isListeningTo(const akaudio::Room& room) const {
-		return listening && url == room.playUrl();
+		// Match either mount: after a fallback the active url is the room's ssl_stream.
+		return listening && (url == room.playUrl() ||
+		                     (!room.sslStream.empty() && url == room.sslStream));
 	}
 	bool isJoinedTo(const akaudio::Room& room) const {
 		return joined && joinHost == room.host && joinPort == room.port;
