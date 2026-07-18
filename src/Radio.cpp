@@ -75,6 +75,20 @@ static json_t* stationData(const std::string& url, const std::string& name,
 	return data;
 }
 
+// Favicon-cache icons are stored as a portable "cache:<file>" reference — never an
+// absolute path — so a shared patch or user preset can't leak the user's home dir
+// (and thus their account name). Bundled icons stay plugin-relative ("stations/x.png").
+// drawStationArt resolves all three forms; portableIcon() normalizes an absolute cache
+// path (as returned by the importer) into the shareable "cache:<file>" form.
+static const std::string kCacheIconPrefix = "cache:";
+
+static std::string portableIcon(const std::string& p) {
+	if (p.empty() || p[0] != '/')
+		return p; // already portable: bundled-relative or an existing cache: ref
+	size_t slash = p.rfind('/');
+	return kCacheIconPrefix + (slash == std::string::npos ? p : p.substr(slash + 1));
+}
+
 // Streaming internet radio (Icecast/HTTP MP3) source. Audio is fetched and decoded
 // on a background thread (net/Stream.hpp) and pulled here on the audio thread.
 struct Radio : Module {
@@ -277,14 +291,19 @@ static bool drawStationArt(NVGcontext* vg, const std::string& iconPath,
 		float x, float y, float w, float h, float radius) {
 	if (iconPath.empty())
 		return false;
-	// An absolute path = a runtime-cached favicon (importer); otherwise it's a
-	// bundled plugin-relative path under res/. Cache the resolution — this runs
-	// per UI frame and asset::plugin() concatenates a fresh string each call.
+	// "cache:<file>" = a runtime-cached favicon in the user favicon dir; a leading '/'
+	// = a legacy absolute path (older saved patches, still resolved); otherwise a bundled
+	// plugin-relative path under res/. Cache the resolution — this runs per UI frame and
+	// asset::user()/asset::plugin() concatenate a fresh string each call.
 	static std::string lastIcon, lastFile; // UI thread only
 	if (iconPath != lastIcon) {
 		lastIcon = iconPath;
-		lastFile = iconPath[0] == '/'
-			? iconPath : asset::plugin(pluginInstance, "res/" + iconPath);
+		if (iconPath.compare(0, kCacheIconPrefix.size(), kCacheIconPrefix) == 0)
+			lastFile = asset::user("akaudio-stations/" + iconPath.substr(kCacheIconPrefix.size()));
+		else if (iconPath[0] == '/')
+			lastFile = iconPath;
+		else
+			lastFile = asset::plugin(pluginInstance, "res/" + iconPath);
 	}
 	std::shared_ptr<window::Image> img = APP->window->loadImage(lastFile);
 	if (!img || img->handle < 0)
@@ -769,14 +788,14 @@ struct RadioWidget : ModuleWidget {
 						module->rollback();
 					} else if (r.identified) {
 						module->stationName = r.name;
-						module->icon = r.iconPath;
+						module->icon = portableIcon(r.iconPath);
 						module->needName = false;
-						module->setImportMsg(saveUserStation(module, r.name, r.url, r.iconPath), false);
+						module->setImportMsg(saveUserStation(module, r.name, r.url, module->icon), false);
 					} else {
 						// Verified but unknown: play it, await a name to save.
 						module->stationName = "Unknown station";
-						module->icon = r.iconPath;
-						module->pendingIcon = r.iconPath;
+						module->icon = portableIcon(r.iconPath);
+						module->pendingIcon = module->icon;
 						module->needName = true;
 						module->setImportMsg(r.status, false);
 					}

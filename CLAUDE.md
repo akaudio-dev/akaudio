@@ -201,10 +201,15 @@ with undo).
   Rack's factory-preset folder convention. At runtime, users add their own by pasting a
   URL (the importer writes a `.vcvm` to the user preset dir → shows under "Your stations").
 - **Artwork:** `icon` is either a plugin-relative bundled PNG (`res/stations/<id>.png`,
-  256²) or, for importer-fetched favicons, an **absolute path** in the user favicon cache
-  (`drawStationArt` treats a leading `/` as absolute). NanoVG decodes png/jpg/gif/bmp but
-  **not .ico** (so `ImageCache` converts those). Rendered on the panel (`StationArt`) and
-  as picker thumbnails (`StationItem`, green ring = current); no usable art → synth avatar.
+  256²) or, for importer-fetched favicons, a portable `cache:<file>` reference into the
+  user favicon dir (`asset::user("akaudio-stations")`). `drawStationArt` resolves all
+  three: `cache:` → the favicon dir, a leading `/` → a legacy absolute path (older saved
+  patches), else `res/`. **Never persist an absolute favicon path** — it embeds the user's
+  home dir (account name) and would leak in a shared patch/preset; `portableIcon()`
+  normalizes the importer's absolute path to `cache:<file>` before it's stored. NanoVG
+  decodes png/jpg/gif/bmp but **not .ico** (so `ImageCache` converts those). Rendered on
+  the panel (`StationArt`) and as picker thumbnails (`StationItem`, green ring = current);
+  no usable art → synth avatar.
 
 ## Test harnesses (`test/`, no Rack link)
 
