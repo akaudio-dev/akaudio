@@ -22,4 +22,10 @@ namespace akaudio {
 void netLogSetSink(void (*sink)(const std::string&));
 void netLog(const std::string& msg);
 
+// Scrub a URL before it's logged or shown: drop any userinfo (scheme://user:pass@host
+// → scheme://host) and any query string (may carry session tokens), so credentials and
+// tokens never reach log.txt — a file users routinely attach to support requests. Keeps
+// scheme/host/path for triage. Accepts a bare "host/path" too (no scheme required).
+std::string redactUrl(const std::string& url);
+
 } // namespace akaudio

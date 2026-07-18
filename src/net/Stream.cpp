@@ -319,7 +319,7 @@ void StreamClient::run(std::string url) {
 		}
 		u = probe;
 		if (!u.ok) {
-			setStatus(State::Error, "Bad redirect: " + loc);
+			setStatus(State::Error, "Bad redirect: " + redactUrl(loc));
 			goto cleanup;
 		}
 	}
@@ -545,7 +545,7 @@ void StreamClient::runHls(std::string url) {
 	if (!abort.load(std::memory_order_acquire) && state.load(std::memory_order_acquire) != State::Error) {
 		// endList (a VOD finishing) is the one normal way here; anything else is
 		// an unexpected end of a live playlist.
-		netLog("HLS stream ended: " + mediaUrl);
+		netLog("HLS stream ended: " + redactUrl(mediaUrl));
 		setStatus(State::Stopped, "Stream ended");
 	}
 }

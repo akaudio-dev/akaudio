@@ -205,7 +205,7 @@ bool httpOpen(const Url& u, const char* extraHeader, const std::atomic<bool>* ab
 			break;
 	}
 	if (headerEnd == std::string::npos) {
-		netLog("no HTTP response from " + u.host + ":" + u.port + u.path);
+		netLog("no HTTP response from " + redactUrl(u.host + ":" + u.port + u.path));
 		return fail("No HTTP response");
 	}
 
@@ -218,7 +218,7 @@ bool httpOpen(const Url& u, const char* extraHeader, const std::atomic<bool>* ab
 	std::string statusLine = out.headers.substr(0, out.headers.find("\r\n"));
 	if (statusLine.find(" 20") == std::string::npos
 			&& statusLine.find(" 30") == std::string::npos)
-		netLog("HTTP " + u.host + u.path + " → " + statusLine);
+		netLog("HTTP " + redactUrl(u.host + u.path) + " → " + statusLine);
 	return true;
 }
 
