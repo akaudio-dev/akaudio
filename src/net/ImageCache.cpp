@@ -134,9 +134,13 @@ bool icoToImage(const std::string& b, std::string& out, std::string& ext) {
 
 	uint32_t palette = 0;
 	if (bpp <= 8) {
-		uint32_t colors = clrUsed ? clrUsed : (1u << bpp);
-		palette = colors * 4; // BGRA entries
+		uint32_t maxColors = 1u << bpp;            // ≤ 256 for a palettized DIB
+		uint32_t colors = clrUsed ? clrUsed : maxColors;
+		if (colors > maxColors)
+			colors = maxColors;                    // clamp a bogus/hostile biClrUsed so
+		palette = colors * 4;                      // colors*4 (≤1024) can't overflow uint32
 	}
+	// dibSize is already bounded by frame.size(); palette ≤ 1024 — no overflow here.
 	uint32_t dataOff = 14 + dibSize + palette;
 
 	std::string bmp;
