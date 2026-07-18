@@ -276,8 +276,10 @@ void StreamClient::run(std::string url) {
 	// request to a rotating edge server), so the audio path must chase Location
 	// like httpGet does — a fixed target URL would be wrong, not just stale.
 	for (int hop = 0; ; hop++) {
+		// hop 0 is the user's chosen station URL (may be LAN/localhost); redirect
+		// targets (hop > 0) are blocked from private/internal addresses (SSRF guard).
 		if (!httpOpen(u, "Icy-MetaData: 0", &abort, 8000, kRecvSliceMs, kIdleBudgetMs,
-				&sock, conn, &openErr)) {
+				&sock, conn, &openErr, /*blockPrivate=*/hop > 0)) {
 			bool wasAborted = abort.load(std::memory_order_acquire);
 			setStatus(wasAborted ? State::Stopped : State::Error, wasAborted ? "Stopped" : openErr);
 			goto cleanup;
@@ -290,17 +292,25 @@ void StreamClient::run(std::string url) {
 
 		// Close this hop (atomic with stop()'s concurrent shutdown) and chase the
 		// redirect.
+		bool wasTls = u.tls;
 		sock.closeOwned();
 		tlsFree(conn.tls);
 		conn = HttpConn{};
 
 		url = urlJoin(url, loc);
+		// Refuse a https→http downgrade: a MITM/redirector must not strip TLS mid-chain.
+		Url probe = parseUrl(url);
+		if (wasTls && probe.ok && !probe.tls) {
+			netLog("stream redirect BLOCKED: https\xe2\x86\x92http downgrade to " + probe.host);
+			setStatus(State::Error, "Blocked insecure redirect");
+			goto cleanup;
+		}
 		if (looksLikeHls(url)) { // a redirector may land on an HLS playlist
 			runHls(url);
 			running.store(false, std::memory_order_release);
 			return;
 		}
-		u = parseUrl(url);
+		u = probe;
 		if (!u.ok) {
 			setStatus(State::Error, "Bad redirect: " + loc);
 			goto cleanup;

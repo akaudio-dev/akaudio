@@ -180,9 +180,13 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 // an abort apart). Failures netLog with timings; success is silent (we log only
 // the abnormal). Defined in Socket.cpp; the single resolve+connect preamble
 // shared by Http, StreamClient, and NjClient.
+// When blockPrivate is true (redirect targets — see the SSRF guard), the connect is
+// REFUSED if the host resolves to any private/loopback/link-local address (RFC1918,
+// 127/8, 169.254/16 incl. cloud metadata, ::1, fc00::/7, …). Left false for the user's
+// own entered URL, which may legitimately be a LAN/localhost stream.
 int netResolveConnect(const std::string& host, const std::string& port,
                       const std::atomic<bool>* abort, int timeoutMs,
-                      std::string* errOut = nullptr);
+                      std::string* errOut = nullptr, bool blockPrivate = false);
 
 // A socket fd shared between its owning background thread and another thread that
 // must interrupt a blocked recv/send on it (the UI thread's stop()). The owner

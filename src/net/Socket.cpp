@@ -5,6 +5,7 @@
 #include "Log.hpp"
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <thread>
 
@@ -186,6 +187,42 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 
 namespace {
 
+// Classify a resolved address as private/loopback/link-local/unspecified — the
+// destinations a malicious HTTP redirect would steer us toward (cloud metadata at
+// 169.254.169.254, localhost, RFC1918 LAN, IPv6 ULA). Bytes are read directly in
+// network order so no ntohl/<arpa/inet.h> is needed (portable to Winsock).
+bool isPrivateOrLoopback(const sockaddr* sa) {
+	if (!sa)
+		return false;
+	if (sa->sa_family == AF_INET) {
+		const uint8_t* b = (const uint8_t*) &((const sockaddr_in*) sa)->sin_addr.s_addr;
+		if (b[0] == 127) return true;                        // 127.0.0.0/8 loopback
+		if (b[0] == 10) return true;                         // 10.0.0.0/8
+		if (b[0] == 172 && (b[1] & 0xf0) == 16) return true; // 172.16.0.0/12
+		if (b[0] == 192 && b[1] == 168) return true;         // 192.168.0.0/16
+		if (b[0] == 169 && b[1] == 254) return true;         // 169.254.0.0/16 link-local (metadata)
+		if (b[0] == 0) return true;                          // 0.0.0.0/8
+		if (b[0] == 100 && (b[1] & 0xc0) == 64) return true; // 100.64.0.0/10 CGNAT
+		return false;
+	}
+	if (sa->sa_family == AF_INET6) {
+		const in6_addr& a = ((const sockaddr_in6*) sa)->sin6_addr;
+		if (IN6_IS_ADDR_LOOPBACK(&a) || IN6_IS_ADDR_LINKLOCAL(&a)
+				|| IN6_IS_ADDR_UNSPECIFIED(&a))
+			return true;
+		if ((a.s6_addr[0] & 0xfe) == 0xfc) return true; // fc00::/7 unique-local
+		if (IN6_IS_ADDR_V4MAPPED(&a)) {                 // ::ffff:a.b.c.d — check the v4
+			const uint8_t* b = a.s6_addr + 12;
+			if (b[0] == 127 || b[0] == 10 || b[0] == 0) return true;
+			if (b[0] == 172 && (b[1] & 0xf0) == 16) return true;
+			if (b[0] == 192 && b[1] == 168) return true;
+			if (b[0] == 169 && b[1] == 254) return true;
+		}
+		return false;
+	}
+	return false;
+}
+
 // One in-flight getaddrinfo. There is no portable way to cancel getaddrinfo, so
 // it runs on its own detached thread and the caller waits abortably; on timeout
 // or abort the job is ABANDONED — the resolver thread finishes on its own time,
@@ -250,7 +287,7 @@ addrinfo* resolveAbortable(const std::string& host, const std::string& port,
 } // namespace
 
 int netResolveConnect(const std::string& host, const std::string& port,
-		const std::atomic<bool>* abort, int timeoutMs, std::string* errOut) {
+		const std::atomic<bool>* abort, int timeoutMs, std::string* errOut, bool blockPrivate) {
 	using clock = std::chrono::steady_clock;
 	auto ms = [](clock::time_point a, clock::time_point b) {
 		return (int) std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
@@ -266,6 +303,22 @@ int netResolveConnect(const std::string& host, const std::string& port,
 		if (errOut)
 			*errOut = "Cannot resolve host";
 		return -1;
+	}
+
+	// SSRF guard for redirect targets: refuse if the host resolves to any private/
+	// loopback/link-local address. Conservative (refuse on ANY such address, not just
+	// the first) so a rebinding response that mixes public + internal can't slip through.
+	if (blockPrivate) {
+		for (addrinfo* ai = res; ai; ai = ai->ai_next) {
+			if (isPrivateOrLoopback(ai->ai_addr)) {
+				::freeaddrinfo(res);
+				netLog("connect " + host + " BLOCKED: redirect resolves to a private/"
+					"loopback address (SSRF guard)");
+				if (errOut)
+					*errOut = "Blocked redirect to a private address";
+				return -1;
+			}
+		}
 	}
 
 	int fd = netConnectAbortable(res, abort, timeoutMs);

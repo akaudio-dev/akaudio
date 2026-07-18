@@ -112,7 +112,13 @@ Control flow rules:
   **Bounded + interruptible** so a caller that `join()`s its thread (StreamClient on a
   station switch) never freezes: non-blocking connect, `SO_RCVTIMEO` + an idle ceiling
   (a silent peer can't hang `recv`), and the optional `abort` flag bails an in-flight
-  request fast. Follows redirects (recovers http→https favicons).
+  request fast. Follows up to 5 redirects (recovers http→https favicons) with two
+  **SSRF guards**: redirect targets (hop > 0, not the caller's own URL) are refused if
+  they resolve to a private/loopback/link-local address (`netResolveConnect(...,
+  blockPrivate=true)` → `isPrivateOrLoopback` in `Socket.cpp`: RFC1918, 127/8,
+  169.254/16 incl. cloud metadata, ::1, fc00::/7, v4-mapped), and a `https→http`
+  downgrade on any hop is refused. Same guards apply to the audio redirect loop in
+  `Stream.cpp`. The user's own entered URL may still be LAN/localhost (hop 0 unguarded).
 - `Tls.{hpp,cpp}` — minimal TLS over a connected fd using the **OpenSSL `libRack`
   exports** (resolved via `-undefined dynamic_lookup`, no new dep). SNI handshake;
   `tlsRead`/`tlsWrite` fall back to plain `recv`/`send` when inactive so http/https share

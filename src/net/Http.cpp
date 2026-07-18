@@ -151,7 +151,7 @@ void closeConn(HttpConn& c) {
 
 bool httpOpen(const Url& u, const char* extraHeader, const std::atomic<bool>* abort,
 		int connectTimeoutMs, int recvSliceMs, int idleBudgetMs,
-		GuardedFd* sockOut, HttpConn& out, std::string* err) {
+		GuardedFd* sockOut, HttpConn& out, std::string* err, bool blockPrivate) {
 	auto fail = [&](const std::string& e) {
 		if (err)
 			*err = e;
@@ -159,7 +159,7 @@ bool httpOpen(const Url& u, const char* extraHeader, const std::atomic<bool>* ab
 	};
 
 	std::string connErr;
-	int fd = netResolveConnect(u.host, u.port, abort, connectTimeoutMs, &connErr);
+	int fd = netResolveConnect(u.host, u.port, abort, connectTimeoutMs, &connErr, blockPrivate);
 	if (fd < 0)
 		return fail(connErr);
 	// From here on the caller owns the socket (see the header contract) — publish
@@ -225,7 +225,10 @@ bool httpGet(const std::string& url, std::string& out, const std::atomic<bool>* 
 			return false;
 
 		HttpConn c;
-		if (!httpOpen(u, "Accept: */*", abort, 6000, kGetSliceMs, kGetIdleBudgetMs, nullptr, c)) {
+		// hop 0 is the caller's own URL (may legitimately be LAN/localhost); redirect
+		// targets (hop > 0) are blocked from private/internal addresses (SSRF guard).
+		if (!httpOpen(u, "Accept: */*", abort, 6000, kGetSliceMs, kGetIdleBudgetMs, nullptr, c,
+				nullptr, /*blockPrivate=*/hop > 0)) {
 			closeConn(c);
 			return false;
 		}
@@ -234,10 +237,18 @@ bool httpGet(const std::string& url, std::string& out, const std::atomic<bool>* 
 		// Redirects: 301/302/303/307/308 with a Location header.
 		if (statusLine.find(" 30") != std::string::npos) {
 			std::string loc = headerValue(c.headers, "location");
+			bool wasTls = u.tls;
 			closeConn(c);
 			if (loc.empty())
 				return false;
-			current = urlJoin(current, loc);
+			std::string next = urlJoin(current, loc);
+			// Refuse a https→http downgrade: an on-path attacker (or malicious
+			// redirector) must not be able to strip TLS on a later hop.
+			if (wasTls && parseUrl(next).tls == false) {
+				netLog("redirect BLOCKED: https\xe2\x86\x92http downgrade");
+				return false;
+			}
+			current = next;
 			continue;
 		}
 		if (statusLine.find("200") == std::string::npos) {

@@ -81,8 +81,11 @@ struct HttpConn {
 // failure — httpOpen never closes a connected fd (a publisher's stop() may be
 // racing us on it). Returns true when the headers were read; false with a reason
 // in *err.
+// blockPrivate (default false) forwards to netResolveConnect: set true for a redirect
+// target so it can't be pointed at a private/loopback/internal address (SSRF guard).
 bool httpOpen(const Url& u, const char* extraHeader, const std::atomic<bool>* abort,
               int connectTimeoutMs, int recvSliceMs, int idleBudgetMs,
-              GuardedFd* sockOut, HttpConn& out, std::string* err = nullptr);
+              GuardedFd* sockOut, HttpConn& out, std::string* err = nullptr,
+              bool blockPrivate = false);
 
 } // namespace akaudio
