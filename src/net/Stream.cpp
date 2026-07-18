@@ -55,7 +55,14 @@ std::string firstPlaylistUrl(const std::string& body) {
 		if (h == std::string::npos)
 			continue;
 		std::string u = line.substr(h);
-		while (!u.empty() && (u.back() == '\r' || u.back() == ' ' || u.back() == '\t'))
+		// Truncate at the first control byte (the trailing '\r' of a \r\n line ending,
+		// or a CR maliciously embedded mid-URL to smuggle a header), then trim trailing
+		// whitespace. parseUrl also rejects control bytes; this keeps a benign \r\n
+		// playlist working while never emitting a URL with an embedded CR/LF.
+		size_t ctl = u.find_first_of("\r\n");
+		if (ctl != std::string::npos)
+			u = u.substr(0, ctl);
+		while (!u.empty() && (u.back() == ' ' || u.back() == '\t'))
 			u.pop_back();
 		if (!u.empty())
 			return u;

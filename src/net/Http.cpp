@@ -13,6 +13,13 @@ namespace akaudio {
 
 Url parseUrl(const std::string& url) {
 	Url u;
+	// A valid URL carries no raw control bytes. Reject any (CR/LF and other C0, plus
+	// DEL) so a bare CR or CRLF smuggled in via a playlist line or a redirect Location
+	// can't splice extra headers into the "GET …\r\nHost: …" request built from u.
+	// (A legitimately intended %0D stays literal '%','0','D' — those are fine.)
+	for (unsigned char c : url)
+		if (c < 0x20 || c == 0x7f)
+			return u; // u.ok stays false
 	std::string s;
 	if (url.rfind("https://", 0) == 0) {
 		u.tls = true;
