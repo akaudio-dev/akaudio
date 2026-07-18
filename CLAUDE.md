@@ -123,8 +123,15 @@ Control flow rules:
   exports** (resolved via `-undefined dynamic_lookup`, no new dep). SNI handshake;
   `tlsRead`/`tlsWrite` fall back to plain `recv`/`send` when inactive so http/https share
   one path. `tlsRead` returns `-2` on would-block/timeout (vs `0` EOF / `-1` error) so
-  `httpGet` can poll `abort` and retry. Cert verification **not enforced**
-  (`SSL_VERIFY_NONE`) — fine for public audio; tighten if we ship a CA bundle.
+  `httpGet` can poll `abort` and retry. Cert verification is **deliberately not
+  enforced** (`SSL_VERIFY_NONE`) — a considered choice, not an oversight: these sockets
+  carry only **public audio** and **no credentials** (NINJAM auth is its own separate
+  plaintext-TCP protocol, never over this TLS), so the residual MITM risk is *content
+  injection*, not credential theft — and the injection amplifiers are closed elsewhere
+  (redirect **SSRF** to private/internal hosts and **https→http downgrade** are both
+  blocked in `Http.cpp`/`Stream.cpp`). Enforcing verification would require bundling a CA
+  file (~230 KB) and would break legitimately-misconfigured stream servers for no
+  credential-protection gain. Revisit only if a future path ever sends a secret over TLS.
 - `Log.{hpp,cpp}` — `netLog(msg)`: pluggable diagnostics for the Rack-free net/ layer.
   **Logs only the abnormal** (failures with reasons+timings, unexpected stream endings,
   idle timeouts) — the healthy path is silent, so a quiet `log.txt` means a healthy

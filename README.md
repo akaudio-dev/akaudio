@@ -42,18 +42,31 @@ except the connections listed below, only while a module is active.
   [radio-browser.info](https://www.radio-browser.info) to fetch the station's real name,
   then downloads its icon from the station's own server. The icon is cached as a file in
   your Rack user folder; nothing about you is uploaded.
-- **Room browser** — fetches the public list of NINJAM rooms from ninbot.com.
+- **Room browser** — fetches the public list of NINJAM rooms from ninbot.com **only when
+  you open the list** (hit Refresh, click into it, or type in the filter). Simply adding a
+  Ninjam module or opening a patch that contains one never contacts ninbot on its own.
 
 **Outgoing — this sends your audio and text to a server and other people:**
 
 - **Ninjam (JOIN)** — connects to the NINJAM server you choose (anonymous login) and
   **transmits the audio on the module's input jacks** so other participants in the room
   can hear it, in real time. Any **chat** messages you send go to the same server. Only
-  use JOIN when you intend to be heard; LISTEN never transmits.
+  use JOIN when you intend to be heard; LISTEN never transmits. Transmitting is always an
+  explicit choice you make each session — loading a patch never starts broadcasting on its
+  own, even if it was saved while transmitting.
+
+**Your credentials stay on your machine.** A NINJAM server login (username and password)
+is saved only in a local file in your Rack user folder (owner-readable only), **never
+written into a saved patch** — so sharing a `.vcv` patch never leaks your password or the
+list of servers you've joined. Registered-server passwords are protected on the wire by
+NINJAM's challenge-response, but the NINJAM protocol itself is unencrypted, so treat room
+chat and audio as public and don't reuse a valuable password on a NINJAM server.
 
 Stream and server connections use TLS when the server offers it, but server certificates
-are **not currently verified** (`SSL_VERIFY_NONE`) — appropriate for public audio and
-jamming, not for anything sensitive.
+are **not currently verified** (`SSL_VERIFY_NONE`) — a deliberate choice appropriate for
+public audio and jamming (no passwords travel over these connections), not for anything
+sensitive. Redirects to private/internal addresses and TLS-stripping downgrades are
+refused.
 
 ## License
 
