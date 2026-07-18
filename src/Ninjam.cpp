@@ -765,7 +765,9 @@ struct Ninjam : Module {
 		json_object_set_new(root, "joined", json_boolean(joined));
 		json_object_set_new(root, "clickEnabled", json_boolean(clickEnabled));
 		json_object_set_new(root, "clockPpqn", json_integer(clockPpqn.load(std::memory_order_relaxed)));
-		json_object_set_new(root, "transmitting", json_boolean(transmitting));
+		// NOTE: `transmitting` is deliberately NOT persisted — broadcasting your live audio
+		// input must be a fresh, explicit per-session choice, never something a loaded patch
+		// silently resumes. txQuality (a setting, not a trigger) is fine to keep.
 		json_object_set_new(root, "txQuality", json_real(txQuality));
 		return root;
 	}
@@ -794,12 +796,14 @@ struct Ninjam : Module {
 			clickEnabled = json_boolean_value(j);
 		if (json_t* j = json_object_get(root, "clockPpqn"))
 			clockPpqn.store((int) json_integer_value(j), std::memory_order_relaxed);
-		if (json_t* j = json_object_get(root, "transmitting"))
-			transmitting = json_boolean_value(j);
+		// Transmit always starts OFF on load (not persisted, above) — a loaded patch may
+		// auto-rejoin a room but must never auto-broadcast the user's input.
+		transmitting = false;
 		if (json_t* j = json_object_get(root, "txQuality"))
 			txQuality = (float) json_real_value(j);
 
-		// Auto-resume on patch load.
+		// Auto-resume on patch load (JOIN reconnects to the local default server; the
+		// user's audio is NOT transmitted until they click TX — see transmitting above).
 		if (mode == MODE_JOIN && joined) {
 			joined = false; // joinStart() sets it
 			joinStart();

@@ -166,8 +166,9 @@ Control flow rules:
 ## Persistence
 
 Per-instance state via `dataToJson`/`dataFromJson` (Radio persists `url`/`stationName`/
-`icon`/`playing` and auto-resumes; Ninjam persists `mode`/`joined`/`transmitting` and a
-LISTEN `roomLabel`, then auto-resumes). The slug strings in `plugin.json` and
+`icon`/`playing` and auto-resumes; Ninjam persists `mode`/`joined` and a LISTEN
+`roomLabel`, then auto-resumes — but **never** `transmitting`, so a loaded patch may
+rejoin a room yet never auto-broadcasts the user's live input; TX is always a fresh click). The slug strings in `plugin.json` and
 `createModel(...)` are permanent identity — never rename once patches reference them.
 
 **NINJAM credentials never go in a patch.** The join server host/port, username, and
