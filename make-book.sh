@@ -11,9 +11,10 @@ mkdir -p "$HERE/build"
 go build -C "$TW" -o "$HERE/build/trusty_weaver" .
 
 cd "$HERE"
-# Files in deliberate reading order: identity -> realtime bridge -> streaming
-# core -> transport/codec layers -> Radio's image cache + add-from-URL import ->
-# room directory -> NINJAM protocol stack -> the two modules.
+# Files in deliberate reading order: identity -> realtime bridge -> socket shim
+# + diagnostics -> streaming core -> transport/codec layers -> Radio's image
+# cache + add-from-URL import -> room directory -> NINJAM protocol stack ->
+# UI helpers -> the two modules.
 build/trusty_weaver \
   -title "AK Audio" \
   -subtitle "A VCV Rack plugin" \
@@ -23,12 +24,17 @@ build/trusty_weaver \
   src/plugin.hpp \
   src/plugin.cpp \
   src/net/RingBuffer.hpp \
+  src/net/Socket.hpp \
+  src/net/Socket.cpp \
+  src/net/Log.hpp \
+  src/net/Log.cpp \
   src/net/Stream.hpp \
   src/net/Stream.cpp \
   src/net/Tls.hpp \
   src/net/Tls.cpp \
   src/net/Http.hpp \
   src/net/Http.cpp \
+  src/net/Json.hpp \
   src/net/AacDecoder.hpp \
   src/net/AacDecoder.cpp \
   src/net/Hls.hpp \
@@ -47,6 +53,7 @@ build/trusty_weaver \
   src/net/ninjam/NjEncoder.cpp \
   src/net/ninjam/NjClient.hpp \
   src/net/ninjam/NjClient.cpp \
+  src/Theme.hpp \
   src/ClickableLed.hpp \
   src/Radio.cpp \
   src/Ninjam.cpp
