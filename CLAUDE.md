@@ -97,8 +97,9 @@ Control flow rules:
   - `producedFrames()` counts frames actually decoded+pushed (resets on `start()`), so
     callers tell "audio is flowing" from merely "decoder inited / connected" — used for
     the honest LED and for verifying an auditioned URL.
-  - Sockets set `SO_NOSIGPIPE`; the plugin also `signal(SIGPIPE, SIG_IGN)`s in `init()`
-    (a write to a `shutdown()`-ed socket otherwise terminates the host, no crash report).
+  - Sockets set `SO_NOSIGPIPE`; `netStartup()` also `signal(SIGPIPE, SIG_IGN)`s lazily on
+    the first connect (a write to a `shutdown()`-ed socket otherwise terminates the host,
+    no crash report).
   - **Codec chosen at runtime** from `Content-Type`: AAC (`audio/aac`/`aacp`) → AAC path;
     else MP3 via dr_mp3. Both feed the same resampler + backpressure push.
   - **Non-seekable MP3 init (critical):** `drmp3_init` is called with **NULL** seek/tell
@@ -269,7 +270,9 @@ link* on every platform**, not just macOS.
   - **Windows sockets = Winsock2, not POSIX.** The net/ layer's BSD-socket calls are mapped
     onto Winsock2 by `src/net/Socket.{hpp,cpp}` (a thin compat shim: `netClose`/`netShutdown`/
     `netSetNonBlocking`/timeout/`netWouldBlock`/`netConnectInProgress`/`netErrorStr`, plus
-    `char*` buffer casts and `WSAStartup` from `init()`). The Makefile adds `-lws2_32`
+    `char*` buffer casts and lazy `WSAStartup` on first connect — per VCV Library review,
+    network init happens only when a Module needs it, never in plugin `init()`). The
+    Makefile adds `-lws2_32`
     (`ifdef ARCH_WIN`). Keep new socket code going through the shim, not raw POSIX calls.
   - **macOS-only AAC/HLS** (`AacDecoder`/`Hls`, AudioToolbox) are `ifdef ARCH_MAC`-guarded
     in the Makefile and degrade gracefully off-mac (no AAC/HLS, MP3 still works) — compiles

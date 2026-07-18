@@ -5,6 +5,7 @@
 #include "Log.hpp"
 
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <memory>
 #include <thread>
@@ -12,14 +13,27 @@
 namespace akaudio {
 
 void netStartup() {
+	// Lazy one-time process-wide setup, run on the first actual connect attempt —
+	// never at plugin load (the VCV Library requires network init to happen only
+	// when a Module needs it). Thread-safe: first callers may race in from
+	// concurrent bg threads, so use a magic static (C++11 guarantees one run).
+	static const bool once = [] {
 #ifdef _WIN32
-	static bool done = false;
-	if (!done) {
 		WSADATA wsa;
 		WSAStartup(MAKEWORD(2, 2), &wsa);
-		done = true; // never WSACleanup(): Winsock is needed for the whole process life
-	}
+		// never WSACleanup(): Winsock is needed for the whole process life
 #endif
+#ifdef SIGPIPE
+		// Safety net: never let a write to a closed/shutdown socket terminate the
+		// host via SIGPIPE. Our sockets also set SO_NOSIGPIPE where available; this
+		// covers everything else (e.g. Ninjam transmit) regardless of platform.
+		// Default SIGPIPE action kills the process and leaves no crash report.
+		// (Windows has no SIGPIPE.)
+		std::signal(SIGPIPE, SIG_IGN);
+#endif
+		return true;
+	}();
+	(void) once;
 }
 
 int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeoutMs) {
@@ -288,6 +302,11 @@ addrinfo* resolveAbortable(const std::string& host, const std::string& port,
 
 int netResolveConnect(const std::string& host, const std::string& port,
 		const std::atomic<bool>* abort, int timeoutMs, std::string* errOut, bool blockPrivate) {
+	// Every outbound connection funnels through here (Http, Stream, NjClient), so
+	// this is the single spot where lazy network init is guaranteed to precede
+	// any resolve/socket call.
+	netStartup();
+
 	using clock = std::chrono::steady_clock;
 	auto ms = [](clock::time_point a, clock::time_point b) {
 		return (int) std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();

@@ -47,10 +47,11 @@
 
 namespace akaudio {
 
-// One-time Winsock initialization (no-op on POSIX). Idempotent and thread-safe
-// enough for our use (called from init() before any socket work). Defined in
-// Socket.cpp so callers that can't include <winsock2.h> (plugin.cpp pulls in Rack
-// headers / <windows.h>) can just forward-declare and call it.
+// One-time process-wide network setup: Winsock init (no-op on POSIX) + SIGPIPE
+// ignore. Idempotent and thread-safe (magic static). Called lazily from
+// netResolveConnect on the first actual connect attempt — NOT from the plugin's
+// init(); the VCV Library requires network initialization to happen only when a
+// Module needs it, never at plugin load. Defined in Socket.cpp.
 void netStartup();
 
 // Close a socket fd.
