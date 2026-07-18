@@ -84,6 +84,18 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 			int fd = (int) ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
 			if (fd < 0)
 				continue; // e.g. no IPv6 support for an AAAA candidate; try the next
+#ifndef _WIN32
+			// POSIX fd_set is a bitmap indexed by the fd VALUE, so FD_SET on an fd
+			// >= FD_SETSIZE is a stack out-of-bounds write. Only reachable with ~1024
+			// descriptors already open; skip the candidate rather than corrupt memory.
+			// (Windows fd_set is a count-bounded array — npending < FD_SETSIZE covers it.)
+			if (fd >= FD_SETSIZE) {
+				netLog("connect: socket fd " + std::to_string(fd)
+					+ " >= FD_SETSIZE, skipping candidate (too many open descriptors)");
+				netClose(fd);
+				continue;
+			}
+#endif
 #ifdef SO_NOSIGPIPE
 			// Make writes to a peer-closed socket return EPIPE instead of raising
 			// SIGPIPE (which would kill the host). Not defined on Linux/Windows;
