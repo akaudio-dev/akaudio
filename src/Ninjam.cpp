@@ -162,9 +162,19 @@ struct Ninjam : Module {
 	std::vector<ChatLine> chatLog;
 	std::atomic<unsigned> chatGen{0}; // bumped on append so the UI can auto-scroll to newest
 	static constexpr size_t CHAT_MAX = 200;
-	void pushChat(const ChatLine& l) {
+	void pushChat(ChatLine l) {
+		// Defensive caps: a hostile/buggy server can send arbitrarily long chat, topic,
+		// or name strings (NINJAM frames run up to 16 MiB). Without a bound, 200 retained
+		// lines could hold ~GBs and the UI thread's per-frame wrapText would stall the GUI.
+		static constexpr size_t MAX_WHO = 128, MAX_TEXT = 2000;
+		if (l.who.size() > MAX_WHO)
+			l.who.resize(MAX_WHO);
+		if (l.text.size() > MAX_TEXT) {
+			l.text.resize(MAX_TEXT);
+			l.text += "\xe2\x80\xa6"; // "…"
+		}
 		std::lock_guard<std::mutex> lk(chatMutex);
-		chatLog.push_back(l);
+		chatLog.push_back(std::move(l));
 		if (chatLog.size() > CHAT_MAX)
 			chatLog.erase(chatLog.begin(), chatLog.begin() + (chatLog.size() - CHAT_MAX));
 		chatGen.fetch_add(1, std::memory_order_release);
