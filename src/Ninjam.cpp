@@ -242,7 +242,9 @@ struct Ninjam : Module {
 		stream.setSampleRate(sr);
 		njclient.setSampleRate(sr);
 		loadGlobal(); // prefill a fresh module from the last-used server/creds/history
-		directory.refresh();
+		// NOTE: do NOT fetch the room directory here. Contacting ninbot.com must be
+		// user-initiated (Refresh, a click in the room list, or focusing search), so
+		// merely adding the module or opening a patch that contains one never phones home.
 	}
 
 	// Point the active join fields (host/port/user/pass) at a stored "host:port".
@@ -1103,12 +1105,32 @@ struct RoomBrowser : ui::ScrollWidget {
 		container->box.size = Vec(w, y);
 	}
 
+	// True once the room list has been loaded (or is loading) — i.e. the user has
+	// asked for it at least once. Used to gate the periodic refresh so the FIRST
+	// ninbot fetch is always user-initiated, never automatic.
+	bool directoryEngaged() const {
+		return module && (module->directory.generation() > 0 || module->directory.loading());
+	}
+
+	// User asked to see the room list (clicked it / focused search): kick the first
+	// fetch if one hasn't happened yet. No-op once loaded — step() keeps it fresh.
+	void requestLoad() {
+		if (module && module->directory.generation() == 0 && !module->directory.loading())
+			module->directory.refresh();
+	}
+
+	void onButton(const ButtonEvent& e) override {
+		requestLoad(); // first interaction with the room list loads it
+		ui::ScrollWidget::onButton(e);
+	}
+
 	void step() override {
 		// Rack steps hidden widgets too; the browser is hidden while joined/listening,
 		// so gate the background directory refresh (and the row rebuild) on visibility —
-		// no point fetching ninbot every 30 s for a list nobody can see.
+		// no point fetching ninbot every 30 s for a list nobody can see. Only keep an
+		// already-engaged list fresh; the first fetch comes from requestLoad(), not here.
 		if (module && visible) {
-			if (++refreshTimer >= 60 * 30) { // ~30 s at 60 fps
+			if (directoryEngaged() && ++refreshTimer >= 60 * 30) { // ~30 s at 60 fps
 				refreshTimer = 0;
 				module->directory.refresh();
 			}
@@ -1132,9 +1154,13 @@ struct RoomBrowser : ui::ScrollWidget {
 		nvgStroke(args.vg);
 		ui::ScrollWidget::draw(args);
 		if (container->children.empty()) {
-			std::string msg = (module && module->directory.loading())
-				? "Loading rooms\xe2\x80\xa6"
-				: "No rooms \xe2\x80\x94 try Refresh";
+			std::string msg;
+			if (module && module->directory.loading())
+				msg = "Loading rooms\xe2\x80\xa6";
+			else if (module && module->directory.generation() == 0)
+				msg = "Click or Refresh to load rooms"; // not fetched yet (user-initiated)
+			else
+				msg = "No rooms \xe2\x80\x94 try Refresh";
 			drawTxt(args.vg, FONT_REG, box.size.x / 2, box.size.y / 2, 13.f,
 				TH_TEXT_DIM, msg, NVG_ALIGN_CENTER);
 		}
@@ -1143,8 +1169,16 @@ struct RoomBrowser : ui::ScrollWidget {
 
 // Compact search box.
 struct SearchField : ui::TextField {
+	Ninjam* module = nullptr;
 	SearchField() {
 		placeholder = "Filter rooms or players\xe2\x80\xa6";
+	}
+	void onSelect(const SelectEvent& e) override {
+		// Focusing the filter is a user-initiated request for the list — load it if the
+		// directory hasn't been fetched yet (keeps the first ninbot contact user-driven).
+		if (module && module->directory.generation() == 0 && !module->directory.loading())
+			module->directory.refresh();
+		ui::TextField::onSelect(e);
 	}
 };
 
@@ -1790,6 +1824,7 @@ struct NinjamWidget : ModuleWidget {
 		joinCard = card;
 
 		SearchField* s = new SearchField;
+		s->module = module;
 		s->box.pos = Vec(8, 100);
 		s->box.size = Vec(W - 8 - 40, 20);
 		addChild(s);

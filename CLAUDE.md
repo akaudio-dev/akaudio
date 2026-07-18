@@ -142,7 +142,11 @@ Control flow rules:
 - `RoomDirectory.{hpp,cpp}` — background directory of public NINJAM rooms. `refresh()`
   fetches+parses `http://ninbot.com/app/servers.php` (jansson) into a mutex-guarded
   `vector<Room>`; UI reads `rooms()`/`status()` instantly. `Room.playUrl()` is the http
-  MP3 mount (ssl_stream ignored).
+  MP3 mount (ssl_stream ignored). **Privacy: the first fetch must be user-initiated** —
+  the module ctor does NOT call `refresh()`, so adding the module or opening a patch never
+  contacts ninbot. The room browser loads on an explicit action (Refresh button/menu, a
+  click in the list, or focusing search) and only then does the 30 s auto-refresh keep the
+  loaded list fresh (gated on `generation()>0 || loading()`).
 - `ninjam/` — the NINJAM protocol stack:
   - `NjProtocol.{hpp,cpp}` — wire format (`[type u8][size u32 LE][payload]`, NUL-term
     UTF-8 strings, LE ints), message build/parse, SHA1 auth
