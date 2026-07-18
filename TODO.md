@@ -42,8 +42,11 @@ build, not packaging. Process + rules are in `CLAUDE.md` → "Publishing to the 
 - [x] **Manifest polish** — done 2026-06-30. `manualUrl` → `docs/MANUAL.md` (new user
       manual), `changelogUrl` → `CHANGELOG.md` (new, Keep-a-Changelog 2.0.0 entry).
       `donateUrl` intentionally left empty.
-- [ ] **Flip the repo to public**, then open **one** issue on `VCVRack/library` titled
-      `akaudio` (the slug, not "AK Audio") with the source URL.
+- [x] **Flip the repo to public**, then open **one** issue on `VCVRack/library` titled
+      `akaudio` (the slug, not "AK Audio") with the source URL. **Done 2026-07-18** — repo
+      public; submission issue [VCVRack/library#934](https://github.com/VCVRack/library/issues/934)
+      opened at commit `5898fcd`. Awaiting maintainer review/build/publish. For every later
+      release: bump `version`, push, then **comment on #934** with the new version + commit hash.
 
 ## Radio
 
