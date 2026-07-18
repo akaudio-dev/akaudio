@@ -12,8 +12,12 @@
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <map>
 #include <mutex>
 #include <vector>
+#ifndef ARCH_WIN
+#include <sys/stat.h> // chmod: keep the plaintext-password config owner-only
+#endif
 
 // NINJAM module — two ways to be in a jam:
 //
@@ -28,6 +32,20 @@
 //    hears us. Room chat works both ways.
 //
 // Both feed the same lock-free ring → process() just pull()s from whichever is active.
+// Split a "host:port" string (port defaults to the NINJAM default 2049 if absent/bad).
+static void parseHostPort(const std::string& s, std::string& host, int& port) {
+	size_t colon = s.rfind(':');
+	if (colon != std::string::npos) {
+		host = s.substr(0, colon);
+		port = std::atoi(s.substr(colon + 1).c_str());
+	} else {
+		host = s;
+		port = 0;
+	}
+	if (port <= 0)
+		port = 2049;
+}
+
 struct Ninjam : Module {
 	enum ParamId {
 		PARAMS_LEN
@@ -81,6 +99,10 @@ struct Ninjam : Module {
 	std::atomic<bool> joined{false};
 	// Most-recent-first "host:port" of servers we've joined, for the panel dropdown.
 	std::vector<std::string> serverHistory;
+	// Per-server credentials keyed by "host:port". Persisted ONLY in the global file
+	// (loadGlobal/saveGlobal), never in a patch — a shared .vcv carries no password.
+	struct ServerCred { std::string user, pass; };
+	std::map<std::string, ServerCred> serverCreds;
 
 	// ---- Beat clock + metronome (meaningful only when joined to a tempo) ----
 	std::atomic<bool> clickEnabled{false}; // metronome audible-click toggle (persisted)
@@ -223,36 +245,20 @@ struct Ninjam : Module {
 		directory.refresh();
 	}
 
-	// The join server/credentials/history fields are persisted in two places — per
-	// patch (dataToJson) and cross-instance (saveGlobal) — through this one pair of
-	// helpers so the field lists can't drift.
-	void joinStateToJson(json_t* root) {
-		json_object_set_new(root, "joinHost", json_string(joinHost.c_str()));
-		json_object_set_new(root, "joinPort", json_integer(joinPort));
-		json_object_set_new(root, "joinUser", json_string(joinUser.c_str()));
-		json_object_set_new(root, "joinPass", json_string(joinPass.c_str()));
-		json_t* hist = json_array();
-		for (const std::string& s : serverHistory)
-			json_array_append_new(hist, json_string(s.c_str()));
-		json_object_set_new(root, "serverHistory", hist);
-	}
-	void joinStateFromJson(json_t* root) {
-		joinHost = jsonStr(json_object_get(root, "joinHost"), joinHost);
-		if (json_t* j = json_object_get(root, "joinPort"))
-			joinPort = (int) json_integer_value(j);
-		joinUser = jsonStr(json_object_get(root, "joinUser"), joinUser);
-		joinPass = jsonStr(json_object_get(root, "joinPass"), joinPass);
-		if (json_t* hist = json_object_get(root, "serverHistory")) {
-			serverHistory.clear();
-			size_t i; json_t* v;
-			json_array_foreach(hist, i, v)
-				if (const char* s = json_string_value(v)) serverHistory.push_back(s);
-		}
+	// Point the active join fields (host/port/user/pass) at a stored "host:port".
+	void applyServer(const std::string& hp) {
+		std::string host; int port = 2049;
+		parseHostPort(hp, host, port);
+		joinHost = host;
+		joinPort = port > 0 ? port : 2049;
+		auto it = serverCreds.find(hp);
+		joinUser = it != serverCreds.end() ? it->second.user : "";
+		joinPass = it != serverCreds.end() ? it->second.pass : "";
 	}
 
-	// Global (cross-instance) recall of the last server/credentials/history, so a brand-new
-	// module is prefilled. Stored in the Rack user dir. dataFromJson (a saved patch) still
-	// overrides these per-instance. Note: the password is stored here in plaintext (local).
+	// Cross-instance recall of joined servers + their credentials. Persisted ONLY here,
+	// in the Rack user dir — a saved patch (dataToJson) carries NONE of this, so a shared
+	// .vcv can't leak the user's NINJAM password, username, or private-server list.
 	static std::string globalConfigPath() { return asset::user("akaudio-ninjam.json"); }
 
 	void loadGlobal() {
@@ -260,15 +266,70 @@ struct Ninjam : Module {
 		json_t* root = json_load_file(globalConfigPath().c_str(), 0, &err);
 		if (!root)
 			return;
-		joinStateFromJson(root);
+		serverHistory.clear();
+		serverCreds.clear();
+		if (json_t* servers = json_object_get(root, "servers")) {
+			// Current format: ordered array of {host, port, user, pass}, most-recent-first.
+			size_t i; json_t* v;
+			json_array_foreach(servers, i, v) {
+				std::string host = jsonStr(json_object_get(v, "host"));
+				if (host.empty())
+					continue;
+				int port = 2049;
+				if (json_t* p = json_object_get(v, "port"))
+					port = (int) json_integer_value(p);
+				std::string hp = host + ":" + std::to_string(port);
+				serverHistory.push_back(hp);
+				serverCreds[hp] = { jsonStr(json_object_get(v, "user")),
+				                    jsonStr(json_object_get(v, "pass")) };
+			}
+		} else {
+			// Legacy format (pre-2026-07): one flat credential + a bare host:port history.
+			// Migrate it into the keyed store so an existing user keeps their saved login.
+			std::string host = jsonStr(json_object_get(root, "joinHost"));
+			int port = 2049;
+			if (json_t* p = json_object_get(root, "joinPort"))
+				port = (int) json_integer_value(p);
+			std::string user = jsonStr(json_object_get(root, "joinUser"));
+			std::string pass = jsonStr(json_object_get(root, "joinPass"));
+			if (json_t* hist = json_object_get(root, "serverHistory")) {
+				size_t i; json_t* v;
+				json_array_foreach(hist, i, v)
+					if (const char* s = json_string_value(v)) serverHistory.push_back(s);
+			}
+			if (!host.empty()) {
+				std::string hp = host + ":" + std::to_string(port);
+				if (std::find(serverHistory.begin(), serverHistory.end(), hp) == serverHistory.end())
+					serverHistory.insert(serverHistory.begin(), hp);
+				serverCreds[hp] = { user, pass };
+			}
+		}
 		json_decref(root);
+		if (!serverHistory.empty())
+			applyServer(serverHistory.front()); // prefill from the most-recent server
 	}
 
 	void saveGlobal() {
 		json_t* root = json_object();
-		joinStateToJson(root);
+		json_t* servers = json_array();
+		for (const std::string& hp : serverHistory) {
+			std::string host; int port = 2049;
+			parseHostPort(hp, host, port);
+			json_t* e = json_object();
+			json_object_set_new(e, "host", json_string(host.c_str()));
+			json_object_set_new(e, "port", json_integer(port));
+			auto it = serverCreds.find(hp);
+			json_object_set_new(e, "user", json_string(it != serverCreds.end() ? it->second.user.c_str() : ""));
+			json_object_set_new(e, "pass", json_string(it != serverCreds.end() ? it->second.pass.c_str() : ""));
+			json_array_append_new(servers, e);
+		}
+		json_object_set_new(root, "servers", servers);
 		json_dump_file(root, globalConfigPath().c_str(), JSON_INDENT(2));
 		json_decref(root);
+#ifndef ARCH_WIN
+		// The file holds the plaintext NINJAM password — keep it owner-read/write only.
+		chmod(globalConfigPath().c_str(), S_IRUSR | S_IWUSR);
+#endif
 	}
 
 	// NjClient callbacks (fire on its background thread). Keep them light.
@@ -457,8 +518,10 @@ struct Ninjam : Module {
 		resyncBeat.store(true, std::memory_order_release);
 		njclient.start(joinHost, joinPort, joinUser, joinPass, jamCallbacks());
 		joined = true;
-		addServerHistory(joinHost + ":" + std::to_string(joinPort));
-		saveGlobal(); // remember this server/creds for the next fresh module
+		std::string hp = joinHost + ":" + std::to_string(joinPort);
+		serverCreds[hp] = { joinUser, joinPass };
+		addServerHistory(hp);
+		saveGlobal(); // remember this server + its credentials for the next fresh module
 	}
 
 	// Declare/update our broadcast channels to match the TX toggle + connected poly input.
@@ -486,8 +549,11 @@ struct Ninjam : Module {
 		if (it != serverHistory.end())
 			serverHistory.erase(it);
 		serverHistory.insert(serverHistory.begin(), hp);
-		if (serverHistory.size() > 12)
+		if (serverHistory.size() > 12) {
+			for (size_t i = 12; i < serverHistory.size(); i++)
+				serverCreds.erase(serverHistory[i]); // drop credentials for evicted servers
 			serverHistory.resize(12);
+		}
 	}
 
 	bool isActive() const { return listening || joined; }
@@ -689,9 +755,13 @@ struct Ninjam : Module {
 		json_t* root = json_object();
 		json_object_set_new(root, "mode", json_integer(mode));
 		json_object_set_new(root, "url", json_string(url.c_str()));
-		json_object_set_new(root, "roomLabel", json_string(roomLabel.c_str()));
+		// roomLabel echoes the private join host in JOIN mode — keep it out of the patch
+		// (re-derived on load); persist it only for LISTEN, where it's a public room name.
+		if (mode == MODE_LISTEN)
+			json_object_set_new(root, "roomLabel", json_string(roomLabel.c_str()));
 		json_object_set_new(root, "listening", json_boolean(listening));
-		joinStateToJson(root);
+		// NOTE: join server/username/password are deliberately NOT persisted here — they
+		// live only in the global file (saveGlobal), so a shared patch leaks no credentials.
 		json_object_set_new(root, "joined", json_boolean(joined));
 		json_object_set_new(root, "clickEnabled", json_boolean(clickEnabled));
 		json_object_set_new(root, "clockPpqn", json_integer(clockPpqn.load(std::memory_order_relaxed)));
@@ -714,9 +784,12 @@ struct Ninjam : Module {
 		roomLabel = jsonStr(json_object_get(root, "roomLabel"), roomLabel);
 		if (json_t* j = json_object_get(root, "listening"))
 			listening = json_boolean_value(j);
-		joinStateFromJson(root);
+		// Join server/creds are not in the patch; they came from loadGlobal() in the ctor.
+		// Re-derive the JOIN panel label from the prefilled host so the panel isn't blank.
 		if (json_t* j = json_object_get(root, "joined"))
 			joined = json_boolean_value(j);
+		if (mode == MODE_JOIN && !joinHost.empty())
+			roomLabel = joinHost;
 		if (json_t* j = json_object_get(root, "clickEnabled"))
 			clickEnabled = json_boolean_value(j);
 		if (json_t* j = json_object_get(root, "clockPpqn"))
@@ -738,19 +811,6 @@ struct Ninjam : Module {
 };
 
 // Parse "host[:port]" into host + port (default 2049).
-static void parseHostPort(const std::string& s, std::string& host, int& port) {
-	size_t colon = s.rfind(':');
-	if (colon != std::string::npos) {
-		host = s.substr(0, colon);
-		port = std::atoi(s.substr(colon + 1).c_str());
-	} else {
-		host = s;
-		port = 0;
-	}
-	if (port <= 0)
-		port = 2049;
-}
-
 // Shared connect action for the in-panel Direct Join card: pulls username/password from
 // their fields and the host:port from the server field, then joins (private/registered
 // servers that aren't in the public directory).
@@ -1436,6 +1496,8 @@ struct JamView : Widget {
 struct ServerDropdownButton : HoverButton {
 	Ninjam* module = nullptr;
 	ui::TextField* serverField = nullptr;
+	ui::TextField* userField = nullptr;
+	ui::TextField* passField = nullptr;
 	void onPress(const ButtonEvent& e) override {
 		if (!module) {
 			OpaqueWidget::onButton(e);
@@ -1446,8 +1508,19 @@ struct ServerDropdownButton : HoverButton {
 			menu->addChild(createMenuLabel("No previous servers"));
 		} else {
 			ui::TextField* sf = serverField;
+			ui::TextField* uf = userField;
+			ui::TextField* pf = passField;
+			Ninjam* m = module;
 			for (const std::string& hp : module->serverHistory)
-				menu->addChild(createMenuItem(hp, "", [sf, hp]() { if (sf) sf->text = hp; }));
+				menu->addChild(createMenuItem(hp, "", [sf, uf, pf, m, hp]() {
+					if (sf) sf->text = hp;
+					// Recall the stored username/password for that server.
+					auto it = m->serverCreds.find(hp);
+					if (it != m->serverCreds.end()) {
+						if (uf) uf->text = it->second.user;
+						if (pf) pf->text = it->second.pass;
+					}
+				}));
 		}
 		e.consume(this);
 	}
@@ -1517,6 +1590,8 @@ struct JoinCard : Widget {
 		ServerDropdownButton* drop = new ServerDropdownButton;
 		drop->module = module;
 		drop->serverField = serverField;
+		drop->userField = userField;
+		drop->passField = passField;
 		drop->box.pos = Vec(inner + serverW + gap, 5);
 		drop->box.size = Vec(dropW, 18);
 		addChild(drop);

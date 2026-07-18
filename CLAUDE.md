@@ -166,9 +166,18 @@ Control flow rules:
 ## Persistence
 
 Per-instance state via `dataToJson`/`dataFromJson` (Radio persists `url`/`stationName`/
-`icon`/`playing` and auto-resumes; Ninjam persists last server/credentials/room). The slug
-strings in `plugin.json` and `createModel(...)` are permanent identity — never rename once
-patches reference them.
+`icon`/`playing` and auto-resumes; Ninjam persists `mode`/`joined`/`transmitting` and a
+LISTEN `roomLabel`, then auto-resumes). The slug strings in `plugin.json` and
+`createModel(...)` are permanent identity — never rename once patches reference them.
+
+**NINJAM credentials never go in a patch.** The join server host/port, username, and
+password are persisted **only** in the global file `asset::user("akaudio-ninjam.json")`
+(`0600`), as an ordered, per-server keyed store (`servers[]`, most-recent-first, cap 12,
+recalled by `host:port` in the panel dropdown). `dataToJson` deliberately omits all of it
+(and omits `roomLabel` in JOIN mode, since it echoes the private host), so a shared `.vcv`
+leaks no credentials. On patch load the module reconnects to the local default server from
+that file, not one named by the patch. The old flat single-credential format is migrated
+on first load.
 
 ## Stations = factory presets (Radio)
 
