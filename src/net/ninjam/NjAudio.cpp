@@ -319,10 +319,18 @@ void NjAudio::stop() {
 	ring.requestClear();
 }
 
-// Transmit: pull complete intervals from each channel's capture ring, encode, hand up.
+// Transmit: accumulate each channel's captured frames into interval buffers, encode, hand up.
 void NjAudio::txLoop() {
 	int serial = 1;
-	std::vector<float> interleaved;
+	// Per-channel partial-interval accumulators (interleaved stereo). Filled
+	// incrementally from the capture rings, so an interval LONGER than a ring still
+	// encodes — e.g. 32 BPI at 80 BPM = 24 s = 1,152,000 samples @48k, more than the
+	// 1<<20-frame ring. Requiring a whole interval to sit in the ring at once (the
+	// old scheme) silently killed transmit in any such room: the ring filled, pushes
+	// dropped, and no interval ever completed. Now the ring only ever holds the
+	// short gap between drains.
+	std::vector<std::vector<float>> acc(txCapture.size());
+	int accN = 0; // interval length the accumulators are gridded to
 	// This thread is the capture rings' consumer, so it owns discarding stale
 	// audio: drain at start (a previous session's tail) and while TX is off
 	// (so re-enabling starts a fresh, downbeat-aligned interval, instead of
@@ -331,33 +339,52 @@ void NjAudio::txLoop() {
 		for (auto& c : txCapture)
 			if (c) c->drain();
 	};
+	auto clearAcc = [&]() {
+		for (auto& a : acc)
+			a.clear();
+	};
 	drainCapture();
 	while (!abort.load(std::memory_order_acquire)) {
 		int N = intervalSamples.load(std::memory_order_relaxed);
 		int n = nTx.load(std::memory_order_relaxed);
 		if (!txActive.load(std::memory_order_acquire)) {
 			drainCapture();
+			clearAcc();
 			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 			continue;
 		}
-		if (N <= 0 || n <= 0 || N > (1 << 20)) {
+		// Same sanity ceiling as the decode side (recomputeIntervalLocked): reject only
+		// a truly broken tempo (~87 s @48k), never a legitimate long interval.
+		if (N <= 0 || n <= 0 || N > (1 << 22)) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 			continue;
+		}
+		if (N != accN) {
+			// Tempo / sample-rate re-grid: partial intervals are gridded to the old
+			// length — drop them (with the pending ring tail) rather than upload a
+			// mislengthed interval.
+			accN = N;
+			clearAcc();
+			drainCapture();
 		}
 		double sr = sampleRate.load(std::memory_order_relaxed);
 		bool didAny = false;
 		for (int ch = 0; ch < n && ch < (int) txCapture.size(); ch++) {
-			if (!txCapture[ch] || txCapture[ch]->size() < (size_t) N)
-				continue; // not a full interval captured yet
-			interleaved.resize((size_t) N * 2);
-			for (int i = 0; i < N; i++) {
-				float l = 0.f, r = 0.f;
-				txCapture[ch]->pull(l, r);
-				interleaved[(size_t) i * 2] = l;
-				interleaved[(size_t) i * 2 + 1] = r;
+			if (!txCapture[ch])
+				continue;
+			// Move whatever the audio thread captured since the last pass into this
+			// channel's accumulator (never past one interval boundary).
+			std::vector<float>& a = acc[ch];
+			float l = 0.f, r = 0.f;
+			while (a.size() < (size_t) N * 2 && txCapture[ch]->pull(l, r)) {
+				a.push_back(l);
+				a.push_back(r);
 			}
-			std::vector<uint8_t> ogg = encodeOggInterval(interleaved.data(), N, 2, (int) sr,
+			if (a.size() < (size_t) N * 2)
+				continue; // interval not complete yet
+			std::vector<uint8_t> ogg = encodeOggInterval(a.data(), N, 2, (int) sr,
 				txQuality.load(std::memory_order_relaxed), serial++);
+			a.clear();
 			if (!ogg.empty() && onUploadInterval)
 				onUploadInterval(ch, ogg);
 			didAny = true;
