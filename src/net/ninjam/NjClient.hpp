@@ -69,8 +69,14 @@ public:
 
 	// ---- Transmit ----
 	// Declare local broadcast channels (by name) + encoder quality; (re)sends
-	// SET_CHANNEL_INFO if already connected. Empty list = listen-only.
-	void setTransmit(const std::vector<std::string>& channelNames, float quality);
+	// SET_CHANNEL_INFO if already connected. Empty list = listen-only. `voice` marks
+	// the channels as NINJAM voice chat (flags bit 2): we upload rolling ~2 s
+	// intervals immediately (no beat grid) and receivers play them live.
+	void setTransmit(const std::vector<std::string>& channelNames, float quality,
+	                 bool voice = false);
+	// Audio thread: (re)align interval capture to the room grid at a beat boundary
+	// (beatIndex of beatCount elapsed → that much of the interval prefills as silence).
+	void armTransmit(int beatIndex, int beatCount) { audio.armTransmit(beatIndex, beatCount); }
 	// Audio thread: push one captured stereo frame for local channel `ch`.
 	void captureFrame(int ch, float l, float r) { audio.captureFrame(ch, l, r); }
 
@@ -90,7 +96,11 @@ private:
 	void log(const std::string& msg);
 	void sendChatParts(const std::vector<std::string>& parts); // shared connected-guard + build + send
 	void sendChannelDecl();                               // SET_CHANNEL_INFO (real or filler)
-	void sendUploadInterval(int chidx, const std::vector<uint8_t>& ogg); // TX thread
+	// Streamed upload (TX thread): BEGIN announces a fresh per-channel GUID, then the
+	// interval's bytes follow as chunked WRITEs while it is still being captured; the
+	// final chunk (last=true) closes it.
+	void sendUploadBegin(int chidx);
+	void sendUploadData(int chidx, const uint8_t* data, size_t len, bool last);
 	static void makeGuid(unsigned char out[16]);
 
 	bool sendAll(const std::vector<uint8_t>& data);
@@ -109,7 +119,9 @@ private:
 
 	Callbacks cb;
 	NjAudio audio;
+	unsigned char txGuid[NjAudio::MAX_TX][16] = {}; // in-flight upload GUID per channel (TX thread only)
 	std::vector<std::string> txChannels;     // declared local broadcast channels (names)
+	bool txVoice = false;                     // declared channels are voice chat (guarded by txMutex)
 	std::mutex sendMutex;                     // serialize socket sends across net + TX threads
 	std::mutex txMutex;                       // guards txChannels (UI writes vs net-thread reads)
 	int keepAliveSecs = 3; // from server caps; refreshed after the challenge

@@ -37,7 +37,11 @@ int main(int argc, char** argv) {
 	double seconds = argc > 3 ? std::atof(argv[3]) : 20.0;
 	std::string user = argc > 4 ? argv[4] : "akaudio-test";
 	std::string pass = argc > 5 ? argv[5] : "";
-	bool tx = argc > 6 && std::string(argv[6]) == "tx"; // transmit a test tone on channel 0
+	// "tx" = transmit a test tone on channel 0; "voicetx" = same but as a NINJAM
+	// voice-chat channel (live, unsynced — receivers play it within ~a second).
+	std::string txMode = argc > 6 ? argv[6] : "";
+	bool tx = txMode == "tx" || txMode == "voicetx";
+	bool voice = txMode == "voicetx";
 
 	std::printf("Connecting to %s:%d as %s%s for %.0f s%s\n\n",
 	            host.c_str(), port, pass.empty() ? "anonymous:" : "", user.c_str(), seconds,
@@ -67,7 +71,7 @@ int main(int argc, char** argv) {
 	const double sr = 48000.0;
 	client.setSampleRate(sr);
 	if (tx)
-		client.setTransmit({"akaudio-tx"}, 0.5f); // one local channel, q0.5 (~190 kbps)
+		client.setTransmit({"akaudio-tx"}, 0.5f, voice); // one local channel, q0.5 (~190 kbps)
 	client.start(host, port, user, pass, cb);
 	float txPhase = 0.f;
 

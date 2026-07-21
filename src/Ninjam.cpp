@@ -232,10 +232,11 @@ struct Ninjam : Module {
 	std::atomic<float> peak{0.f};
 
 	// ---- Transmit ----
-	std::atomic<bool> transmitting{false}; // TX enable (persisted)
+	std::atomic<bool> transmitting{false}; // TX enable (NOT persisted — explicit per session)
 	std::atomic<float> txQuality{0.5f};    // encoder VBR quality (persisted; ~190 kbps)
+	std::atomic<bool> txVoice{false};      // voice-chat mode: live, unsynced (persisted setting)
 	std::atomic<int> txDeclared{-1};       // last channel count declared (written on UI thread)
-	std::atomic<bool> txArmed{false};      // capture armed at a downbeat (aligns intervals)
+	std::atomic<bool> txArmed{false};      // capture armed at a beat boundary (aligns intervals)
 
 	// Declared last so it is destroyed FIRST: NjClient::~ joins its threads before the
 	// state its callbacks touch (roster/atomics above) is torn down.
@@ -560,6 +561,7 @@ struct Ninjam : Module {
 
 	// Declare/update our broadcast channels to match the TX toggle + connected poly input.
 	// Called from the widget step() (UI thread); does no per-sample / audio-thread work.
+	int txDeclaredVoice = -1; // voice flag of the last declaration (UI thread only)
 	void syncTransmit() {
 		int desired = 0;
 		if (transmitting && joined && inputs[LEFT_INPUT].isConnected()) {
@@ -567,11 +569,14 @@ struct Ninjam : Module {
 			if (nin < 1) nin = 1;
 			desired = std::min(nin, akaudio::nj::NjAudio::MAX_TX);
 		}
-		if (desired != txDeclared) {
+		bool voice = txVoice.load(std::memory_order_relaxed);
+		if (desired != txDeclared || (int) voice != txDeclaredVoice) {
 			std::vector<std::string> names;
-			for (int i = 0; i < desired; i++) names.push_back("ch" + std::to_string(i + 1));
-			njclient.setTransmit(names, txQuality);
+			for (int i = 0; i < desired; i++)
+				names.push_back((voice ? "voice" : "ch") + std::to_string(i + 1));
+			njclient.setTransmit(names, txQuality, voice);
 			txDeclared = desired;
+			txDeclaredVoice = (int) voice;
 			if (desired == 0) txArmed.store(false, std::memory_order_relaxed);
 		}
 	}
@@ -661,6 +666,7 @@ struct Ninjam : Module {
 		const int modeL = mode.load(std::memory_order_relaxed);
 		const bool joinedL = joined.load(std::memory_order_relaxed);
 		const bool transmittingL = transmitting.load(std::memory_order_relaxed);
+		const bool txVoiceL = txVoice.load(std::memory_order_relaxed);
 		const int txDeclaredL = txDeclared.load(std::memory_order_relaxed);
 
 		float l = 0.f, r = 0.f; // main mix (= sum of players in JOIN, or the Icecast stream)
@@ -705,6 +711,10 @@ struct Ninjam : Module {
 				beatIndex = 0;
 				currentBeat.store(0, std::memory_order_relaxed);
 				clickEnv = 0.f;
+				// The grid moved (join / server tempo change): disarm capture so the
+				// next beat boundary re-arms it against the NEW grid with a fresh
+				// silence prefill (txLoop closes the in-flight interval on re-arm).
+				txArmed.store(false, std::memory_order_relaxed);
 			}
 			if (bpmL != spbBpm) {
 				spbBpm = bpmL;
@@ -715,9 +725,17 @@ struct Ninjam : Module {
 				beatPhase -= spb;
 				beatIndex = (beatIndex + 1) % bpiL;
 				currentBeat.store(beatIndex, std::memory_order_relaxed);
-				// Arm transmit capture on the downbeat so uploaded intervals align to the grid.
-				if (beatIndex == 0 && transmittingL && joinedL && txDeclaredL > 0)
+				// Arm transmit capture at the NEXT BEAT after TX comes on (≤1 beat of
+				// wait), not the next interval downbeat (≤1 whole interval — half a
+				// minute in a 32-BPI room). armTransmit tells the TX thread how much
+				// of the current interval already elapsed; it leads the upload with
+				// that much silence, so the interval grid stays downbeat-aligned.
+				// (Voice mode skips arming entirely — capture starts immediately.)
+				if (transmittingL && joinedL && txDeclaredL > 0 && !txVoiceL
+				        && !txArmed.load(std::memory_order_relaxed)) {
 					txArmed.store(true, std::memory_order_relaxed);
+					njclient.armTransmit(beatIndex, bpiL);
+				}
 				clickEnv = 1.f; // arm a click; accent the downbeat
 				clickPhase = 0.f;
 				clickFreq = (beatIndex == 0) ? 1760.f : 880.f;
@@ -756,8 +774,10 @@ struct Ninjam : Module {
 			beatIndex = 0;
 			clickEnv = 0.f;
 		}
-		// ---- Transmit capture: feed input frames once armed at a downbeat ----
-		if (transmittingL && joinedL && txDeclaredL > 0 && txArmed.load(std::memory_order_relaxed)
+		// ---- Transmit capture: feed input frames once armed at a beat boundary ----
+		// (voice mode: immediately — it has no grid to align to)
+		if (transmittingL && joinedL && txDeclaredL > 0
+		        && (txVoiceL || txArmed.load(std::memory_order_relaxed))
 		        && inputs[LEFT_INPUT].isConnected()) {
 			bool rConn = inputs[RIGHT_INPUT].isConnected();
 			for (int ch = 0; ch < txDeclaredL; ch++) {
@@ -803,8 +823,9 @@ struct Ninjam : Module {
 		json_object_set_new(root, "clockPpqn", json_integer(clockPpqn.load(std::memory_order_relaxed)));
 		// NOTE: `transmitting` is deliberately NOT persisted — broadcasting your live audio
 		// input must be a fresh, explicit per-session choice, never something a loaded patch
-		// silently resumes. txQuality (a setting, not a trigger) is fine to keep.
+		// silently resumes. txQuality/txVoice (settings, not triggers) are fine to keep.
 		json_object_set_new(root, "txQuality", json_real(txQuality));
+		json_object_set_new(root, "txVoice", json_boolean(txVoice));
 		return root;
 	}
 
@@ -837,6 +858,8 @@ struct Ninjam : Module {
 		transmitting = false;
 		if (json_t* j = json_object_get(root, "txQuality"))
 			txQuality = (float) json_real_value(j);
+		if (json_t* j = json_object_get(root, "txVoice"))
+			txVoice = json_boolean_value(j);
 
 		// Auto-resume on patch load (JOIN reconnects to the local default server; the
 		// user's audio is NOT transmitted until they click TX — see transmitting above).
@@ -1995,6 +2018,14 @@ struct NinjamWidget : ModuleWidget {
 				[module, q]() { return std::fabs(module->txQuality - q) < 0.01f; },
 				[module, q]() { module->txQuality = q; module->txDeclared = -1; })); // re-declare w/ new q
 		}
+		// NINJAM voice-chat mode (canonical channel flag 2): capture starts instantly and
+		// receivers play it live (~sub-second + network) instead of interval-aligned. For
+		// talkback / latency testing — it deliberately opts this channel out of jam sync.
+		menu->addChild(createCheckMenuItem("Voice mode (live, unsynced)", "",
+			[module]() { return module->txVoice.load(std::memory_order_relaxed); },
+			[module]() {
+				module->txVoice = !module->txVoice.load(std::memory_order_relaxed);
+			})); // syncTransmit() re-declares on the next widget step
 	}
 };
 

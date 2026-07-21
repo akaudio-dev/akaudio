@@ -30,8 +30,17 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
     `StreamClient` (same as Radio). No protocol, no join.
   - **JOIN** — the real **NINJAM protocol** (`src/net/ninjam/`): connect, anonymous
     SHA1 auth, subscribe, decode the live multi-user OGG interval mix, **and transmit**
-    (poly IN jacks → downbeat-aligned OGG-Vorbis encode → upload; heard by other
-    clients). Room chat (send/recv) works. 20 HP panel with an in-panel room browser
+    (poly IN jacks → OGG-Vorbis **streamed while the interval is captured**, like the
+    canonical njclient: BEGIN at interval start, WRITE chunks as pages are encoded,
+    final flagged chunk at the boundary. Capture arms at the **next beat** after TX is
+    clicked, silence-prefilling the elapsed part of the interval to stay
+    downbeat-aligned). Receive playout is **arrival-locked** (a channel's first
+    completed interval starts after a short jitter hold the moment it lands, then
+    chains — uniform ~one-interval latency, phase-true to the sender's grid, vs the
+    canonical local-boundary rule's 1-2 intervals). A context-menu **Voice mode**
+    (canonical channel flag 2) transmits rolling 2 s chunks and plays incoming
+    voice-flagged channels live via stb_vorbis pushdata (~0.5 s + network; unsynced —
+    for talkback/testing). Room chat (send/recv) works. 20 HP panel with an in-panel room browser
     (search, scrollable list, click-to-listen/join, peak meter) fed by
     `net/RoomDirectory` (background fetch of ninbot's directory). UI never blocks on the
     network. Open polish items in `TODO.md`.

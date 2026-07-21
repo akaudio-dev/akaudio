@@ -169,8 +169,9 @@ std::vector<uint8_t> buildSetUserMask(const std::string& user, uint32_t channelM
 	return frame(MSG_CLIENT_SET_USERMASK, p);
 }
 
-std::vector<uint8_t> buildSetChannelInfo(const std::vector<std::string>& channelNames) {
-	// mpisize u16 (=4), then per channel: name\0, volume s16 (0), pan u8 (0), flags u8 (0).
+std::vector<uint8_t> buildSetChannelInfo(const std::vector<std::string>& channelNames,
+                                         uint8_t flags) {
+	// mpisize u16 (=4), then per channel: name\0, volume s16 (0), pan u8 (0), flags u8.
 	std::vector<uint8_t> p;
 	p.push_back(4); p.push_back(0); // mpisize = 4
 	for (const std::string& name : channelNames) {
@@ -178,7 +179,7 @@ std::vector<uint8_t> buildSetChannelInfo(const std::vector<std::string>& channel
 		p.push_back(0);              // name NUL
 		p.push_back(0); p.push_back(0); // volume s16 = 0 dB
 		p.push_back(0);              // pan = center
-		p.push_back(0);              // flags = 0 (active broadcasting channel)
+		p.push_back(flags);          // 0 = session channel, 2 = voice chat
 	}
 	return frame(MSG_CLIENT_SET_CHANNEL_INFO, p);
 }

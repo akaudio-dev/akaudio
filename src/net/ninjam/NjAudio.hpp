@@ -38,6 +38,10 @@
 #include "../RingBuffer.hpp"
 #include "NjEncoder.hpp"
 
+extern "C" {
+typedef struct stb_vorbis stb_vorbis; // pushdata decoder handle (voice channels)
+}
+
 namespace akaudio {
 namespace nj {
 
@@ -61,7 +65,9 @@ public:
 	void setSampleRate(double sr);
 	void setTempo(int bpm, int bpi);
 
-	void onUserChannel(const std::string& user, int chidx, bool active, int volDb10, int pan);
+	// `flags` bit 2 marks a voice-chat channel (played live, not interval-aligned).
+	void onUserChannel(const std::string& user, int chidx, bool active, int volDb10, int pan,
+	                   uint8_t flags = 0);
 
 	void beginInterval(const std::string& user, int chidx, const uint8_t guid[16], uint32_t fourcc,
 	                   uint32_t estSize = 0);
@@ -70,10 +76,21 @@ public:
 	void start();
 	void stop();
 
-	// ---- Transmit (capture local audio -> encode -> upload via the callback) ----
+	// ---- Transmit (capture local audio -> streaming encode -> upload callbacks) ----
 	// Set the number of local channels to broadcast + VBR quality. Allocates capture
-	// buffers (call from the UI/setup thread, before start() ideally).
-	void setTransmit(int channels, float quality);
+	// buffers (call from the UI/setup thread, before start() ideally). `voice` = the
+	// channels are NINJAM voice chat: rolling ~2 s upload intervals, no beat grid.
+	void setTransmit(int channels, float quality, bool voice = false);
+	// Audio thread: align interval capture to the room's beat grid. Called at a beat
+	// boundary; the elapsed part of the current interval (beats 0..beatIndex-1 of
+	// beatCount) is pre-filled with silence so uploads stay downbeat-aligned while
+	// capture starts at the very next beat after the user enables TX — not up to a
+	// whole interval later at the next downbeat. Lock-free (atomics only).
+	void armTransmit(int beatIndex, int beatCount) {
+		txArmNum.store(beatIndex, std::memory_order_relaxed);
+		txArmDen.store(beatCount, std::memory_order_relaxed);
+		txArmPending.store(true, std::memory_order_release);
+	}
 	// Audio thread: push one captured stereo frame for local channel `ch`.
 	void captureFrame(int ch, float l, float r) {
 		// txRings (acquire) pairs with start()'s release after building the rings, so we
@@ -85,8 +102,12 @@ public:
 			return;
 		txCapture[ch]->push(l, r);
 	}
-	// Called on the TX thread once per channel per interval with the encoded OGG.
-	std::function<void(int chidx, const std::vector<uint8_t>&)> onUploadInterval;
+	// TX-thread upload callbacks: an interval starts (send UPLOAD_INTERVAL_BEGIN)…
+	std::function<void(int chidx)> onUploadBegin;
+	// …then its encoded bytes stream out as they're produced; `last` closes the
+	// interval (send as UPLOAD_INTERVAL_WRITE chunks, final one flagged; may fire
+	// with len 0 && last to close an interval with no residual bytes).
+	std::function<void(int chidx, const uint8_t* data, size_t len, bool last)> onUploadData;
 
 	// Audio thread: pull one wide frame (RING_CH interleaved-stereo-per-slot floats).
 	// Returns false on underrun (out untouched). out must hold RING_CH floats.
@@ -113,13 +134,34 @@ private:
 	struct Channel {
 		std::string user;
 		bool active = false;
+		bool voice = false; // NINJAM voice-chat channel (flags bit 2): played live
 		float gainL = 1.f, gainR = 1.f;
 		std::deque<std::vector<float>> ready; // each: intervalSamples*2 interleaved, or empty = silence
+		// Interval-mode playhead (mix thread, under mu). Playback is ARRIVAL-LOCKED:
+		// the first ready interval starts (after a short jitter hold) the moment it
+		// is available, and subsequent ones chain seamlessly — phase-true to the
+		// sender's grid instead of waiting for an arbitrary local boundary.
+		std::vector<float> cur;   // interval being played (empty + silenceLeft>0 = silence interval)
+		size_t curPos = 0;        // frames of cur consumed
+		int silenceLeft = 0;      // remaining frames of a silence interval
+		int holdFrames = -1;      // startup jitter margin left to burn; -1 = not armed
+		bool playing = false;     // mid-cadence (a chain break => re-lock to arrival)
+		// Voice-mode FIFO (net thread appends decoded frames under mu; mix thread
+		// consumes). vhead = frames*2 already consumed (compacted periodically).
+		std::vector<float> vfifo;
+		size_t vhead = 0;
+		bool vstarted = false;    // small prebuffer reached; cleared when it runs dry
 	};
 	struct Transfer {
 		std::string chanKey;
 		bool ogg = false;
-		std::vector<uint8_t> bytes;
+		bool voice = false;            // decode progressively as chunks arrive
+		std::vector<uint8_t> bytes;    // interval mode: whole interval; voice: undecoded tail
+		// Voice-mode progressive decoder state (net thread only).
+		stb_vorbis* pv = nullptr;      // stb_vorbis pushdata handle
+		int pvChannels = 0, pvRate = 0;
+		std::vector<float> pcm;        // decoded-but-not-yet-resampled stereo frames
+		double rsPos = 0.0;            // resample phase into pcm
 	};
 
 	static std::string chanKey(const std::string& user, int chidx);
@@ -127,12 +169,20 @@ private:
 	void recomputeIntervalLocked(); // caller holds mu
 	void enqueue(const std::string& key, std::vector<float>&& interval);
 	std::vector<float> decodeOgg(const uint8_t* data, size_t len, int frames);
+	static void closeTransfer(Transfer& t); // frees the pushdata decoder, if any
+	void voiceFeed(Transfer& t, const uint8_t* data, size_t len); // net thread
+	void voiceDeliver(Transfer& t);         // resample t.pcm -> channel vfifo (takes mu)
 	void mixLoop();
 	void txLoop();                            // capture -> encode -> onUploadInterval
 	int assignSlot(const std::string& user); // call under mu; -1 if no free slot
 	void refreshSlots();                      // call under mu; free slots of departed users
 
-	WideRing ring{1 << 16};
+	// Output ring depth = STANDING latency: mixLoop keeps it full (backpressure), so
+	// every queued frame waits its whole depth before the audio thread plays it.
+	// 1<<14 frames ≈ 340 ms @48k — plenty to ride out mix-thread scheduling hiccups
+	// (it refills in 2 ms polls), without burying the low-latency voice path. The old
+	// 1<<16 (~1.4 s) silently added a second-plus to every received stream.
+	WideRing ring{1 << 14};
 	std::thread mixThread;
 	std::thread txThread;
 	std::atomic<bool> running{false};
@@ -140,10 +190,16 @@ private:
 
 	// Transmit state.
 	std::atomic<bool> txActive{false};
+	std::atomic<bool> txVoice{false}; // voice-chat mode: rolling 2 s intervals, no grid
 	std::atomic<int> nTx{0};
 	std::atomic<float> txQuality{0.5f}; // UI writes, txLoop reads — atomic to avoid a torn read
 	std::vector<std::unique_ptr<StereoRingBuffer>> txCapture; // MAX_TX rings, built once in start()
 	std::atomic<int> txRings{0}; // # rings actually built; release-published by start()
+	// Pending beat-grid arming request (armTransmit → txLoop): prefill the next
+	// interval with N*num/den silence frames.
+	std::atomic<bool> txArmPending{false};
+	std::atomic<int> txArmNum{0};
+	std::atomic<int> txArmDen{1};
 
 	std::atomic<double> sampleRate{48000.0};
 	std::atomic<int> intervalSamples{0};

@@ -69,7 +69,8 @@ void NjAudio::setTempo(int newBpm, int newBpi) {
 	}
 }
 
-void NjAudio::onUserChannel(const std::string& user, int chidx, bool active, int volDb10, int pan) {
+void NjAudio::onUserChannel(const std::string& user, int chidx, bool active, int volDb10, int pan,
+                            uint8_t flags) {
 	// volume: dB*10 -> linear; pan: -128..127 -> -1..1 (linear pan law).
 	float gain = std::pow(10.f, (float)volDb10 / 200.f);
 	float np = (float)pan / 128.f;
@@ -82,6 +83,20 @@ void NjAudio::onUserChannel(const std::string& user, int chidx, bool active, int
 	Channel& ch = channels[chanKey(user, chidx)];
 	ch.user = user;
 	ch.active = active;
+	bool voice = (flags & 2) != 0;
+	if (voice != ch.voice) {
+		// Mode flip: queued audio belongs to the other playback discipline — drop it.
+		ch.voice = voice;
+		ch.ready.clear();
+		ch.cur.clear();
+		ch.curPos = 0;
+		ch.silenceLeft = 0;
+		ch.holdFrames = -1;
+		ch.playing = false;
+		ch.vfifo.clear();
+		ch.vhead = 0;
+		ch.vstarted = false;
+	}
 	ch.gainL = gl;
 	ch.gainR = gr;
 }
@@ -123,9 +138,18 @@ void NjAudio::beginInterval(const std::string& user, int chidx, const uint8_t gu
 		uint32_t estSize) {
 	static const uint8_t zero[16] = {0};
 	std::string key = chanKey(user, chidx);
+	// Voice channels have no interval cadence — they play live from a FIFO.
+	bool voice;
+	{
+		std::lock_guard<std::mutex> lock(mu);
+		auto it = channels.find(key);
+		voice = (it != channels.end()) && it->second.voice;
+	}
 	if (std::memcmp(guid, zero, 16) == 0) {
 		// Silence interval: enqueue an empty slot to keep this channel's cadence.
-		enqueue(key, std::vector<float>());
+		// (Voice channels just fall silent — no cadence to keep.)
+		if (!voice)
+			enqueue(key, std::vector<float>());
 		return;
 	}
 	// fourcc 'OGGv' (and 'OGG' family) = OGG Vorbis. Anything else (e.g. Opus) is
@@ -136,15 +160,17 @@ void NjAudio::beginInterval(const std::string& user, int chidx, const uint8_t gu
 	// its entry would leak forever — drop any pending transfer for the same channel so
 	// the map can't accumulate abandoned buffers.
 	for (auto it = transfers.begin(); it != transfers.end(); ) {
-		if (it->second.chanKey == key) it = transfers.erase(it);
+		if (it->second.chanKey == key) { closeTransfer(it->second); it = transfers.erase(it); }
 		else ++it;
 	}
 	Transfer t;
 	t.chanKey = key;
 	t.ogg = ogg;
+	t.voice = voice;
 	// estSize is the server's advertised interval size; reserving up front avoids repeated
 	// reallocs as DOWNLOAD_WRITE chunks stream in. Cap it — it's an unvalidated wire value.
-	if (estSize > 0)
+	// (Streaming live uploads advertise 0; voice transfers keep only an undecoded tail.)
+	if (!voice && estSize > 0)
 		t.bytes.reserve(std::min<uint32_t>(estSize, 4u << 20));
 	transfers[std::string((const char*)guid, 16)] = std::move(t);
 }
@@ -154,6 +180,17 @@ void NjAudio::writeInterval(const uint8_t guid[16], const uint8_t* data, size_t 
 	if (it == transfers.end())
 		return; // unknown/zero-guid transfer
 	Transfer& t = it->second;
+	if (t.voice) {
+		// Voice: decode as the bytes arrive and hand frames straight to the channel's
+		// live FIFO — no interval assembly, no boundary wait.
+		if (t.ogg && data && len)
+			voiceFeed(t, data, len);
+		if (last) {
+			closeTransfer(t);
+			transfers.erase(it);
+		}
+		return;
+	}
 	// Bound the accumulated interval: a legit OGG interval is a few MB (worst ~5 MB at
 	// the ~87 s cap), so a stream that keeps sending past this is broken/hostile —
 	// abandon it as a silence interval rather than growing t.bytes unboundedly.
@@ -179,6 +216,112 @@ void NjAudio::writeInterval(const uint8_t guid[16], const uint8_t* data, size_t 
 	// On failure / unsupported codec, pcm stays empty => a silence interval (keeps cadence).
 	enqueue(t.chanKey, std::move(pcm));
 	transfers.erase(it);
+}
+
+void NjAudio::closeTransfer(Transfer& t) {
+	if (t.pv) {
+		stb_vorbis_close(t.pv);
+		t.pv = nullptr;
+	}
+}
+
+// Voice (net thread): push arriving OGG bytes through a stb_vorbis pushdata decoder.
+void NjAudio::voiceFeed(Transfer& t, const uint8_t* data, size_t len) {
+	// Bound the undecoded tail; a healthy stream stays tiny because we consume as fast
+	// as chunks arrive. On overflow drop it and let the decoder resync at a page.
+	if (t.bytes.size() + len > (1u << 20)) {
+		t.bytes.clear();
+		if (t.pv)
+			stb_vorbis_flush_pushdata(t.pv);
+	}
+	t.bytes.insert(t.bytes.end(), data, data + len);
+	size_t off = 0;
+	if (!t.pv) {
+		int used = 0, err = 0;
+		t.pv = stb_vorbis_open_pushdata(t.bytes.data(), (int)t.bytes.size(), &used, &err, nullptr);
+		if (!t.pv)
+			return; // headers incomplete yet (or junk — then it simply never opens)
+		off = (size_t)used;
+		stb_vorbis_info info = stb_vorbis_get_info(t.pv);
+		t.pvChannels = info.channels;
+		t.pvRate = (int)info.sample_rate;
+		// Wire values — reject junk before it drives buffer sizing.
+		if (t.pvChannels < 1 || t.pvChannels > 2 || t.pvRate < 8000 || t.pvRate > 192000) {
+			closeTransfer(t);
+			t.bytes.clear();
+			nErrors.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+	}
+	for (;;) {
+		float** outputs = nullptr;
+		int nch = 0, samples = 0;
+		int used = stb_vorbis_decode_frame_pushdata(t.pv, t.bytes.data() + off,
+			(int)(t.bytes.size() - off), &nch, &outputs, &samples);
+		if (used == 0)
+			break; // needs more data
+		off += (size_t)used;
+		if (samples > 0 && nch >= 1) {
+			// Downmix/duplicate to stereo into the resample staging buffer.
+			size_t base = t.pcm.size();
+			t.pcm.resize(base + (size_t)samples * 2);
+			const float* L = outputs[0];
+			const float* R = nch >= 2 ? outputs[1] : outputs[0];
+			for (int i = 0; i < samples; i++) {
+				t.pcm[base + (size_t)i * 2] = L[i];
+				t.pcm[base + (size_t)i * 2 + 1] = R[i];
+			}
+		}
+	}
+	if (off > 0)
+		t.bytes.erase(t.bytes.begin(), t.bytes.begin() + off);
+	voiceDeliver(t);
+}
+
+// Voice (net thread): fixed-ratio linear resample of staged frames -> channel FIFO.
+void NjAudio::voiceDeliver(Transfer& t) {
+	double engineRate = sampleRate.load(std::memory_order_relaxed);
+	if (t.pvRate <= 0 || engineRate <= 0)
+		return;
+	double ratio = (double)t.pvRate / engineRate; // source frames per output frame
+	int srcFrames = (int)(t.pcm.size() / 2);
+	std::vector<float> out;
+	double pos = t.rsPos;
+	while (pos + 1.0 < (double)srcFrames) { // interpolation needs pos+1
+		int i0 = (int)pos;
+		double frac = pos - i0;
+		const float* a = &t.pcm[(size_t)i0 * 2];
+		const float* b = &t.pcm[(size_t)(i0 + 1) * 2];
+		out.push_back(a[0] + (float)frac * (b[0] - a[0]));
+		out.push_back(a[1] + (float)frac * (b[1] - a[1]));
+		pos += ratio;
+	}
+	// Retire fully-consumed source frames, keep the fractional phase.
+	int consumed = (int)pos;
+	if (consumed > 0) {
+		if (consumed > srcFrames) consumed = srcFrames;
+		t.pcm.erase(t.pcm.begin(), t.pcm.begin() + (size_t)consumed * 2);
+		t.rsPos = pos - consumed;
+	}
+	if (out.empty())
+		return;
+	std::lock_guard<std::mutex> lock(mu);
+	auto it = channels.find(t.chanKey);
+	if (it == channels.end())
+		return;
+	Channel& ch = it->second;
+	ch.vfifo.insert(ch.vfifo.end(), out.begin(), out.end());
+	// Skip-ahead: cap the backlog (~0.75 s, mirroring njclient's live mode) so a network
+	// stall never turns into permanently added latency.
+	size_t capF = (size_t)(engineRate * 0.75);
+	size_t haveF = (ch.vfifo.size() - ch.vhead) / 2;
+	if (haveF > capF)
+		ch.vhead += (haveF - capF) * 2;
+	// Compact once the consumed prefix dominates.
+	if (ch.vhead > (1u << 16) && ch.vhead > ch.vfifo.size() / 2) {
+		ch.vfifo.erase(ch.vfifo.begin(), ch.vfifo.begin() + ch.vhead);
+		ch.vhead = 0;
+	}
 }
 
 void NjAudio::enqueue(const std::string& key, std::vector<float>&& interval) {
@@ -272,12 +415,13 @@ std::vector<float> NjAudio::decodeOgg(const uint8_t* data, size_t len, int frame
 	return out;
 }
 
-void NjAudio::setTransmit(int channels, float quality) {
+void NjAudio::setTransmit(int channels, float quality, bool voice) {
 	if (channels > MAX_TX) channels = MAX_TX;
 	// Atomics only — the capture rings are built once in start() (see below), never here,
 	// so this can't race txLoop iterating the vector. captureFrame gates on txRings, so
 	// setting txActive before the rings exist (setTransmit called pre-join) is harmless.
 	txQuality.store(quality, std::memory_order_relaxed);
+	txVoice.store(voice, std::memory_order_relaxed);
 	nTx.store(channels, std::memory_order_release);
 	txActive.store(channels > 0, std::memory_order_release);
 }
@@ -308,6 +452,8 @@ void NjAudio::stop() {
 	running.store(false, std::memory_order_release);
 	std::lock_guard<std::mutex> lock(mu);
 	channels.clear();
+	for (auto& kv : transfers)
+		closeTransfer(kv.second); // free any voice pushdata decoders
 	transfers.clear();
 	userSlot.clear();
 	for (int i = 0; i < MAX_PLAYERS; i++) slotUsed[i] = false;
@@ -319,37 +465,89 @@ void NjAudio::stop() {
 	ring.requestClear();
 }
 
-// Transmit: accumulate each channel's captured frames into interval buffers, encode, hand up.
+// Transmit: stream each channel's captured frames through a per-interval OGG encoder,
+// handing encoded chunks up AS THE INTERVAL IS CAPTURED (like the canonical njclient):
+// BEGIN at interval start, WRITE chunks while playing, the final flagged chunk right at
+// the interval boundary. Receivers can then play the interval at their very next
+// boundary — a whole interval earlier than the old capture-everything-then-upload
+// scheme. Feeding from the ring incrementally also means an interval LONGER than the
+// ring (e.g. 32 BPI at 80 BPM = 24 s = 1,152,000 samples @48k > the 1<<20-frame ring)
+// encodes fine: the ring only ever holds the short gap between drains.
 void NjAudio::txLoop() {
 	int serial = 1;
-	// Per-channel partial-interval accumulators (interleaved stereo). Filled
-	// incrementally from the capture rings, so an interval LONGER than a ring still
-	// encodes — e.g. 32 BPI at 80 BPM = 24 s = 1,152,000 samples @48k, more than the
-	// 1<<20-frame ring. Requiring a whole interval to sit in the ring at once (the
-	// old scheme) silently killed transmit in any such room: the ring filled, pushes
-	// dropped, and no interval ever completed. Now the ring only ever holds the
-	// short gap between drains.
-	std::vector<std::vector<float>> acc(txCapture.size());
-	int accN = 0; // interval length the accumulators are gridded to
-	// This thread is the capture rings' consumer, so it owns discarding stale
-	// audio: drain at start (a previous session's tail) and while TX is off
-	// (so re-enabling starts a fresh, downbeat-aligned interval, instead of
-	// uploading a stale partial one).
+	// Per-channel in-flight interval state.
+	struct TxCh {
+		OggIntervalEncoder enc;
+		int framesDone = 0; // frames fed to enc this interval
+		bool open = false;  // BEGIN announced, WRITE stream in progress
+	};
+	std::vector<TxCh> tx(txCapture.size());
+	int gridN = 0;                  // interval length the open intervals are gridded to
+	int pendingPrefill = 0;         // silence frames to lead the next-started intervals with
+	std::vector<float> chunk;       // pull/feed bounce buffer
+	const int CHUNKF = 4096;        // frames per feed
+
+	// This thread is the capture rings' consumer, so it owns discarding stale audio:
+	// drain at start (a previous session's tail) and while TX is off, so re-enabling
+	// starts a fresh, beat-aligned interval instead of uploading a stale partial one.
 	auto drainCapture = [this]() {
 		for (auto& c : txCapture)
 			if (c) c->drain();
 	};
-	auto clearAcc = [&]() {
-		for (auto& a : acc)
-			a.clear();
+	// Close an in-flight interval: flush the encoder and send the final flagged chunk
+	// (an interval shorter than the grid is legal — receivers pad with silence).
+	auto closeInterval = [&](int ch) {
+		if (!tx[ch].open)
+			return;
+		tx[ch].enc.finish();
+		std::vector<uint8_t> tail = tx[ch].enc.take();
+		if (onUploadData)
+			onUploadData(ch, tail.empty() ? nullptr : tail.data(), tail.size(), /*last=*/true);
+		tx[ch].open = false;
+		tx[ch].framesDone = 0;
 	};
+	auto closeAll = [&]() {
+		for (size_t ch = 0; ch < tx.size(); ch++)
+			closeInterval((int) ch);
+	};
+	// Announce + start a new interval on `ch`, leading with `prefill` silence frames.
+	auto startInterval = [&](int ch, int N, double sr, int prefill) {
+		if (!tx[ch].enc.begin(2, (int) sr, txQuality.load(std::memory_order_relaxed), serial++))
+			return; // encoder rejected params; stay closed (retried next pass)
+		tx[ch].open = true;
+		tx[ch].framesDone = 0;
+		if (onUploadBegin)
+			onUploadBegin(ch);
+		if (prefill > N) prefill = N;
+		if (prefill > 0) {
+			chunk.assign((size_t) CHUNKF * 2, 0.f);
+			int left = prefill;
+			while (left > 0) {
+				int m = left > CHUNKF ? CHUNKF : left;
+				tx[ch].enc.feed(chunk.data(), m);
+				left -= m;
+			}
+			tx[ch].framesDone = prefill;
+		}
+		std::vector<uint8_t> head = tx[ch].enc.take(); // headers (+ prefill pages)
+		if (!head.empty() && onUploadData)
+			onUploadData(ch, head.data(), head.size(), /*last=*/false);
+	};
+
 	drainCapture();
 	while (!abort.load(std::memory_order_acquire)) {
 		int N = intervalSamples.load(std::memory_order_relaxed);
 		int n = nTx.load(std::memory_order_relaxed);
+		double srNow = sampleRate.load(std::memory_order_relaxed);
+		// Voice mode: rolling fixed-length intervals (canonical njclient's LL_CHUNK_SIZE
+		// = 2 s), independent of the room tempo — no grid, no arming, minimal latency.
+		if (txVoice.load(std::memory_order_relaxed) && srNow > 0)
+			N = (int) (srNow * 2.0);
 		if (!txActive.load(std::memory_order_acquire)) {
+			closeAll();
 			drainCapture();
-			clearAcc();
+			txArmPending.store(false, std::memory_order_relaxed);
+			pendingPrefill = 0;
 			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 			continue;
 		}
@@ -359,155 +557,235 @@ void NjAudio::txLoop() {
 			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 			continue;
 		}
-		if (N != accN) {
-			// Tempo / sample-rate re-grid: partial intervals are gridded to the old
-			// length — drop them (with the pending ring tail) rather than upload a
-			// mislengthed interval.
-			accN = N;
-			clearAcc();
+		if (N != gridN) {
+			// Tempo / sample-rate re-grid: in-flight intervals are gridded to the old
+			// length — close them short and start fresh (the module disarms + re-arms
+			// its capture on a config change, so a new arming request follows).
+			closeAll();
 			drainCapture();
+			gridN = N;
 		}
+		// A new arming request: capture (re)started at a beat boundary on the audio
+		// thread. Close anything in flight and lead the next intervals with silence
+		// for the elapsed part of the current room interval.
+		if (txArmPending.exchange(false, std::memory_order_acq_rel)) {
+			closeAll();
+			drainCapture(); // pre-arm remnants (e.g. between disarm and re-arm)
+			int num = txArmNum.load(std::memory_order_relaxed);
+			int den = txArmDen.load(std::memory_order_relaxed);
+			// Voice mode has no grid — an arming request only marks the capture start.
+			pendingPrefill = (!txVoice.load(std::memory_order_relaxed) && den > 0 && num > 0)
+				? (int) (((long long) N * num) / den) : 0;
+		}
+
 		double sr = sampleRate.load(std::memory_order_relaxed);
 		bool didAny = false;
 		for (int ch = 0; ch < n && ch < (int) txCapture.size(); ch++) {
 			if (!txCapture[ch])
 				continue;
-			// Move whatever the audio thread captured since the last pass into this
-			// channel's accumulator (never past one interval boundary).
-			std::vector<float>& a = acc[ch];
-			float l = 0.f, r = 0.f;
-			while (a.size() < (size_t) N * 2 && txCapture[ch]->pull(l, r)) {
-				a.push_back(l);
-				a.push_back(r);
+			for (;;) {
+				size_t avail = txCapture[ch]->size();
+				if (!tx[ch].open) {
+					if (avail == 0)
+						break; // nothing captured yet — start lazily when audio arrives
+					// (Seeing captured frames means any armTransmit that preceded them
+					// is visible too — the ring's release/acquire pairing carries it —
+					// so pendingPrefill is already set when we get here.)
+					startInterval(ch, N, sr, pendingPrefill);
+					if (!tx[ch].open)
+						break;
+					didAny = true;
+				}
+				int remain = N - tx[ch].framesDone;
+				int m = (int) std::min<size_t>(std::min((size_t) remain, avail), (size_t) CHUNKF);
+				if (m > 0) {
+					chunk.resize((size_t) m * 2);
+					for (int i = 0; i < m; i++) {
+						float l = 0.f, r = 0.f;
+						txCapture[ch]->pull(l, r);
+						chunk[(size_t) i * 2] = l;
+						chunk[(size_t) i * 2 + 1] = r;
+					}
+					tx[ch].enc.feed(chunk.data(), m);
+					tx[ch].framesDone += m;
+					std::vector<uint8_t> bytes = tx[ch].enc.take();
+					if (!bytes.empty() && onUploadData)
+						onUploadData(ch, bytes.data(), bytes.size(), /*last=*/false);
+					didAny = true;
+				}
+				if (tx[ch].framesDone >= N) {
+					// Interval boundary: close it out. The next interval starts lazily
+					// with the next captured frame (continuous capture => immediately),
+					// with no prefill — it begins exactly on the grid.
+					closeInterval(ch);
+					pendingPrefill = 0;
+					continue;
+				}
+				if (m <= 0)
+					break; // ring drained; wait for more capture
 			}
-			if (a.size() < (size_t) N * 2)
-				continue; // interval not complete yet
-			std::vector<uint8_t> ogg = encodeOggInterval(a.data(), N, 2, (int) sr,
-				txQuality.load(std::memory_order_relaxed), serial++);
-			a.clear();
-			if (!ogg.empty() && onUploadInterval)
-				onUploadInterval(ch, ogg);
-			didAny = true;
 		}
 		if (!didAny)
 			std::this_thread::sleep_for(std::chrono::milliseconds(5));
 	}
+	// Session over (leave/stop): close any in-flight interval so the server and
+	// receivers aren't left with a dangling transfer (harmless either way — they
+	// time out — but this is tidier and the socket may still be up on a clean stop).
+	closeAll();
 }
 
+// Playout. ARRIVAL-LOCKED per-channel playheads instead of a global boundary cadence:
+// a channel's first completed interval starts playing (after a short jitter hold) the
+// moment it is available and later ones chain seamlessly every N frames — phase-true
+// to the SENDER's grid. The old scheme (pop one interval per self-clocked boundary,
+// like the canonical client's local-boundary rule) added an arbitrary 0..1 extra
+// interval of latency depending on clock phase; with senders that stream their
+// uploads, arrival time ≈ the sender's boundary, so locking to arrival pins latency
+// at "one interval + network" for every pairing. Voice channels bypass intervals
+// entirely: they mix live from their FIFO with a tiny prebuffer.
 void NjAudio::mixLoop() {
-	struct Src {
-		std::vector<float> buf; // empty = silence
-		float gl, gr;
-		int slot; // poly channel, or -1 (overflow / off-bundle)
-	};
-	bool started = false;
-	bool sawReady = false;
-	std::chrono::steady_clock::time_point firstReady;
+	const int BLOCK = 256;                        // frames mixed per lock acquisition
+	const size_t VOICE_PREBUF = 2048;             // ~43 ms @48k before a voice channel starts
+	std::vector<float> block((size_t) BLOCK * RING_CH);
 
 	while (!abort.load(std::memory_order_acquire)) {
-		// Apply a deferred server tempo change here — the top of a cycle is an interval
-		// boundary — never mid-interval. The grid length changed, so re-prebuffer.
 		{
 			std::lock_guard<std::mutex> lock(mu);
+			// Deferred server tempo / sample-rate changes: recompute the grid. Queued
+			// intervals are dropped by the recompute; also drop in-flight playheads —
+			// they're gridded to the old length.
+			bool regrid = false;
 			if (tempoPending) {
 				bpm = pendingBpm;
 				bpi = pendingBpi;
 				tempoPending = false;
-				recomputeIntervalLocked();
-				started = false;
-				sawReady = false;
+				regrid = true;
 			}
-			// Deferred sample-rate change (may have been posted from the audio device
-			// thread): recompute the grid + drop mismatched queued audio here, off that
-			// thread. recomputeIntervalLocked reads the already-stored sampleRate.
-			if (ratePending.exchange(false, std::memory_order_acquire)) {
+			if (ratePending.exchange(false, std::memory_order_acquire))
+				regrid = true;
+			if (regrid) {
 				recomputeIntervalLocked();
-				started = false;
-				sawReady = false;
+				for (auto& kv : channels) {
+					Channel& ch = kv.second;
+					ch.cur.clear();
+					ch.curPos = 0;
+					ch.silenceLeft = 0;
+					ch.holdFrames = -1;
+					ch.playing = false;
+				}
 			}
 		}
 		int N = intervalSamples.load(std::memory_order_relaxed);
-		if (N <= 0) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
-			continue;
-		}
+		double sr = sampleRate.load(std::memory_order_relaxed);
+		// Startup jitter hold: streamed uploads complete right at the sender's boundary,
+		// so the chain slack is only network jitter — hold the first interval briefly so
+		// every later one arrives in time. (Replaces the old global prebuffer margin.)
+		const int holdInit = (int) std::min(sr * 1.0, (double) N * 0.25);
 
-		// Prebuffer before starting the cadence. We don't begin the instant the first
-		// interval decodes — that leaves zero timing margin, so every interval's
-		// decode/network jitter races the play boundary and an occasional miss plays a
-		// full interval of silence. Holding a small margin (a fraction of an interval,
-		// capped) shifts every boundary that much later than decode-completion, so the
-		// next interval is always ready in time. Costs that much extra startup lead-in,
-		// not a whole interval. (Mirrors the canonical client's config_play_prebuffer.)
-		if (!started) {
-			bool any = false;
-			{
-				std::lock_guard<std::mutex> lock(mu);
-				for (auto& kv : channels)
-					for (auto& iv : kv.second.ready)
-						if (!iv.empty()) { any = true; break; }
-			}
-			if (!any) {
-				sawReady = false; // reset margin timer until audio actually shows up
-				std::this_thread::sleep_for(std::chrono::milliseconds(15));
-				continue;
-			}
-			auto now = std::chrono::steady_clock::now();
-			if (!sawReady) { sawReady = true; firstReady = now; }
-			double sr = sampleRate.load(std::memory_order_relaxed);
-			double intervalSec = sr > 0 ? (double) N / sr : 0.0;
-			double margin = std::min(2.0, intervalSec * 0.4); // play-prebuffer headroom
-			if (std::chrono::duration<double>(now - firstReady).count() < margin) {
-				std::this_thread::sleep_for(std::chrono::milliseconds(15));
-				continue;
-			}
-			started = true;
-		}
-
-		// Interval boundary: take one ready interval from each participating channel.
-		std::vector<Src> srcs;
+		std::memset(block.data(), 0, block.size() * sizeof(float));
+		bool anything = false; // any channel present (else idle-sleep instead of pacing silence)
 		int active = 0;
 		{
 			std::lock_guard<std::mutex> lock(mu);
 			for (auto it = channels.begin(); it != channels.end();) {
 				Channel& ch = it->second;
-				if (!ch.active && ch.ready.empty()) {
-					it = channels.erase(it); // gone and drained
+				if (!ch.active && ch.voice) {
+					// A departed voice channel has no cadence to play out — drop the tail
+					// (a sub-prebuffer remnant would otherwise pin the channel + slot).
+					ch.vfifo.clear();
+					ch.vhead = 0;
+				}
+				bool vEmpty = (ch.vfifo.size() - ch.vhead) == 0;
+				bool drained = ch.ready.empty() && ch.cur.empty() && ch.silenceLeft == 0 && vEmpty;
+				if (!ch.active && drained) {
+					it = channels.erase(it); // gone and fully played out
 					continue;
 				}
 				if (ch.active) active++;
-				Src s;
-				s.gl = ch.gainL;
-				s.gr = ch.gainR;
-				s.slot = assignSlot(ch.user); // stable poly channel for this user
-				if (!ch.ready.empty()) {
-					s.buf = std::move(ch.ready.front());
-					ch.ready.pop_front();
-				} else if (ch.active) {
-					// Active channel but nothing decoded in time -> a one-interval silence.
-					nMissed.fetch_add(1, std::memory_order_relaxed);
+				anything = true;
+				int slot = assignSlot(ch.user);
+				float* out = slot >= 0 ? &block[(size_t) slot * 2] : nullptr; // wide-frame stride below
+				if (ch.voice) {
+					// Live FIFO with a small prebuffer; running dry re-arms the prebuffer.
+					size_t availF = (ch.vfifo.size() - ch.vhead) / 2;
+					if (!ch.vstarted) {
+						if (availF < VOICE_PREBUF) { ++it; continue; }
+						ch.vstarted = true;
+					}
+					int m = (int) std::min<size_t>(availF, (size_t) BLOCK);
+					for (int i = 0; i < m && out; i++) {
+						out[(size_t) i * RING_CH]     += ch.vfifo[ch.vhead + (size_t) i * 2] * ch.gainL;
+						out[(size_t) i * RING_CH + 1] += ch.vfifo[ch.vhead + (size_t) i * 2 + 1] * ch.gainR;
+					}
+					ch.vhead += (size_t) m * 2;
+					if (m < BLOCK)
+						ch.vstarted = false; // ran dry — rebuffer before resuming
+				} else if (N > 0) {
+					int i = 0;
+					while (i < BLOCK) {
+						if (ch.silenceLeft > 0) {
+							// A silence interval: consume without mixing (keeps cadence).
+							int m = std::min(BLOCK - i, ch.silenceLeft);
+							ch.silenceLeft -= m;
+							i += m;
+							continue;
+						}
+						if (ch.cur.empty()) {
+							if (ch.ready.empty()) {
+								if (ch.playing) {
+									// Chain broke (late interval): count it and re-lock
+									// to arrival when the next one lands.
+									nMissed.fetch_add(1, std::memory_order_relaxed);
+									ch.playing = false;
+									ch.holdFrames = -1; // next start burns a fresh hold
+								}
+								break; // silence for the rest of this block
+							}
+							if (!ch.playing && ch.holdFrames < 0)
+								ch.holdFrames = holdInit; // fresh start: arm the jitter hold once
+							if (ch.holdFrames > 0) {
+								int m = std::min(BLOCK - i, ch.holdFrames);
+								ch.holdFrames -= m;
+								i += m;
+								continue;
+							}
+							// Arrival lock: the interval starts on this very frame.
+							ch.cur = std::move(ch.ready.front());
+							ch.ready.pop_front();
+							ch.curPos = 0;
+							ch.playing = true;
+							ch.holdFrames = -1;
+							if (ch.cur.empty())
+								ch.silenceLeft = N; // silence interval placeholder
+							continue;
+						}
+						int frames = (int) (ch.cur.size() / 2);
+						int m = std::min(BLOCK - i, frames - (int) ch.curPos);
+						for (int k = 0; k < m && out; k++) {
+							out[(size_t) (i + k) * RING_CH]     += ch.cur[(ch.curPos + (size_t) k) * 2] * ch.gainL;
+							out[(size_t) (i + k) * RING_CH + 1] += ch.cur[(ch.curPos + (size_t) k) * 2 + 1] * ch.gainR;
+						}
+						ch.curPos += (size_t) m;
+						i += m;
+						if ((int) ch.curPos >= frames) {
+							ch.cur.clear(); // done: loop pops the next ready interval (chained)
+							ch.curPos = 0;
+						}
+					}
 				}
-				srcs.push_back(std::move(s));
 				++it;
 			}
 			refreshSlots(); // free departed users' slots; update poly channel count
 		}
 		nActive.store(active, std::memory_order_relaxed);
 
-		// Mix this interval into per-slot stereo wide frames; ring backpressure paces realtime.
-		float frame[RING_CH];
-		for (int i = 0; i < N; i++) {
-			std::memset(frame, 0, sizeof(frame));
-			for (const Src& s : srcs) {
-				if (s.buf.empty() || s.slot < 0)
-					continue;
-				size_t idx = (size_t)i * 2;
-				if (idx + 1 >= s.buf.size())
-					continue; // past this interval's decoded audio -> silence (length guard)
-				frame[s.slot * 2] += s.buf[idx] * s.gl;
-				frame[s.slot * 2 + 1] += s.buf[idx + 1] * s.gr;
-			}
-			while (!ring.push(frame)) {
+		if (!anything) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			continue;
+		}
+		// Push the block; ring backpressure paces us to the audio thread's real time.
+		for (int i = 0; i < BLOCK; i++) {
+			while (!ring.push(&block[(size_t) i * RING_CH])) {
 				if (abort.load(std::memory_order_acquire))
 					return;
 				std::this_thread::sleep_for(std::chrono::milliseconds(2));

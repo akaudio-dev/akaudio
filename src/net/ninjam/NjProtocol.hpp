@@ -175,7 +175,10 @@ static const uint32_t FOURCC_OGG = (uint32_t)'O' | ((uint32_t)'G' << 8) | ((uint
 // SET_CHANNEL_INFO declaring real (broadcasting) local channels by name (vol 0 dB, pan
 // center, flags 0 = active). This is what we send instead of the listen-only filler when
 // we transmit.
-std::vector<uint8_t> buildSetChannelInfo(const std::vector<std::string>& channelNames);
+// `flags` applies to every channel: 0 = normal session channel; 2 = voice chat
+// (canonical njclient bit — receivers play voice channels live, not interval-aligned).
+std::vector<uint8_t> buildSetChannelInfo(const std::vector<std::string>& channelNames,
+                                         uint8_t flags = 0);
 
 // UPLOAD_INTERVAL_BEGIN (0x83): announce a new outgoing interval for a local channel.
 std::vector<uint8_t> buildUploadBegin(const unsigned char guid[16], uint32_t fourcc,
