@@ -96,6 +96,8 @@ void NjAudio::onUserChannel(const std::string& user, int chidx, bool active, int
 		ch.vfifo.clear();
 		ch.vhead = 0;
 		ch.vstarted = false;
+		ch.everStarted = false; // interval discipline starts fresh (preview re-opens)
+		ch.pfade = 0;
 	}
 	ch.gainL = gl;
 	ch.gainR = gr;
@@ -138,12 +140,15 @@ void NjAudio::beginInterval(const std::string& user, int chidx, const uint8_t gu
 		uint32_t estSize) {
 	static const uint8_t zero[16] = {0};
 	std::string key = chanKey(user, chidx);
-	// Voice channels have no interval cadence — they play live from a FIFO.
-	bool voice;
+	// Voice channels have no interval cadence — they play live from a FIFO. A channel
+	// whose chain hasn't locked yet gets the join-gap preview (progressive decode of
+	// this very interval while it streams in).
+	bool voice, started;
 	{
 		std::lock_guard<std::mutex> lock(mu);
 		auto it = channels.find(key);
 		voice = (it != channels.end()) && it->second.voice;
+		started = (it != channels.end()) && it->second.everStarted;
 	}
 	if (std::memcmp(guid, zero, 16) == 0) {
 		// Silence interval: enqueue an empty slot to keep this channel's cadence.
@@ -167,6 +172,7 @@ void NjAudio::beginInterval(const std::string& user, int chidx, const uint8_t gu
 	t.chanKey = key;
 	t.ogg = ogg;
 	t.voice = voice;
+	t.preview = ogg && !voice && !started;
 	// estSize is the server's advertised interval size; reserving up front avoids repeated
 	// reallocs as DOWNLOAD_WRITE chunks stream in. Cap it — it's an unvalidated wire value.
 	// (Streaming live uploads advertise 0; voice transfers keep only an undecoded tail.)
@@ -184,12 +190,32 @@ void NjAudio::writeInterval(const uint8_t guid[16], const uint8_t* data, size_t 
 		// Voice: decode as the bytes arrive and hand frames straight to the channel's
 		// live FIFO — no interval assembly, no boundary wait.
 		if (t.ogg && data && len)
-			voiceFeed(t, data, len);
+			pushdataFeed(t, t.bytes, data, len);
 		if (last) {
 			closeTransfer(t);
 			transfers.erase(it);
 		}
 		return;
+	}
+	// Join-gap preview: progressively decode this interval into the channel's live
+	// FIFO too (t.bytes still accumulates whole for the proper decode at `last`). The
+	// moment the channel's chain locks, drop the preview machinery — the fade-out in
+	// mixLoop consumes what's already delivered.
+	if (t.preview && data && len) {
+		bool started;
+		{
+			std::lock_guard<std::mutex> lock(mu);
+			auto c = channels.find(t.chanKey);
+			started = (c != channels.end()) && c->second.everStarted;
+		}
+		if (started) {
+			t.preview = false;
+			closeTransfer(t);
+			t.ptail.clear();
+			t.pcm.clear();
+		} else {
+			pushdataFeed(t, t.ptail, data, len);
+		}
 	}
 	// Bound the accumulated interval: a legit OGG interval is a few MB (worst ~5 MB at
 	// the ~87 s cap), so a stream that keeps sending past this is broken/hostile —
@@ -198,6 +224,7 @@ void NjAudio::writeInterval(const uint8_t guid[16], const uint8_t* data, size_t 
 		t.bytes.insert(t.bytes.end(), data, data + len);
 	else if (data && len) {
 		enqueue(t.chanKey, std::vector<float>()); // keep cadence
+		closeTransfer(t); // a preview transfer holds a pushdata decoder
 		transfers.erase(it);
 		return;
 	}
@@ -215,6 +242,7 @@ void NjAudio::writeInterval(const uint8_t guid[16], const uint8_t* data, size_t 
 	}
 	// On failure / unsupported codec, pcm stays empty => a silence interval (keeps cadence).
 	enqueue(t.chanKey, std::move(pcm));
+	closeTransfer(t); // a preview transfer holds a pushdata decoder
 	transfers.erase(it);
 }
 
@@ -225,20 +253,22 @@ void NjAudio::closeTransfer(Transfer& t) {
 	}
 }
 
-// Voice (net thread): push arriving OGG bytes through a stb_vorbis pushdata decoder.
-void NjAudio::voiceFeed(Transfer& t, const uint8_t* data, size_t len) {
+// Net thread: push arriving OGG bytes through a stb_vorbis pushdata decoder into the
+// channel's live FIFO. `tail` holds the undecoded remainder between calls — the voice
+// path consumes t.bytes in place; the preview path uses t.ptail so t.bytes stays whole.
+void NjAudio::pushdataFeed(Transfer& t, std::vector<uint8_t>& tail, const uint8_t* data, size_t len) {
 	// Bound the undecoded tail; a healthy stream stays tiny because we consume as fast
 	// as chunks arrive. On overflow drop it and let the decoder resync at a page.
-	if (t.bytes.size() + len > (1u << 20)) {
-		t.bytes.clear();
+	if (tail.size() + len > (1u << 20)) {
+		tail.clear();
 		if (t.pv)
 			stb_vorbis_flush_pushdata(t.pv);
 	}
-	t.bytes.insert(t.bytes.end(), data, data + len);
+	tail.insert(tail.end(), data, data + len);
 	size_t off = 0;
 	if (!t.pv) {
 		int used = 0, err = 0;
-		t.pv = stb_vorbis_open_pushdata(t.bytes.data(), (int)t.bytes.size(), &used, &err, nullptr);
+		t.pv = stb_vorbis_open_pushdata(tail.data(), (int)tail.size(), &used, &err, nullptr);
 		if (!t.pv)
 			return; // headers incomplete yet (or junk — then it simply never opens)
 		off = (size_t)used;
@@ -248,7 +278,7 @@ void NjAudio::voiceFeed(Transfer& t, const uint8_t* data, size_t len) {
 		// Wire values — reject junk before it drives buffer sizing.
 		if (t.pvChannels < 1 || t.pvChannels > 2 || t.pvRate < 8000 || t.pvRate > 192000) {
 			closeTransfer(t);
-			t.bytes.clear();
+			tail.clear();
 			nErrors.fetch_add(1, std::memory_order_relaxed);
 			return;
 		}
@@ -256,8 +286,8 @@ void NjAudio::voiceFeed(Transfer& t, const uint8_t* data, size_t len) {
 	for (;;) {
 		float** outputs = nullptr;
 		int nch = 0, samples = 0;
-		int used = stb_vorbis_decode_frame_pushdata(t.pv, t.bytes.data() + off,
-			(int)(t.bytes.size() - off), &nch, &outputs, &samples);
+		int used = stb_vorbis_decode_frame_pushdata(t.pv, tail.data() + off,
+			(int)(tail.size() - off), &nch, &outputs, &samples);
 		if (used == 0)
 			break; // needs more data
 		off += (size_t)used;
@@ -274,11 +304,12 @@ void NjAudio::voiceFeed(Transfer& t, const uint8_t* data, size_t len) {
 		}
 	}
 	if (off > 0)
-		t.bytes.erase(t.bytes.begin(), t.bytes.begin() + off);
+		tail.erase(tail.begin(), tail.begin() + off);
 	voiceDeliver(t);
 }
 
-// Voice (net thread): fixed-ratio linear resample of staged frames -> channel FIFO.
+// Net thread: fixed-ratio linear resample of staged frames -> channel FIFO (voice
+// channels and join-gap previews share this delivery).
 void NjAudio::voiceDeliver(Transfer& t) {
 	double engineRate = sampleRate.load(std::memory_order_relaxed);
 	if (t.pvRate <= 0 || engineRate <= 0)
@@ -310,10 +341,16 @@ void NjAudio::voiceDeliver(Transfer& t) {
 	if (it == channels.end())
 		return;
 	Channel& ch = it->second;
+	// Preview delivery ends the moment the chain locks — the fade-out only consumes
+	// what's already queued; anything later belongs to the (replayed) chained slot.
+	if (!ch.voice && ch.everStarted)
+		return;
 	ch.vfifo.insert(ch.vfifo.end(), out.begin(), out.end());
-	// Skip-ahead: cap the backlog (~0.75 s, mirroring njclient's live mode) so a network
-	// stall never turns into permanently added latency.
-	size_t capF = (size_t)(engineRate * 0.75);
+	// Skip-ahead: cap the backlog so a network stall never turns into permanently added
+	// latency. Voice mirrors njclient's live mode (~0.75 s); a preview rides ~a beat or
+	// two behind the sender and only lives for one interval, so give it more slack —
+	// each skip is an audible phase jump.
+	size_t capF = (size_t)(engineRate * (ch.voice ? 0.75 : 4.0));
 	size_t haveF = (ch.vfifo.size() - ch.vhead) / 2;
 	if (haveF > capF)
 		ch.vhead += (haveF - capF) * 2;
@@ -430,6 +467,7 @@ void NjAudio::start() {
 	if (running.exchange(true, std::memory_order_acq_rel))
 		return; // already running
 	abort.store(false, std::memory_order_release);
+	audioStarted_.store(false, std::memory_order_relaxed); // fresh join gap begins
 	// Build the capture rings ONCE, here, before spawning txThread — so the only
 	// concurrent reader (txLoop) and the audio-thread producer (captureFrame, gated on
 	// txRings) never see the vector being mutated. ~21 s @ 48 kHz headroom each.
@@ -450,6 +488,9 @@ void NjAudio::stop() {
 	if (txThread.joinable())
 		txThread.join();
 	running.store(false, std::memory_order_release);
+	// Clear now (not only in start()) so the UI's join-gap countdown isn't suppressed
+	// by a previous session's flag between a re-join and its mixer launch.
+	audioStarted_.store(false, std::memory_order_relaxed);
 	std::lock_guard<std::mutex> lock(mu);
 	channels.clear();
 	for (auto& kv : transfers)
@@ -672,6 +713,17 @@ void NjAudio::mixLoop() {
 					ch.silenceLeft = 0;
 					ch.holdFrames = -1;
 					ch.playing = false;
+					if (!ch.voice) {
+						// Re-grid re-opens the preview window: the chain re-locks on the
+						// next arrival (up to a whole interval away), so the first
+						// interval at the new tempo streams live meanwhile — the same
+						// treatment as the join gap.
+						ch.everStarted = false;
+						ch.vfifo.clear();
+						ch.vhead = 0;
+						ch.vstarted = false;
+						ch.pfade = 0;
+					}
 				}
 			}
 		}
@@ -681,6 +733,11 @@ void NjAudio::mixLoop() {
 		// so the chain slack is only network jitter — hold the first interval briefly so
 		// every later one arrives in time. (Replaces the old global prebuffer margin.)
 		const int holdInit = (int) std::min(sr * 1.0, (double) N * 0.25);
+		// Preview pacing: buffer ~0.5 s before starting (senders' OGG pages arrive in
+		// ~0.2 s bursts — the voice prebuf is too tight for that), fade the retired
+		// preview tail out over ~0.25 s when the chain takes over.
+		const size_t previewPrebuf = (size_t) (sr * 0.5);
+		const int pfadeTotal = std::max(1, (int) (sr * 0.25));
 
 		std::memset(block.data(), 0, block.size() * sizeof(float));
 		bool anything = false; // any channel present (else idle-sleep instead of pacing silence)
@@ -718,6 +775,8 @@ void NjAudio::mixLoop() {
 						out[(size_t) i * RING_CH + 1] += ch.vfifo[ch.vhead + (size_t) i * 2 + 1] * ch.gainR;
 					}
 					ch.vhead += (size_t) m * 2;
+					if (m > 0)
+						audioStarted_.store(true, std::memory_order_relaxed);
 					if (m < BLOCK)
 						ch.vstarted = false; // ran dry — rebuffer before resuming
 				} else if (N > 0) {
@@ -757,6 +816,22 @@ void NjAudio::mixLoop() {
 							ch.holdFrames = -1;
 							if (ch.cur.empty())
 								ch.silenceLeft = N; // silence interval placeholder
+							else
+								audioStarted_.store(true, std::memory_order_relaxed);
+							if (!ch.everStarted) {
+								// The chain takes over from the join-gap preview: fade
+								// the preview's unplayed tail instead of hard-cutting
+								// (the interval now replays in its proper slot — a
+								// loop-point handover).
+								ch.everStarted = true;
+								ch.vstarted = false;
+								size_t availF = (ch.vfifo.size() - ch.vhead) / 2;
+								ch.pfade = availF > 0 ? pfadeTotal : 0;
+								if (!ch.pfade) {
+									ch.vfifo.clear();
+									ch.vhead = 0;
+								}
+							}
 							continue;
 						}
 						int frames = (int) (ch.cur.size() / 2);
@@ -770,6 +845,43 @@ void NjAudio::mixLoop() {
 						if ((int) ch.curPos >= frames) {
 							ch.cur.clear(); // done: loop pops the next ready interval (chained)
 							ch.curPos = 0;
+						}
+					}
+					// ---- Join-gap preview / its fade-out (mixes over the whole block,
+					// independent of the chained playhead above) ----
+					if (!ch.everStarted) {
+						// Live preview: play the in-flight interval as it streams in
+						// (pushdataFeed fills vfifo). Prebuffer before starting; a dry
+						// spell re-arms the prebuffer, like voice.
+						size_t availF = (ch.vfifo.size() - ch.vhead) / 2;
+						if (!ch.vstarted && availF >= previewPrebuf)
+							ch.vstarted = true;
+						if (ch.vstarted) {
+							int m = (int) std::min<size_t>(availF, (size_t) BLOCK);
+							for (int k = 0; k < m && out; k++) {
+								out[(size_t) k * RING_CH]     += ch.vfifo[ch.vhead + (size_t) k * 2] * ch.gainL;
+								out[(size_t) k * RING_CH + 1] += ch.vfifo[ch.vhead + (size_t) k * 2 + 1] * ch.gainR;
+							}
+							ch.vhead += (size_t) m * 2;
+							if (m > 0)
+								audioStarted_.store(true, std::memory_order_relaxed);
+							if (m < BLOCK)
+								ch.vstarted = false; // ran dry — rebuffer before resuming
+						}
+					} else if (ch.pfade > 0) {
+						size_t availF = (ch.vfifo.size() - ch.vhead) / 2;
+						int m = (int) std::min<size_t>(std::min(availF, (size_t) BLOCK), (size_t) ch.pfade);
+						for (int k = 0; k < m && out; k++) {
+							float g = (float) (ch.pfade - k) / (float) pfadeTotal;
+							out[(size_t) k * RING_CH]     += ch.vfifo[ch.vhead + (size_t) k * 2] * ch.gainL * g;
+							out[(size_t) k * RING_CH + 1] += ch.vfifo[ch.vhead + (size_t) k * 2 + 1] * ch.gainR * g;
+						}
+						ch.vhead += (size_t) m * 2;
+						ch.pfade -= m;
+						if (ch.pfade <= 0 || (size_t) m >= availF) {
+							ch.vfifo.clear(); // fade done (or fifo dry): preview retired
+							ch.vhead = 0;
+							ch.pfade = 0;
 						}
 					}
 				}

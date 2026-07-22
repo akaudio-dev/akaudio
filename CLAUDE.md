@@ -37,7 +37,13 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
     downbeat-aligned). Receive playout is **arrival-locked** (a channel's first
     completed interval starts after a short jitter hold the moment it lands, then
     chains — uniform ~one-interval latency, phase-true to the sender's grid, vs the
-    canonical local-boundary rule's 1-2 intervals). A context-menu **Voice mode**
+    canonical local-boundary rule's 1-2 intervals). The **join gap** (protocol-fundamental:
+    the server relays nothing of the in-progress interval, then the first relayed one
+    must complete) is bridged by a **first-interval live preview**: until a channel's
+    chain locks, its in-flight interval is decoded progressively (the voice pushdata
+    path) and played ~1 s behind the sender, then fades out as the chained slot takes
+    over (the interval replays — a loop-point handover). Re-opens on tempo re-grid.
+    The transport bar shows an "audio in ~Xs" countdown until the first real audio. A context-menu **Voice mode**
     (canonical channel flag 2) transmits rolling 2 s chunks and plays incoming
     voice-flagged channels live via stb_vorbis pushdata (~0.5 s + network; unsynced —
     for talkback/testing). Room chat (send/recv) works. 20 HP panel with an in-panel room browser
@@ -195,7 +201,11 @@ Control flow rules:
 Per-instance state via `dataToJson`/`dataFromJson` (Radio persists `url`/`stationName`/
 `icon`/`playing` and auto-resumes; Ninjam persists `mode`/`joined` and a LISTEN
 `roomLabel`, then auto-resumes — but **never** `transmitting`, so a loaded patch may
-rejoin a room yet never auto-broadcasts the user's live input; TX is always a fresh click). The slug strings in `plugin.json` and
+rejoin a room yet never auto-broadcasts the user's live input. TX auto-enables only on
+an *explicit* join action — room-browser click or Connect — and stays toggleable off.
+When a patch-load rejoin lands you in a room silent with an instrument plugged into IN,
+a pulsing yellow START TRANSMITTING takeover (`TxNudge`) covers the jam view with an
+arrow at the TX LED; clicking it or the LED starts TX and retires it). The slug strings in `plugin.json` and
 `createModel(...)` are permanent identity — never rename once patches reference them.
 
 **NINJAM credentials never go in a patch.** The join server host/port, username, and

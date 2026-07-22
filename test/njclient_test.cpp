@@ -82,6 +82,7 @@ int main(int argc, char** argv) {
 	double peak = 0.0, sumSq = 0.0;
 	long long heard = 0, underruns = 0;
 	double nextReport = 2.0, elapsed = 0.0;
+	double firstAudible = -1.0; // wall-clock seconds from start to the first non-silent frame
 
 	auto start = std::chrono::steady_clock::now();
 	auto deadline = start +
@@ -102,6 +103,12 @@ int main(int argc, char** argv) {
 				if (b > peak) peak = b;
 				sumSq += (double)l * l + (double)r * r;
 				heard++;
+				if (firstAudible < 0.0 && (a > 0.01 || b > 0.01)) {
+					firstAudible = std::chrono::duration<double>(
+						std::chrono::steady_clock::now() - start).count();
+					std::printf("[audio] FIRST AUDIBLE frame at t=%.2fs (intervals decoded so far: %ld)\n",
+					            firstAudible, client.intervalsDecoded());
+				}
 			} else {
 				underruns++;
 			}

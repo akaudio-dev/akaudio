@@ -89,6 +89,8 @@ public:
 	long intervalsDecoded() const { return audio.intervalsDecoded(); }
 	long decodeErrors() const { return audio.decodeErrors(); }
 	long missedIntervals() const { return audio.missedIntervals(); }
+	// True once any room audio has reached the mix this session (join-gap countdown).
+	bool audioStarted() const { return audio.audioStarted(); }
 
 private:
 	void run(std::string host, int port, std::string user, std::string pass);

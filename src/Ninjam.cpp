@@ -232,7 +232,11 @@ struct Ninjam : Module {
 	std::atomic<float> peak{0.f};
 
 	// ---- Transmit ----
-	std::atomic<bool> transmitting{false}; // TX enable (NOT persisted — explicit per session)
+	std::atomic<bool> transmitting{false}; // TX enable (auto-on at explicit join; NOT persisted)
+	// One-shot "you're silent!" nudge: set only by the patch-load auto-rejoin (the one
+	// join path that deliberately leaves TX off), shown by the widget as a big yellow
+	// call-to-action until the user makes any TX decision (or leaves the room).
+	std::atomic<bool> txNudge{false};
 	std::atomic<float> txQuality{0.5f};    // encoder VBR quality (persisted; ~190 kbps)
 	std::atomic<bool> txVoice{false};      // voice-chat mode: live, unsynced (persisted setting)
 	std::atomic<int> txDeclared{-1};       // last channel count declared (written on UI thread)
@@ -422,6 +426,7 @@ struct Ninjam : Module {
 		// stays true from the old session and the next room's uploads start mid-interval
 		// instead of on a downbeat — other clients hear us out of sync.
 		txArmed.store(false, std::memory_order_relaxed);
+		txNudge.store(false, std::memory_order_relaxed); // nudge is per-session
 		std::lock_guard<std::mutex> lock(rosterMutex);
 		roster.clear();
 	}
@@ -500,6 +505,10 @@ struct Ninjam : Module {
 		joinHost = room.host;
 		joinPort = room.port;
 		roomLabel = room.name.empty() ? room.host : room.name;
+		// Joining a jam means playing in it: auto-enable TX on every *explicit* join
+		// (here and joinManual) so the user isn't silent because they forgot the toggle.
+		// The patch-load rejoin (dataFromJson) deliberately does NOT do this.
+		transmitting = true;
 		joinStart();
 	}
 	// Direct join to a typed server (private/registered), with the credentials from
@@ -516,6 +525,7 @@ struct Ninjam : Module {
 		joinHost = host;
 		joinPort = port > 0 ? port : 2049;
 		roomLabel = joinHost;
+		transmitting = true; // explicit join → auto-enable TX (see startJoin)
 		joinStart();
 	}
 
@@ -639,8 +649,19 @@ struct Ninjam : Module {
 		size_t n;
 		{ std::lock_guard<std::mutex> lock(rosterMutex); n = roster.size(); }
 		n += 1; // the roster lists only remote players; count ourselves too
-		if (bpm > 0)
+		if (bpm > 0) {
+			// Join-gap countdown: until the room's audio actually reaches the output
+			// (preview or chained interval), estimate when it will — senders start the
+			// first interval we can decode at the next boundary, and the preview plays
+			// it ~a second in. Only when someone's actually there to hear.
+			if (n > 1 && bpi > 0 && !njclient.audioStarted()) {
+				float secs = (1.f - jamPhase.load(std::memory_order_relaxed))
+					* (float) bpi * 60.f / (float) bpm + 1.f;
+				return string::f("%s \xc2\xb7 %d BPM \xc2\xb7 %d BPI \xc2\xb7 audio in ~%ds",
+					sn, bpm, bpi, (int) std::ceil(secs));
+			}
 			return string::f("%s \xc2\xb7 %d BPM \xc2\xb7 %d BPI \xc2\xb7 %d here", sn, bpm, bpi, (int) n);
+		}
 		return std::string(sn) + "\xe2\x80\xa6";
 	}
 
@@ -862,9 +883,11 @@ struct Ninjam : Module {
 			txVoice = json_boolean_value(j);
 
 		// Auto-resume on patch load (JOIN reconnects to the local default server; the
-		// user's audio is NOT transmitted until they click TX — see transmitting above).
+		// user's audio is NOT transmitted until they click TX or explicitly join a
+		// room themselves — see transmitting above).
 		if (mode == MODE_JOIN && joined) {
 			joined = false; // joinStart() sets it
+			txNudge = true; // rejoined silent → panel shows the START TRANSMITTING nudge
 			joinStart();
 		} else if (mode == MODE_LISTEN && listening) {
 			listening = false; // listen() sets it
@@ -1197,6 +1220,10 @@ struct RoomBrowser : ui::ScrollWidget {
 				lastGen = g;
 				lastFilter = f;
 				rebuild();
+				// A freshly filled list always presents from the top: rooms sort
+				// busiest-first, so the bottom is the dead end — and a shrunken list
+				// would otherwise leave the old scroll offset clamped down there.
+				offset = math::Vec(0, 0);
 			}
 		}
 		ui::ScrollWidget::step();
@@ -1316,8 +1343,10 @@ struct RefreshButton : HoverButton {
 struct TxToggle : HoverButton {
 	Ninjam* module = nullptr;
 	void onPress(const ButtonEvent& e) override {
-		if (module)
+		if (module) {
 			module->transmitting = !module->transmitting;
+			module->txNudge = false; // any explicit TX decision retires the nudge
+		}
 		e.consume(this);
 	}
 	void draw(const DrawArgs& args) override {
@@ -1827,6 +1856,67 @@ struct OutputSection : Widget {
 	}
 };
 
+// Patch-load "you're silent!" takeover. The auto-rejoin path deliberately never
+// auto-enables TX (a shared patch must not broadcast the user's input), which means a
+// reloaded patch can sit in a room with an instrument wired in while nobody hears a
+// note. When that state holds (txNudge && joined && !transmitting && IN connected —
+// see NinjamWidget::step), this covers the jam view with a big pulsing yellow
+// START TRANSMITTING banner and an arrow whose tip rests on the TX LED. Clicking
+// anywhere on it (or the LED itself) starts TX and retires the nudge for the session.
+struct TxNudge : Widget {
+	Ninjam* module = nullptr;
+	float ledX = 0.f; // TX LED center, local coords (set by the widget ctor)
+	void onButton(const ButtonEvent& e) override {
+		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT) {
+			if (module) {
+				module->transmitting = true;
+				module->txNudge = false;
+			}
+			e.consume(this);
+		}
+	}
+	void draw(const DrawArgs& args) override {
+		NVGcontext* vg = args.vg;
+		const float w = box.size.x, h = box.size.y;
+		// Slow pulse so it reads as "act on me", not decoration.
+		const float pulse = 0.70f + 0.30f * std::sin((float) system::getTime() * 4.f);
+		const NVGcolor yel = nvgRGB(0xff, 0xd2, 0x1e);
+		const NVGcolor yelPulse = nvgRGBA(0xff, 0xd2, 0x1e, (unsigned char) (0xff * pulse));
+
+		// Banner card over the chat console.
+		const float bx = 10.f, bw = w - 2 * bx, bh = 86.f, by = (h - bh) * 0.42f;
+		nvgBeginPath(vg);
+		nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
+		nvgFillColor(vg, nvgRGBA(0x14, 0x10, 0x00, 0xe8));
+		nvgFill(vg);
+		nvgStrokeWidth(vg, 2.f);
+		nvgStrokeColor(vg, yelPulse);
+		nvgStroke(vg);
+		drawTxt(vg, FONT_BOLD, w / 2, by + 22.f, 23.f, yel, "START", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, w / 2, by + 47.f, 23.f, yel, "TRANSMITTING", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_REG, w / 2, by + bh - 15.f, 10.f, nvgRGBA(0xff, 0xd2, 0x1e, 0xb8),
+			"rejoined by the patch \xe2\x80\x94 the room can't hear you", NVG_ALIGN_CENTER);
+
+		// Arrow: banner bottom → TX LED. The curve straightens to vertical at the tip
+		// (control points share the tip's x), so the head points straight down at the LED.
+		const float sy = by + bh + 5.f, ey = h - 1.f;
+		nvgBeginPath(vg);
+		nvgMoveTo(vg, w / 2, sy);
+		nvgBezierTo(vg, w / 2, sy + (ey - sy) * 0.55f, ledX, ey - (ey - sy) * 0.45f, ledX, ey - 11.f);
+		nvgStrokeWidth(vg, 4.f);
+		nvgLineCap(vg, NVG_ROUND);
+		nvgStrokeColor(vg, yelPulse);
+		nvgStroke(vg);
+		nvgBeginPath(vg);
+		nvgMoveTo(vg, ledX, ey);
+		nvgLineTo(vg, ledX - 7.f, ey - 12.f);
+		nvgLineTo(vg, ledX + 7.f, ey - 12.f);
+		nvgClosePath(vg);
+		nvgFillColor(vg, yelPulse);
+		nvgFill(vg);
+	}
+};
+
 struct NinjamWidget : ModuleWidget {
 	Ninjam* nj = nullptr;
 	// State-dependent widgets: connect UI (shown when disconnected) vs jam view (connected).
@@ -1837,6 +1927,7 @@ struct NinjamWidget : ModuleWidget {
 	Widget* jamView = nullptr;
 	Widget* metro = nullptr;
 	Widget* chatField = nullptr;
+	Widget* txNudge = nullptr;
 
 	NinjamWidget(Ninjam* module) {
 		nj = module;
@@ -1955,6 +2046,19 @@ struct NinjamWidget : ModuleWidget {
 		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xReset, rowB), module, Ninjam::RESET_OUTPUT));
 		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xRun, rowB), module, Ninjam::RUN_OUTPUT));
 		addOutput(createOutputCentered<PJ301MPort>(Vec(W * OutputSection::xPhase, rowB), module, Ninjam::PHASE_OUTPUT));
+
+		// Patch-load TX nudge — added last so it draws over everything it spans (jam
+		// view, chat field, peak meter). Runs from under the status bar down to the IN
+		// well's plate top, so the arrow tip lands just above the TX LED.
+		TxNudge* tn = new TxNudge;
+		tn->module = module;
+		const float plateTopHi = mm2px(AK_PLATE_TOP_MM - (AK_ROW_OUT_MM - AK_ROW_CV_MM));
+		tn->box.pos = Vec(6, jvTop);
+		tn->box.size = Vec(W - 12, plateTopHi - 3.f - jvTop);
+		tn->ledX = W * OutputSection::xTx - tn->box.pos.x;
+		tn->visible = false;
+		addChild(tn);
+		txNudge = tn;
 	}
 
 	// Swap connect UI <-> jam view each frame; keep our broadcast channels in sync.
@@ -1977,6 +2081,14 @@ struct NinjamWidget : ModuleWidget {
 		if (jamView) jamView->visible = joined;
 		if (metro) metro->visible = joined;
 		if (chatField) chatField->visible = joined;
+		// The TX nudge shows only while the patch-load rejoin's "silent in a room with
+		// an instrument plugged in" state actually holds — plugging IN in later (cables
+		// restore after dataFromJson) reveals it, any TX decision retires it.
+		if (txNudge)
+			txNudge->visible = joined
+				&& nj->txNudge.load(std::memory_order_relaxed)
+				&& !nj->transmitting.load(std::memory_order_relaxed)
+				&& nj->inputs[Ninjam::LEFT_INPUT].isConnected();
 		if (nj) nj->syncTransmit();
 		ModuleWidget::step();
 	}

@@ -129,6 +129,9 @@ public:
 	long decodeErrors() const { return nErrors.load(std::memory_order_relaxed); }
 	int activeChannels() const { return nActive.load(std::memory_order_relaxed); }
 	long missedIntervals() const { return nMissed.load(std::memory_order_relaxed); }
+	// True once any room audio (preview, voice, or chained interval) has reached the
+	// mix this session — the UI's join-gap countdown hides itself on this.
+	bool audioStarted() const { return audioStarted_.load(std::memory_order_relaxed); }
 
 private:
 	struct Channel {
@@ -146,6 +149,15 @@ private:
 		int silenceLeft = 0;      // remaining frames of a silence interval
 		int holdFrames = -1;      // startup jitter margin left to burn; -1 = not armed
 		bool playing = false;     // mid-cadence (a chain break => re-lock to arrival)
+		// First-interval live preview: until the chain locks (everStarted), a non-voice
+		// channel's in-flight interval is decoded progressively (pushdata) and played
+		// live from vfifo, so a fresh join hears the room within ~a second of the next
+		// downbeat instead of a whole interval later. When the first chained interval
+		// pops, the preview tail fades out over pfade frames (a loop-point handover:
+		// the interval then replays in its proper slot). Reset on re-grid so a tempo/
+		// BPI change gets the same treatment.
+		bool everStarted = false; // a chained interval has (ever) started on this channel
+		int pfade = 0;            // preview fade-out frames remaining (0 = no fade active)
 		// Voice-mode FIFO (net thread appends decoded frames under mu; mix thread
 		// consumes). vhead = frames*2 already consumed (compacted periodically).
 		std::vector<float> vfifo;
@@ -156,8 +168,10 @@ private:
 		std::string chanKey;
 		bool ogg = false;
 		bool voice = false;            // decode progressively as chunks arrive
+		bool preview = false;          // ALSO decode progressively, for the join-gap preview
 		std::vector<uint8_t> bytes;    // interval mode: whole interval; voice: undecoded tail
-		// Voice-mode progressive decoder state (net thread only).
+		std::vector<uint8_t> ptail;    // preview mode: undecoded pushdata tail (bytes stays whole)
+		// Progressive (pushdata) decoder state — voice and preview (net thread only).
 		stb_vorbis* pv = nullptr;      // stb_vorbis pushdata handle
 		int pvChannels = 0, pvRate = 0;
 		std::vector<float> pcm;        // decoded-but-not-yet-resampled stereo frames
@@ -170,7 +184,11 @@ private:
 	void enqueue(const std::string& key, std::vector<float>&& interval);
 	std::vector<float> decodeOgg(const uint8_t* data, size_t len, int frames);
 	static void closeTransfer(Transfer& t); // frees the pushdata decoder, if any
-	void voiceFeed(Transfer& t, const uint8_t* data, size_t len); // net thread
+	// Progressive OGG decode of arriving chunks into the channel FIFO (net thread).
+	// `tail` is the undecoded-bytes buffer this stream consumes: t.bytes for voice,
+	// t.ptail for the join-gap preview (whose t.bytes must stay whole for the final
+	// interval decode).
+	void pushdataFeed(Transfer& t, std::vector<uint8_t>& tail, const uint8_t* data, size_t len);
 	void voiceDeliver(Transfer& t);         // resample t.pcm -> channel vfifo (takes mu)
 	void mixLoop();
 	void txLoop();                            // capture -> encode -> onUploadInterval
@@ -222,6 +240,7 @@ private:
 
 	std::map<std::string, Transfer> transfers; // net thread only (keyed by 16-byte guid)
 
+	std::atomic<bool> audioStarted_{false};
 	std::atomic<long> nDecoded{0};
 	std::atomic<long> nErrors{0};
 	std::atomic<int> nActive{0};
