@@ -1,0 +1,12 @@
+{
+  "plugin": "akaudio",
+  "model": "Radio",
+  "version": "2.0.4",
+  "params": [],
+  "data": {
+    "url": "https://ice6.somafm.com/scanner-128-mp3",
+    "stationName": "SomaFM SF Police Scanner",
+    "icon": "",
+    "playing": true
+  }
+}

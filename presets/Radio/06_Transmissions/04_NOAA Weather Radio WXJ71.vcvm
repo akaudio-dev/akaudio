@@ -1,0 +1,12 @@
+{
+  "plugin": "akaudio",
+  "model": "Radio",
+  "version": "2.0.4",
+  "params": [],
+  "data": {
+    "url": "https://wxradio.org/IL-Peoria-WXJ71",
+    "stationName": "NOAA Weather Radio WXJ71",
+    "icon": "",
+    "playing": true
+  }
+}

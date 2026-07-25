@@ -1,0 +1,12 @@
+{
+  "plugin": "akaudio",
+  "model": "Radio",
+  "version": "2.0.4",
+  "params": [],
+  "data": {
+    "url": "http://stream.mikev.com/khb36.mp3",
+    "stationName": "NOAA Weather Radio KHB36",
+    "icon": "",
+    "playing": true
+  }
+}
