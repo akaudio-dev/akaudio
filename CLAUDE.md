@@ -100,6 +100,36 @@ so exporting nothing from it is correct and lets `init` auto-export as usual.
 Re-apply this one-liner on any FAAD2 upgrade (verify with `objdump -p plugin.dll |
 grep -w init`).
 
+**FAAD2 must also be compiled `-fvisibility=hidden` on Linux** (same target-specific
+`CFLAGS` line as `-DHAVE_CONFIG_H`) — this is a correctness requirement, not a size
+tweak, and its absence was a hard SIGSEGV the moment any AAC/HLS stream started
+(fixed 2026-07-25). FAAD2's `cfft.c` defines `cffti`/`cfftf`/`cfftb`, and
+**`libRack.so` exports those exact three names** from its own (FFTPACK) FFT with
+incompatible signatures — `cfft_info *cffti(uint16_t n)` vs
+`void cffti(int *n, float *wsave)`. ELF puts libRack in the global lookup scope
+*before* plugin.so is `dlopen`ed, so FAAD2's own internal call
+(`mdct.c: mdct->cfft = cffti(N/4)`) bound to **libRack's** `cffti`, which
+dereferenced the integer `64` as a pointer. Hidden visibility makes the definitions
+local to plugin.so so those calls bind at static-link time and can't be interposed;
+it also stops us exporting these generic names *to* other plugins. Rack's `init`
+still auto-exports because the flag is scoped to FAAD2's objects only.
+macOS is immune (AudioToolbox, no FAAD2) and Windows is immune (PE binds
+intra-DLL calls directly — no ELF-style interposition); this is Linux-only.
+Verify after any FAAD2 upgrade or Makefile change:
+```bash
+nm -D --defined-only plugin.so | grep -w cffti   # must print NOTHING
+comm -12 <(nm -D --defined-only plugin.so | awk '{print $3}' | sort -u) \
+         <(nm -D --defined-only /path/to/libRack.so | awk '{print $3}' | sort -u) \
+  | grep -v '^_Z'   # only __bss_start/_edata/_end should remain
+```
+Note this is a *class* of bug, not one symbol: any future vendored C library can
+collide with an undocumented `libRack.so` export. The `comm` sweep above is the
+general check; hidden visibility on vendored objects is the general fix. Do **not**
+"fix" it by calling Rack's FFT instead — `cffti` is in no Rack public header (an
+accidental export, free to vanish), it may be absent from `libRack.dll.a` where
+Windows must resolve every symbol at link time, and the two APIs are structurally
+different (returns an allocated `cfft_info*` vs fills a caller's `wsave[]`).
+
 ## THE REALTIME / THREADING CONTRACT (most important thing to get right)
 
 Rack runs `Module::process(args)` on the **audio thread**, once per sample frame (tens of

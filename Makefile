@@ -65,8 +65,26 @@ endif
 # libfaad/common.h pull in src/dep/faad2/config.h (modern-libc code paths). A
 # target-specific append keeps it off every other .c — notably libogg/libvorbis,
 # which test HAVE_CONFIG_H and would try to include their own missing config.h.
+#
+# -fvisibility=hidden on the SAME objects is not an optimization — it is required
+# for correctness on Linux (cost a hard crash in 2.0.3; see below). FAAD2's cfft.c
+# defines cffti/cfftf/cfftb, and libRack.so ALSO exports those exact names from its
+# own (FFTPACK) FFT with incompatible signatures:
+#     FAAD2:    cfft_info *cffti(uint16_t n)          <- takes an integer
+#     libRack:  void       cffti(int *n, float *wsave) <- takes pointers
+# ELF puts libRack in the global lookup scope before plugin.so is dlopen'd, so
+# FAAD2's own intra-library call (mdct.c: `mdct->cfft = cffti(N/4)`) got bound to
+# *libRack's* cffti, which dereferenced the integer 64 as a pointer -> SIGSEGV the
+# instant a stream hit NeAACDecInit. Hidden visibility makes the definitions local
+# to plugin.so, so those calls bind at static-link time and cannot be interposed;
+# it also stops us exporting these generic names to other plugins. AacDecoder.cpp
+# is compiled without the flag and still links against the hidden NeAACDec* defs
+# normally (hidden != unlinkable, just not dynamically exported) -- and Rack's
+# init() stays exported because the flag is scoped to FAAD2's objects only.
+# Do not drop this on a FAAD2 upgrade; verify with:
+#     nm -D --defined-only plugin.so | grep -w cffti   # must print nothing
 ifndef ARCH_MAC
-$(patsubst %,build/%.o,$(FAAD2_SOURCES)): CFLAGS += -DHAVE_CONFIG_H
+$(patsubst %,build/%.o,$(FAAD2_SOURCES)): CFLAGS += -DHAVE_CONFIG_H -fvisibility=hidden
 endif
 
 # Windows-only: the net/ layer's sockets are Winsock2 (src/net/Socket.hpp maps the
