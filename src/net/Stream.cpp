@@ -351,9 +351,14 @@ void StreamClient::run(std::string url) {
 		ResampleCtx rs{ring, running, abort, produced, sampleRate};
 
 		if (isAac) {
-#if defined(__APPLE__)
-			// AAC via the system AudioToolbox (macOS). The decoder pushes decoded
-			// PCM through onPCM; ResampleCtx resamples to the engine rate.
+			// AAC via AacDecoder (AudioToolbox on macOS, vendored FAAD2 elsewhere).
+			// The decoder pushes decoded PCM through onPCM; ResampleCtx resamples to
+			// the engine rate. available() is true on every platform now, but keep
+			// the guard so a future build that compiles it out fails cleanly.
+			if (!AacDecoder::available()) {
+				setStatus(State::Error, "AAC unsupported");
+				goto cleanup;
+			}
 			AacDecoder dec;
 			dec.onPCM = [&](const float* pcm, int frames, double srcRate) {
 				rs.feedStereoBlock(pcm, frames, srcRate);
@@ -377,10 +382,6 @@ void StreamClient::run(std::string url) {
 					break;
 			}
 			dec.close();
-#else
-			setStatus(State::Error, "AAC needs macOS");
-			goto cleanup;
-#endif
 		}
 		else {
 			ReadCtx ctx;
@@ -452,7 +453,7 @@ cleanup:
 
 void StreamClient::runHls(std::string url) {
 	if (!AacDecoder::available()) {
-		setStatus(State::Error, "HLS needs macOS");
+		setStatus(State::Error, "HLS unsupported");
 		return;
 	}
 

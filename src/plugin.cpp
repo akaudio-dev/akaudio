@@ -15,6 +15,17 @@ Plugin* pluginInstance;
 // Register every module's Model here. No network setup happens here: Winsock
 // init and the SIGPIPE guard run lazily inside netResolveConnect the first time
 // a Module actually opens a connection (net/Socket.cpp netStartup()).
+//
+// `init` has C linkage from Rack's headers; Rack loads us by GetProcAddress("init").
+// On Windows we mark it dllexport so it becomes the *only* exported symbol: MinGW
+// otherwise auto-exports every global (works, but pointlessly exports FAAD2 /
+// libvorbis / our net/ internals), and one explicit export flips the linker into
+// export-only-what's-marked mode — with just init, the minimal surface Rack needs.
+// (This is also why vendored FAAD2's own dllexport had to be blanked; see
+// src/dep/faad2/include/neaacdec.h — otherwise it, not init, would be that surface.)
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
 void init(Plugin* p) {
 	pluginInstance = p;
 

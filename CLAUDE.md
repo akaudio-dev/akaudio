@@ -75,9 +75,30 @@ selects the mac-arm64 / mac-x64 / lin-x64 / win-x64 zip for the host.
 app — accepted). The Makefile globs `src/**/*.cpp` via `find`, so new files under `src/`
 are picked up automatically. It also compiles vendored **libogg + libvorbis**
 (`src/dep/libogg`, `src/dep/libvorbis`) directly — for OGG-Vorbis *encoding* (NINJAM
-transmit); no separate `make dep`. Decoding uses **stb_vorbis** (NINJAM intervals) and
-**dr_mp3** (radio). macOS-only AAC links `-framework AudioToolbox -framework CoreFoundation`
-(guarded by `ifdef ARCH_MAC`, after `include plugin.mk`).
+transmit); no separate `make dep`. Decoding uses **stb_vorbis** (NINJAM intervals),
+**dr_mp3** (radio), and — for **AAC/HLS** — either the system **AudioToolbox** on
+macOS (links `-framework AudioToolbox -framework CoreFoundation`, guarded by
+`ifdef ARCH_MAC` after `include plugin.mk`) or the vendored **FAAD2**
+(`src/dep/faad2`) on **Windows + Linux**. FAAD2's `libfaad/*.c` are added to
+`SOURCES` in an `ifndef ARCH_MAC` block (mac never compiles them); this needs
+`ARCH_MAC` known *before* `include plugin.mk`, so the Makefile `include`s `arch.mk`
+early (idempotent — plugin.mk includes it again). FAAD2 builds with its stock
+float defaults (SBR + PS = full HE-AAC v2); the only config is
+`src/dep/faad2/config.h`, pulled in via `-DHAVE_CONFIG_H` **scoped to the FAAD2
+objects only** (a target-specific `CFLAGS +=`, because libogg/libvorbis also test
+`HAVE_CONFIG_H` and would try to include their own). See `src/dep/faad2/config.h`
+for why (MinGW/glibc take common.h's POSIX branch, which without it falls back to
+pre-C89 `bcopy`/`index` stubs that don't compile). One **local patch** to the
+vendored source: `include/neaacdec.h` normally marks its API
+`__declspec(dllexport)` on `_WIN32`; that patch blanks `NEAACDECAPI` there. Reason
+(cost a broken 2.0.3 install): MinGW auto-exports *every* symbol from a DLL **only
+while nothing is explicitly exported** — the instant FAAD2's `dllexport` appears,
+plugin.dll exports **only** the `NeAACDec*` functions and **drops Rack's `init`**,
+so Rack refuses to load ("Failed to read init() symbol"). `-Wl,--export-all-symbols`
+does **not** override this. FAAD2 is compiled into plugin.dll (never its own DLL),
+so exporting nothing from it is correct and lets `init` auto-export as usual.
+Re-apply this one-liner on any FAAD2 upgrade (verify with `objdump -p plugin.dll |
+grep -w init`).
 
 ## THE REALTIME / THREADING CONTRACT (most important thing to get right)
 
@@ -162,12 +183,19 @@ Control flow rules:
   Radio. Verify (poll `StreamClient` state+`producedFrames`) → identify (radio-browser
   `byurl`) → fetch favicon (`ImageCache`). Does **not** write presets — returns a result
   the UI applies (commit+save / name-to-save / rollback). Rack-free (paths passed in).
-- `AacDecoder.{hpp,cpp}` — streaming ADTS-AAC, **macOS only** (`AudioToolbox`). Push
-  model: `feed()` bytes → PCM via `onPCM`. Off-macOS: `available()` false.
-- `Hls.{hpp,cpp}` + `StreamClient::runHls` — **HLS** (`.m3u8`), **macOS only** (rides the
-  AAC path). Resolves master→variant, polls the live media playlist, fetches each `.ts`
-  segment, `tsExtractAdts` (tiny MPEG-TS→ADTS demux) → `AacDecoder`. `looksLikeHls`
-  routes `run`→`runHls`. Makes BBC Radio 4 etc. playable.
+- `AacDecoder.{hpp,cpp}` — streaming ADTS-AAC, **cross-platform**. Push model:
+  `feed()` bytes → interleaved-stereo float PCM via `onPCM`. Two backends behind one
+  interface: **AudioToolbox** on macOS, vendored **FAAD2** (`src/dep/faad2`) on
+  Windows/Linux (`NeAACDecOpen`/`Init`/`Decode`; float output, `downMatrix`;
+  `feed()` accumulates bytes, parses ADTS frame lengths, decodes whole frames, fans
+  mono→centered stereo). Both do **HE-AAC v2** (SBR+PS), so `onPCM`'s `srcRate` can
+  change mid-stream (SBR doubles it) — the resampler already reads rate per block.
+  `available()` is now true everywhere (kept as a runtime guard, not a platform gate).
+  The FAAD2 path is exercised offline by `test/aac_decode_test.cpp`.
+- `Hls.{hpp,cpp}` + `StreamClient::runHls` — **HLS** (`.m3u8`), **cross-platform** (rides
+  the AAC path, so it followed AAC off macOS). Resolves master→variant, polls the live
+  media playlist, fetches each `.ts` segment, `tsExtractAdts` (tiny MPEG-TS→ADTS demux)
+  → `AacDecoder`. `looksLikeHls` routes `run`→`runHls`. Makes BBC Radio 4 etc. playable.
 - `RoomDirectory.{hpp,cpp}` — background directory of public NINJAM rooms. `refresh()`
   fetches+parses `http://ninbot.com/app/servers.php` (jansson) into a mutex-guarded
   `vector<Room>`; UI reads `rooms()`/`status()` instantly. `Room.playUrl()` is the http
@@ -264,6 +292,20 @@ with undo).
     -framework AudioToolbox -framework CoreFoundation \
     -o build/play_test && build/play_test [url] [seconds]
   ```
+  On **Windows/Linux** the AAC path is FAAD2, not AudioToolbox — drop the two
+  `-framework` lines and add the FAAD2 objects + include (`-I src/dep/faad2/include`
+  and `build/src/dep/faad2/libfaad/*.o` from a prior `make`), and `-lws2_32` on Windows.
+- `aac_decode_test.cpp` — offline decode smoke test for the portable **FAAD2** AAC path
+  (Windows/Linux). Feeds a raw ADTS-AAC file through `AacDecoder` and asserts real,
+  non-silent stereo PCM came out (frames, SBR-doubled output rate, RMS). Isolates the
+  decoder from the socket stack — no network, no TLS. Build reuses the already-compiled
+  FAAD2 objects:
+  ```bash
+  g++ -std=c++11 -I src test/aac_decode_test.cpp src/net/AacDecoder.cpp \
+    build/src/dep/faad2/libfaad/*.o -o build/aac_decode_test
+  # capture a few seconds of any AAC/AAC+ stream, then:
+  build/aac_decode_test sample.aac   # exit 0 = real audio; HE-AAC verifies SBR (22050→44100)
+  ```
 - `njclient_test.cpp` — NINJAM protocol client against a server.
 - `enc_test.cpp` — OGG-Vorbis encoder.
 
@@ -293,9 +335,13 @@ link* on every platform**, not just macOS.
     network init happens only when a Module needs it, never in plugin `init()`). The
     Makefile adds `-lws2_32`
     (`ifdef ARCH_WIN`). Keep new socket code going through the shim, not raw POSIX calls.
-  - **macOS-only AAC/HLS** (`AacDecoder`/`Hls`, AudioToolbox) are `ifdef ARCH_MAC`-guarded
-    in the Makefile and degrade gracefully off-mac (no AAC/HLS, MP3 still works) — compiles
-    everywhere (verified on Windows).
+  - **AAC/HLS decode is now cross-platform** (`AacDecoder`/`Hls`). macOS uses the system
+    AudioToolbox (`ifdef ARCH_MAC` frameworks); Windows + Linux use vendored **FAAD2**
+    (`src/dep/faad2`, `libfaad/*.c` added to `SOURCES` `ifndef ARCH_MAC`). FAAD2 is plain
+    C compiled by `$(CC)` — no autotools/CMake step, config via `src/dep/faad2/config.h`
+    (`-DHAVE_CONFIG_H` scoped to FAAD2 objects). Verified building + decoding real
+    HE-AAC/AAC-LC on Windows; the same portable C builds on lin-x64 via the toolchain.
+    GPLv2-or-later, compatible with our GPL-3.0-or-later. (Was macOS-only through 2.0.2.)
 - **Manifest/version rules** the library enforces (see `plugin.json`): `slug` is permanent
   identity (only `[A-Za-z0-9_-]`, never rename post-release); `version` is
   `MAJOR.MINOR.REVISION` with **MAJOR = Rack major (2)**, no `v` prefix; `sourceUrl` is the

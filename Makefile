@@ -24,6 +24,25 @@ FLAGS += -I src/dep/libogg/include -I src/dep/libvorbis/include -I src/dep/libvo
 SOURCES += src/dep/libogg/src/bitwise.c src/dep/libogg/src/framing.c
 SOURCES += $(filter-out %barkmel.c %psytune.c %tone.c %vorbisfile.c, $(wildcard src/dep/libvorbis/lib/*.c))
 
+# Resolve the target arch NOW (ARCH_MAC/WIN/LIN) so the FAAD2 sources below can be
+# picked per-platform before plugin.mk finalizes OBJECTS — compile.mk does
+# `OBJECTS := ... $(SOURCES)` (immediate) at include time, so SOURCES must be
+# complete first. arch.mk only runs `$(CC) -dumpmachine` and sets ARCH_* vars;
+# plugin.mk includes it again later, which is harmless (idempotent).
+include $(RACK_DIR)/arch.mk
+
+# Vendored FAAD2 — the HE-AAC (AAC-LC + SBR + PS) DECODER for AAC/HLS streams on
+# Windows + Linux. macOS decodes AAC through the system AudioToolbox instead (see
+# the ARCH_MAC block after `include plugin.mk`), so it doesn't compile FAAD2 at
+# all. FAAD2's defaults are a float build with SBR+PS enabled; the only tweak is
+# src/dep/faad2/config.h, applied via -DHAVE_CONFIG_H scoped to the FAAD2 objects
+# below (NOT globally — libogg/libvorbis also test HAVE_CONFIG_H).
+ifndef ARCH_MAC
+FAAD2_SOURCES := $(wildcard src/dep/faad2/libfaad/*.c)
+FLAGS += -I src/dep/faad2/include -I src/dep/faad2/libfaad
+SOURCES += $(FAAD2_SOURCES)
+endif
+
 # Add files to the ZIP package when running `make dist`
 DISTRIBUTABLES += res
 DISTRIBUTABLES += $(wildcard LICENSE*)
@@ -32,12 +51,22 @@ DISTRIBUTABLES += presets
 # Include the Rack plugin Makefile framework
 include $(RACK_DIR)/plugin.mk
 
-# macOS-only: the AAC decoder (src/net/AacDecoder.cpp) uses the system
-# AudioToolbox. ARCH_MAC is defined by arch.mk (pulled in via plugin.mk above),
-# so this block must come after the include. Appended LDFLAGS still reach the
-# link recipe (make expands recipe variables at build time).
+# macOS-only: on mac the AAC decoder (src/net/AacDecoder.cpp) uses the system
+# AudioToolbox instead of vendored FAAD2 (see the FAAD2 block above, gated
+# `ifndef ARCH_MAC`), so link its frameworks here. ARCH_MAC is defined by arch.mk
+# (pulled in via plugin.mk above), so this block must come after the include.
+# Appended LDFLAGS still reach the link recipe (make expands recipe variables at
+# build time).
 ifdef ARCH_MAC
 	LDFLAGS += -framework AudioToolbox -framework CoreFoundation
+endif
+
+# Scope FAAD2's config to just its own translation units: HAVE_CONFIG_H makes
+# libfaad/common.h pull in src/dep/faad2/config.h (modern-libc code paths). A
+# target-specific append keeps it off every other .c — notably libogg/libvorbis,
+# which test HAVE_CONFIG_H and would try to include their own missing config.h.
+ifndef ARCH_MAC
+$(patsubst %,build/%.o,$(FAAD2_SOURCES)): CFLAGS += -DHAVE_CONFIG_H
 endif
 
 # Windows-only: the net/ layer's sockets are Winsock2 (src/net/Socket.hpp maps the

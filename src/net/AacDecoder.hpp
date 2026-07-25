@@ -6,17 +6,21 @@
 #include <cstdint>
 #include <functional>
 
-// Streaming ADTS-AAC decoder.
+// Streaming ADTS-AAC decoder. Available on every platform:
 //
-// macOS only: it uses the system AudioToolbox (AudioFileStream + AudioConverter),
-// so there is no extra dependency to bundle. On any other platform available()
-// returns false and init() fails, so the caller can report "AAC needs macOS"
-// instead of mis-decoding. The codec itself is chosen dynamically at runtime
-// from the stream's Content-Type — this just provides the macOS AAC path.
+//   * macOS uses the system AudioToolbox (AudioFileStream + AudioConverter), so
+//     there is no dependency to bundle there.
+//   * Windows / Linux use the vendored FAAD2 (src/dep/faad2) — full HE-AAC v2
+//     (SBR + PS), matching what AudioToolbox decodes transparently on mac.
+//
+// available() is therefore true everywhere; the codec itself is still chosen
+// dynamically at runtime from the stream's Content-Type — this just provides the
+// AAC path each platform resolves to.
 //
 // Push model: feed() raw stream bytes as they arrive; decoded interleaved-stereo
 // Float32 PCM is delivered through onPCM at the stream's native sample rate (the
-// caller resamples to the engine rate, same as the MP3 path).
+// caller resamples to the engine rate, same as the MP3 path). HE-AAC's SBR
+// doubles that rate mid-stream, so onPCM's srcRate is reported per callback.
 
 namespace akaudio {
 

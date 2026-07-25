@@ -171,14 +171,170 @@ void AacDecoder::close() {
 
 } // namespace akaudio
 
-#else // !__APPLE__
+#else // !__APPLE__ — portable FAAD2 path (Windows / Linux)
+
+#include "../dep/faad2/include/neaacdec.h"
+
+#include <cstring>
+#include <vector>
 
 namespace akaudio {
-AacDecoder::~AacDecoder() {}
-bool AacDecoder::available() { return false; }
-bool AacDecoder::init() { return false; }
-bool AacDecoder::feed(const uint8_t*, size_t) { return false; }
-void AacDecoder::close() {}
+
+struct AacDecoder::Impl {
+	NeAACDecHandle dec = nullptr;
+	bool inited = false;      // NeAACDecInit has locked onto the stream config
+	std::vector<uint8_t> buf; // raw ADTS bytes accumulated across feed() calls
+	std::vector<float> out;   // reused stereo scratch for mono/multichannel fan-out
+	std::function<void(const float*, int, double)>* onPCM = nullptr;
+};
+
+namespace {
+
+// ADTS syncword (0xFFF) + MPEG layer '00'. True if p starts an ADTS header.
+inline bool adtsSync(const uint8_t* p) {
+	return p[0] == 0xFF && (p[1] & 0xF6) == 0xF0;
+}
+
+// 13-bit aac_frame_length (header included). Caller ensures 6 bytes available.
+inline size_t adtsFrameLen(const uint8_t* p) {
+	return ((size_t)(p[3] & 0x03) << 11) | ((size_t) p[4] << 3) | ((size_t)(p[5] >> 5));
+}
+
+} // namespace
+
+AacDecoder::~AacDecoder() {
+	close();
+}
+
+bool AacDecoder::available() {
+	return true;
+}
+
+bool AacDecoder::init() {
+	impl = new Impl;
+	impl->onPCM = &onPCM;
+	impl->dec = NeAACDecOpen();
+	if (!impl->dec) {
+		close();
+		return false;
+	}
+	// Float output, interleaved — matches onPCM and the MP3 path's PCM shape.
+	// downMatrix folds >2ch (rare in radio) down to stereo so the fan-out below
+	// only has to special-case mono.
+	NeAACDecConfigurationPtr cfg = NeAACDecGetCurrentConfiguration(impl->dec);
+	cfg->outputFormat = FAAD_FMT_FLOAT;
+	cfg->downMatrix = 1;
+	NeAACDecSetConfiguration(impl->dec, cfg);
+	return true;
+}
+
+bool AacDecoder::feed(const uint8_t* data, size_t n) {
+	if (!impl || !impl->dec)
+		return false;
+
+	std::vector<uint8_t>& b = impl->buf;
+	b.insert(b.end(), data, data + n);
+
+	// First ADTS header at or after `from`; b.size() if none (a trailing 0xFF that
+	// might be the start of a header split across feeds is preserved by the caller
+	// keeping it in `b`, since we only erase up to the last consumed position).
+	auto findSync = [&](size_t from) -> size_t {
+		for (size_t i = from; i + 1 < b.size(); i++)
+			if (adtsSync(&b[i]))
+				return i;
+		return b.size();
+	};
+
+	size_t pos = 0;
+
+	// Lock onto the stream (samplerate/channels/profile) from the first header.
+	// NeAACDecInit only reads the ~7-byte ADTS header and returns 0 for ADTS, so we
+	// stay parked on the syncword and let the decode loop consume the whole frame.
+	if (!impl->inited) {
+		pos = findSync(0);
+		if (pos + 7 > b.size()) {          // not enough for a full ADTS header yet
+			if (pos > 0)
+				b.erase(b.begin(), b.begin() + pos);
+			return true;
+		}
+		unsigned long sr = 0;
+		unsigned char ch = 0;
+		long used = NeAACDecInit(impl->dec, &b[pos], (unsigned long)(b.size() - pos), &sr, &ch);
+		if (used < 0) {                    // false sync / undecodable header — skip it
+			b.erase(b.begin(), b.begin() + pos + 1);
+			return true;
+		}
+		pos += (size_t) used;
+		impl->inited = true;
+	}
+
+	// Decode every complete ADTS frame now buffered.
+	while (true) {
+		pos = findSync(pos);
+		if (pos + 7 > b.size())
+			break;                         // need the next header
+		size_t flen = adtsFrameLen(&b[pos]);
+		if (flen < 7) {                    // malformed length — resync one byte on
+			pos++;
+			continue;
+		}
+		if (pos + flen > b.size())
+			break;                         // wait for the whole frame to arrive
+
+		NeAACDecFrameInfo fi;
+		std::memset(&fi, 0, sizeof(fi));
+		void* pcm = NeAACDecDecode(impl->dec, &fi, &b[pos], (unsigned long)(b.size() - pos));
+
+		if (fi.error != 0) {               // corrupt frame — skip it, keep decoding
+			pos += flen;
+			continue;
+		}
+		pos += fi.bytesconsumed ? fi.bytesconsumed : flen;
+
+		if (!pcm || fi.samples == 0 || !impl->onPCM || !*impl->onPCM)
+			continue;
+
+		const float* src = static_cast<const float*>(pcm);
+		int ch = fi.channels ? fi.channels : 1;
+		int frames = (int)(fi.samples / (unsigned) ch);
+		double rate = (double) fi.samplerate;
+
+		if (ch == 2) {
+			(*impl->onPCM)(src, frames, rate);   // already interleaved L,R
+		}
+		else {
+			// Mono → centered stereo (matches the MP3 path's mono fan-out); any
+			// >2ch that slipped past downMatrix → take the front pair.
+			std::vector<float>& o = impl->out;
+			o.resize((size_t) frames * 2);
+			if (ch == 1) {
+				for (int i = 0; i < frames; i++)
+					o[2 * i] = o[2 * i + 1] = src[i];
+			}
+			else {
+				for (int i = 0; i < frames; i++) {
+					o[2 * i] = src[(size_t) i * ch];
+					o[2 * i + 1] = src[(size_t) i * ch + 1];
+				}
+			}
+			(*impl->onPCM)(o.data(), frames, rate);
+		}
+	}
+
+	if (pos > 0)
+		b.erase(b.begin(), b.begin() + pos);
+	return true;
+}
+
+void AacDecoder::close() {
+	if (!impl)
+		return;
+	if (impl->dec)
+		NeAACDecClose(impl->dec);
+	delete impl;
+	impl = nullptr;
+}
+
 } // namespace akaudio
 
 #endif
