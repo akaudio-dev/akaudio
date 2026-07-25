@@ -318,16 +318,24 @@ with undo).
 
 - `play_test.cpp` — drives `StreamClient` against a live URL, reports decoded-audio stats.
   `StreamClient` now pulls in the TLS/HTTP/HLS/AAC layers, so the link needs them plus
-  OpenSSL (the `libRack` dep's static libs work for a standalone test) and, on macOS, the
-  AAC frameworks:
+  OpenSSL and, on macOS, the AAC frameworks. Where OpenSSL comes from depends on the
+  framework checkout: a Rack *source* tree ships static libs (add
+  `$RACK_DIR/dep/lib/libssl.a $RACK_DIR/dep/lib/libcrypto.a` to the link line), but the
+  downloadable **SDK does not** — there, link `libRack.dylib` itself (it exports the
+  OpenSSL symbols), then bake in an absolute path so the binary runs without
+  `DYLD_LIBRARY_PATH` (macOS SIP strips `DYLD_*` from the subshells
+  `tools/check_stations.sh` spawns, so the env-var route silently breaks the sweep —
+  every station "fails" with an empty status):
   ```bash
   c++ -std=c++11 -I src -I $RACK_DIR/dep/include test/play_test.cpp \
     src/net/Stream.cpp src/net/Http.cpp src/net/Tls.cpp src/net/Hls.cpp src/net/AacDecoder.cpp \
     src/net/Socket.cpp src/net/Log.cpp \
     src/dep/dr_mp3_impl.cpp \
-    $RACK_DIR/dep/lib/libssl.a $RACK_DIR/dep/lib/libcrypto.a \
+    -L$RACK_DIR -lRack \
     -framework AudioToolbox -framework CoreFoundation \
-    -o build/play_test && build/play_test [url] [seconds]
+    -o build/play_test
+  install_name_tool -change libRack.dylib "$(cd "$RACK_DIR" && pwd)/libRack.dylib" build/play_test
+  build/play_test [url] [seconds]
   ```
   On **Windows/Linux** the AAC path is FAAD2, not AudioToolbox — drop the two
   `-framework` lines and add the FAAD2 objects + include (`-I src/dep/faad2/include`
