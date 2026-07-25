@@ -71,6 +71,13 @@ Override the framework location explicitly with `make RACK_DIR=/path/to/Rack-SDK
 `tools/get_sdk.sh` defaults to Rack SDK 2.6.4 (`RACK_SDK_VERSION=...` to change) and
 selects the mac-arm64 / mac-x64 / lin-x64 / win-x64 zip for the host.
 
+On **Windows**, `tools/install_win.ps1` wraps the whole build+install for MSYS2/MINGW64
+(run from PowerShell). It handles the traps a plain `make install` hits there: builds in
+the MINGW64 env, passes `RACK_USER_DIR` from `LOCALAPPDATA` (not visible to MSYS bash, so
+`make install` otherwise lands in `C:\msys64\Rack2\`), refuses to install while Rack is
+running (locked DLL), and verifies `plugin.dll` still exports `init` before installing
+(the FAAD2 dllexport regression that once dropped it). `-BuildOnly` skips the install.
+
 `make install` writes the **shared** Rack user folder (also read by the user's Rack Pro
 app — accepted). The Makefile globs `src/**/*.cpp` via `find`, so new files under `src/`
 are picked up automatically. It also compiles vendored **libogg + libvorbis**
