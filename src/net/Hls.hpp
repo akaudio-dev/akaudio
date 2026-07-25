@@ -9,7 +9,7 @@
 
 // HLS (HTTP Live Streaming) helpers: playlist parsing, URL joining, and an
 // MPEG-TS → AAC-ADTS demux. Pure functions, no I/O — the polling loop and the
-// AAC decode live in StreamClient (macOS), which calls these.
+// AAC decode live in StreamClient, which calls these.
 //
 // HLS isn't a byte stream: an .m3u8 lists short media segments that the client
 // fetches in sequence (re-reading the playlist for new ones on a live feed).
@@ -22,7 +22,7 @@ struct HlsPlaylist {
 	bool endList = false;             // #EXT-X-ENDLIST present (VOD; stop polling)
 	double targetDuration = 6.0;      // #EXT-X-TARGETDURATION (poll cadence hint)
 	uint64_t mediaSequence = 0;       // #EXT-X-MEDIA-SEQUENCE (sequence of segments[0])
-	std::string variant;              // master: chosen variant playlist URI
+	std::string variant;              // master: chosen variant URI (lowest BANDWIDTH — see parser)
 	std::vector<std::string> segments; // media: segment URIs, in order
 };
 

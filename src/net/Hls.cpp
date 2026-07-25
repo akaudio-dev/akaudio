@@ -27,7 +27,9 @@ bool startsWith(const std::string& s, const char* p) {
 
 HlsPlaylist parseHlsPlaylist(const std::string& body) {
 	HlsPlaylist pl;
-	bool expectVariant = false; // saw #EXT-X-STREAM-INF; next URI is a variant
+	bool expectVariant = false;   // saw #EXT-X-STREAM-INF; next URI is a variant
+	uint64_t pendingBw = ~0ull;   // BANDWIDTH of that #EXT-X-STREAM-INF (max = unstated)
+	uint64_t bestBw = ~0ull;      // BANDWIDTH of pl.variant
 	size_t i = 0, n = body.size();
 	while (i < n) {
 		size_t e = body.find('\n', i);
@@ -40,12 +42,29 @@ HlsPlaylist parseHlsPlaylist(const std::string& body) {
 			if (startsWith(line, "#EXT-X-STREAM-INF")) {
 				pl.isMaster = true;
 				expectVariant = true;
+				// Parse BANDWIDTH= — must sit on an attribute boundary (':' or
+				// ',') so it can't match inside AVERAGE-BANDWIDTH=.
+				pendingBw = ~0ull;
+				size_t bp = 0;
+				while ((bp = line.find("BANDWIDTH=", bp)) != std::string::npos) {
+					char prev = line[bp - 1]; // bp >= 1: line[0] is '#'
+					if (prev == ':' || prev == ',') {
+						pendingBw = std::strtoull(line.c_str() + bp + 10, nullptr, 10);
+						break;
+					}
+					bp += 10;
+				}
 			}
 			else if (startsWith(line, "#EXT-X-MEDIA-SEQUENCE:")) {
 				pl.mediaSequence = std::strtoull(line.c_str() + 22, nullptr, 10);
 			}
 			else if (startsWith(line, "#EXT-X-TARGETDURATION:")) {
-				pl.targetDuration = std::atof(line.c_str() + 22);
+				// Remote-controlled value: clamp so the poll cadence stays sane
+				// and the caller's double→int ms conversion can't hit UB on an
+				// absurd value. NaN fails both comparisons → default kept.
+				double v = std::atof(line.c_str() + 22);
+				if (v >= 1.0 && v <= 60.0)
+					pl.targetDuration = v;
 			}
 			else if (startsWith(line, "#EXT-X-ENDLIST")) {
 				pl.endList = true;
@@ -55,8 +74,13 @@ HlsPlaylist parseHlsPlaylist(const std::string& body) {
 
 		// A URI line.
 		if (expectVariant) {
-			if (pl.variant.empty())
-				pl.variant = line; // take the first variant
+			// Keep the LOWEST-bandwidth variant: for audio streams that's the
+			// audio-only rendition, and it keeps a video-mux variant (whose TS
+			// segments can blow past httpGet's size cap) from being picked.
+			if (pl.variant.empty() || pendingBw < bestBw) {
+				pl.variant = line;
+				bestBw = pendingBw;
+			}
 			expectVariant = false;
 		}
 		else if (!pl.isMaster) {

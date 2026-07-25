@@ -85,8 +85,20 @@ static OSStatus inputProc(AudioConverterRef, UInt32* ioNumPackets, AudioBufferLi
 static void propProc(void* userData, AudioFileStreamID stream, AudioFileStreamPropertyID propID, UInt32*) {
 	AacDecoder::Impl* impl = static_cast<AacDecoder::Impl*>(userData);
 	if (propID == kAudioFileStreamProperty_DataFormat) {
+		AudioStreamBasicDescription prev = impl->srcFmt;
 		UInt32 size = sizeof(impl->srcFmt);
 		AudioFileStreamGetProperty(stream, propID, &size, &impl->srcFmt);
+		// The format can be (re)reported after the converter was built — a
+		// mid-stream format change, or HE-AAC/SBR recognized only once more
+		// data arrived. Converting with the stale format means the wrong
+		// rate/pitch, so rebuild; onPCM picks up the new dstFmt rate on the
+		// next batch.
+		if (impl->converter && std::memcmp(&prev, &impl->srcFmt, sizeof(prev)) != 0) {
+			AudioConverterDispose(impl->converter);
+			impl->converter = nullptr;
+			impl->ready = false;
+			impl->makeConverter();
+		}
 	}
 	else if (propID == kAudioFileStreamProperty_ReadyToProducePackets) {
 		if (impl->srcFmt.mSampleRate > 0 && !impl->converter && !impl->failed)
@@ -141,6 +153,8 @@ bool AacDecoder::available() {
 }
 
 bool AacDecoder::init() {
+	if (impl)
+		close(); // re-init must not leak the previous Impl
 	impl = new Impl;
 	impl->onPCM = &onPCM;
 	OSStatus st = AudioFileStreamOpen(impl, propProc, packetsProc, kAudioFileAAC_ADTSType, &impl->stream);
@@ -211,6 +225,8 @@ bool AacDecoder::available() {
 }
 
 bool AacDecoder::init() {
+	if (impl)
+		close(); // re-init must not leak the previous Impl
 	impl = new Impl;
 	impl->onPCM = &onPCM;
 	impl->dec = NeAACDecOpen();
@@ -235,13 +251,16 @@ bool AacDecoder::feed(const uint8_t* data, size_t n) {
 	std::vector<uint8_t>& b = impl->buf;
 	b.insert(b.end(), data, data + n);
 
-	// First ADTS header at or after `from`; b.size() if none (a trailing 0xFF that
-	// might be the start of a header split across feeds is preserved by the caller
-	// keeping it in `b`, since we only erase up to the last consumed position).
+	// First ADTS header at or after `from`. A syncword needs 2 bytes, so when no
+	// sync exists this parks on a trailing 0xFF (it may be the first byte of a
+	// header split across feeds) so the final erase below preserves it; otherwise
+	// b.size().
 	auto findSync = [&](size_t from) -> size_t {
 		for (size_t i = from; i + 1 < b.size(); i++)
 			if (adtsSync(&b[i]))
 				return i;
+		if (from < b.size() && b.back() == 0xFF)
+			return b.size() - 1;
 		return b.size();
 	};
 
@@ -250,26 +269,27 @@ bool AacDecoder::feed(const uint8_t* data, size_t n) {
 	// Lock onto the stream (samplerate/channels/profile) from the first header.
 	// NeAACDecInit only reads the ~7-byte ADTS header and returns 0 for ADTS, so we
 	// stay parked on the syncword and let the decode loop consume the whole frame.
-	if (!impl->inited) {
-		pos = findSync(0);
-		if (pos + 7 > b.size()) {          // not enough for a full ADTS header yet
-			if (pos > 0)
-				b.erase(b.begin(), b.begin() + pos);
-			return true;
-		}
+	// Try EVERY sync candidate now buffered, not one per feed(): a mislabeled
+	// non-AAC stream dense with false 0xFFFx patterns must burn through them all
+	// here, or `b` grows without bound (each feed appends bytes but would only
+	// retire one candidate).
+	while (!impl->inited) {
+		pos = findSync(pos);
+		if (pos + 7 > b.size())
+			break;                         // not enough for a full ADTS header yet
 		unsigned long sr = 0;
 		unsigned char ch = 0;
 		long used = NeAACDecInit(impl->dec, &b[pos], (unsigned long)(b.size() - pos), &sr, &ch);
 		if (used < 0) {                    // false sync / undecodable header — skip it
-			b.erase(b.begin(), b.begin() + pos + 1);
-			return true;
+			pos++;
+			continue;
 		}
 		pos += (size_t) used;
 		impl->inited = true;
 	}
 
 	// Decode every complete ADTS frame now buffered.
-	while (true) {
+	while (impl->inited) {
 		pos = findSync(pos);
 		if (pos + 7 > b.size())
 			break;                         // need the next header

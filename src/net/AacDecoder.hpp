@@ -32,7 +32,9 @@ public:
 	AacDecoder(const AacDecoder&) = delete;
 	AacDecoder& operator=(const AacDecoder&) = delete;
 
-	// Is the AAC path compiled in on this platform (i.e. macOS)?
+	// Is the AAC path compiled in? True on every platform (AudioToolbox on
+	// macOS, vendored FAAD2 elsewhere); kept so a future build that compiles
+	// the path out fails cleanly at the call site.
 	static bool available();
 
 	// pcm = interleaved L,R; frames = samples per channel; srcRate = stream Hz.

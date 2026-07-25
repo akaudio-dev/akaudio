@@ -22,8 +22,9 @@
 //   - http:// and https:// (TLS via the OpenSSL libRack exports; SNI on, but
 //     certificate verification is not enforced — see net/Tls.hpp).
 //   - .pls / .m3u playlist URLs are auto-resolved to the first stream URL.
-//   - .m3u8 HLS streams (macOS): playlist polling + MPEG-TS demux → AAC.
-//   - MP3 always; AAC + HLS on macOS (AudioToolbox). No OGG/Vorbis yet.
+//   - .m3u8 HLS streams: playlist polling + MPEG-TS demux → AAC.
+//   - MP3 + AAC + HLS on every platform (AAC via AudioToolbox on macOS, vendored
+//     FAAD2 on Windows/Linux). No OGG/Vorbis yet.
 //   - linear resampling from the stream rate to the engine rate.
 
 namespace akaudio {
@@ -63,7 +64,7 @@ public:
 
 private:
 	void run(std::string url);
-	void runHls(std::string url); // HLS (.m3u8) path: poll playlist, demux TS, decode AAC (macOS)
+	void runHls(std::string url); // HLS (.m3u8) path: poll playlist, demux TS, decode AAC
 	void setStatus(State s, const std::string& text);
 
 	StereoRingBuffer ring{1 << 16}; // 65536 frames ≈ 1.4 s at 48 kHz of headroom

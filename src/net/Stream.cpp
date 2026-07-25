@@ -457,17 +457,6 @@ void StreamClient::runHls(std::string url) {
 		return;
 	}
 
-	// If this is a master playlist, resolve to a (the first) variant media URL.
-	std::string mediaUrl = url;
-	{
-		std::string body;
-		if (httpGet(url, body, &abort)) {
-			HlsPlaylist pl = parseHlsPlaylist(body);
-			if (pl.isMaster && !pl.variant.empty())
-				mediaUrl = urlJoin(url, pl.variant);
-		}
-	}
-
 	// AAC decoder → ResampleCtx → ring, identical to the direct-AAC path.
 	AacDecoder dec;
 	ResampleCtx rs{ring, running, abort, produced, sampleRate};
@@ -480,12 +469,21 @@ void StreamClient::runHls(std::string url) {
 	}
 
 	setStatus(State::Connecting, "Buffering\xe2\x80\xa6");
+	// Master playlists are resolved inside the poll loop, not once up front: the
+	// initial URL may be a master, a transient failure on that first fetch must
+	// not leave us polling the master forever, and a variant can itself be a
+	// master (nested).
+	std::string mediaUrl = url;
+	int masterHops = 0;
 	bool playing = false;
 	bool haveLast = false;
 	uint64_t lastSeq = 0;
-	int pollFails = 0;
+	int pollFails = 0;      // consecutive playlist fetch failures
+	int deadPolls = 0;      // consecutive polls whose attempted segments yielded no audio
+	bool decodeFailed = false;
 
-	while (running.load(std::memory_order_acquire) && !abort.load(std::memory_order_acquire) && !rs.stopped) {
+	while (running.load(std::memory_order_acquire) && !abort.load(std::memory_order_acquire)
+			&& !rs.stopped && !decodeFailed) {
 		std::string body;
 		if (!httpGet(mediaUrl, body, &abort)) {
 			// A user stop aborts httpGet — don't paint it as an error (stop() owns the
@@ -504,26 +502,63 @@ void StreamClient::runHls(std::string url) {
 		pollFails = 0;
 		HlsPlaylist pl = parseHlsPlaylist(body);
 
-		int played = 0;
-		for (size_t k = 0; k < pl.segments.size(); k++) {
+		// Master (variant) playlist: hop to the chosen (lowest-bandwidth) variant
+		// and re-poll. Bounded so a master pointing at masters can't loop forever.
+		if (pl.isMaster) {
+			if (pl.variant.empty() || ++masterHops > 4) {
+				setStatus(State::Error, "Unusable HLS master playlist");
+				break;
+			}
+			mediaUrl = urlJoin(mediaUrl, pl.variant);
+			continue;
+		}
+
+		// Server restart: the sequence numbering jumped far backwards, so every
+		// segment would look "already played" and we'd sit silent forever —
+		// re-anchor. (A CDN edge lagging a segment or two stays within the
+		// window and must NOT re-anchor, hence the full-window margin.)
+		uint64_t seqEnd = pl.mediaSequence + pl.segments.size(); // one past newest
+		if (haveLast && seqEnd + pl.segments.size() < lastSeq)
+			haveLast = false;
+
+		// First poll (and after a re-anchor): start near the live edge — the last
+		// few segments — rather than the whole window, which would begin playback
+		// a full window (often 20-30 s) behind live.
+		size_t k0 = 0;
+		if (!haveLast && pl.segments.size() > 3)
+			k0 = pl.segments.size() - 3;
+
+		int attempted = 0, played = 0;
+		for (size_t k = k0; k < pl.segments.size(); k++) {
 			uint64_t seq = pl.mediaSequence + k;
 			if (haveLast && seq <= lastSeq)
 				continue; // already played
 			if (!running.load(std::memory_order_acquire) || abort.load(std::memory_order_acquire))
 				break;
 
+			attempted++;
 			std::string seg;
+			// A failed segment fetch is skipped without a retry or a log line: a
+			// later success moves lastSeq past it (live prefers a gap over a
+			// stall), and per-segment logging would spam on a flaky link. A
+			// *persistent* all-segments failure surfaces via deadPolls below.
 			if (!httpGet(urlJoin(mediaUrl, pl.segments[k]), seg, &abort))
 				continue;
 			std::string adts;
 			hlsSegmentToAdts(reinterpret_cast<const uint8_t*>(seg.data()), seg.size(), adts);
+			lastSeq = seq;
+			haveLast = true;
+			if (adts.empty())
+				continue; // fetched but no ADTS audio in it (e.g. fMP4) — counts toward deadPolls
 			if (!playing) {
 				setStatus(State::Playing, "Playing (HLS)");
 				playing = true;
 			}
-			dec.feed(reinterpret_cast<const uint8_t*>(adts.data()), adts.size()); // paces via backpressure
-			lastSeq = seq;
-			haveLast = true;
+			if (!dec.feed(reinterpret_cast<const uint8_t*>(adts.data()), adts.size())) { // paces via backpressure
+				setStatus(State::Error, "AAC decode failed");
+				decodeFailed = true;
+				break;
+			}
 			played++;
 			if (rs.stopped)
 				break;
@@ -532,8 +567,20 @@ void StreamClient::runHls(std::string url) {
 		if (pl.endList)
 			break; // VOD ended
 
+		// Segments keep appearing but none produce audio (every fetch failing —
+		// e.g. segments over httpGet's size cap — or non-AAC segment payloads):
+		// give up with a reason instead of looping a silent "Playing" forever.
+		if (attempted > 0 && played == 0) {
+			if (++deadPolls >= 3) {
+				setStatus(State::Error, "HLS segments yield no audio");
+				break;
+			}
+		}
+		else if (played > 0)
+			deadPolls = 0;
+
 		if (played == 0) {
-			// No new segments yet; wait ~half a target-duration and re-poll.
+			// No new audio this poll; wait ~half a target-duration and re-poll.
 			int ms = (int) (pl.targetDuration * 500.0);
 			if (ms < 200)
 				ms = 200;
