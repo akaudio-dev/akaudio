@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="40.64mm" height="128.5mm" viewBox="0 0 40.64 128.5">
+  <defs>
+    <!-- Fundamental's dark-panel gradient (e.g. 8vert-dark.svg), userSpaceOnUse for
+         the same NanoSVG reason as the light panel. -->
+    <linearGradient id="bg" x1="20.32" y1="0" x2="20.32" y2="128.5" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2a2a2b"/>
+      <stop offset="1" stop-color="#171717"/>
+    </linearGradient>
+  </defs>
+  <rect width="40.64" height="128.5" fill="url(#bg)"/>
+</svg>

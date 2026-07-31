@@ -12,10 +12,13 @@
 #include <functional>
 #include <set>
 
-// Fundamental-style theme (matches the Ninjam panel): silver panel, dark labels.
-// Fonts, the plate colors, and the plate geometry are shared via Theme.hpp.
-static const NVGcolor RADIO_TEXT     = nvgRGB(0x1f, 0x1f, 0x1f); // panel text, exactly like core/Fundamental
-static const NVGcolor RADIO_TEXT_DIM = nvgRGB(0x6a, 0x72, 0x7a); // secondary labels
+// Fundamental-style theme (matches the Ninjam panel): silver panel, dark labels —
+// or their dark-panel inverses (Theme.hpp akDark/akTheme) when "Use dark panels"
+// is on. Fonts, the plate colors, and the plate geometry are shared via Theme.hpp.
+inline NVGcolor radioText()    { return akTheme(nvgRGB(0x1f, 0x1f, 0x1f), nvgRGB(0xed, 0xed, 0xed)); } // panel text, exactly like core/Fundamental
+inline NVGcolor radioTextDim() { return akTheme(nvgRGB(0x6a, 0x72, 0x7a), nvgRGB(0x9a, 0xa2, 0xaa)); } // secondary labels
+inline NVGcolor radioOk()      { return akTheme(nvgRGB(0x2e, 0x7d, 0x46), nvgRGB(0x55, 0xc8, 0x82)); } // status-line success
+inline NVGcolor radioErr()     { return akTheme(nvgRGB(0xc0, 0x39, 0x2b), nvgRGB(0xe0, 0x60, 0x52)); } // status-line / stream error
 
 // Output plate geometry: vertical grid from Theme.hpp (shared with Ninjam);
 // x/width center the plate on this 8 HP panel.
@@ -32,33 +35,33 @@ struct RadioDecor : Widget {
 		nvgBeginPath(vg);
 		nvgRoundedRect(vg, mm2px(PLATE_X), mm2px(AK_PLATE_TOP_MM), mm2px(PLATE_W),
 			mm2px(AK_PLATE_H_MM), mm2px(AK_PLATE_R_MM));
-		nvgFillColor(vg, AK_PLATE);
+		nvgFillColor(vg, akPlate());
 		nvgFill(vg);
 
-		drawTxt(vg, FONT_BOLD, mm2px(20.32f), mm2px(9.0f), 15.f, RADIO_TEXT, "RADIO", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, mm2px(20.32f), mm2px(66.5f), 11.f, RADIO_TEXT, "LEVEL", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, mm2px(20.32f), mm2px(9.0f), 15.f, radioText(), "RADIO", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, mm2px(20.32f), mm2px(66.5f), 11.f, radioText(), "LEVEL", NVG_ALIGN_CENTER);
 
 		// Gauge ring around the LEVEL knob — the open arc (gap at the bottom) the
 		// AUDIO/Fundamental knobs use: radius 7.09 mm, stroke #1f1f1f 0.8 px.
 		const float kx = mm2px(20.32f), ky = mm2px(77.362f), kr = mm2px(7.09f);
 		nvgBeginPath(vg);
 		nvgArc(vg, kx, ky, kr, nvgDegToRad(121.f), nvgDegToRad(419.f), NVG_CW);
-		nvgStrokeColor(vg, RADIO_TEXT);
+		nvgStrokeColor(vg, radioText());
 		nvgStrokeWidth(vg, 0.8f);
 		nvgLineCap(vg, NVG_ROUND);
 		nvgStroke(vg);
 
 		// LEVEL endpoints at the arc's gap, like AUDIO.
-		drawTxt(vg, FONT_BOLD, mm2px(13.0f), mm2px(86.5f), 9.f, RADIO_TEXT, "-\xe2\x88\x9e", NVG_ALIGN_CENTER); // -∞
-		drawTxt(vg, FONT_BOLD, mm2px(27.6f), mm2px(86.5f), 9.f, RADIO_TEXT, "+12", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, mm2px(20.32f), mm2px(91.5f), 10.f, RADIO_TEXT, "CV", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, mm2px(13.0f), mm2px(86.5f), 9.f, radioText(), "-\xe2\x88\x9e", NVG_ALIGN_CENTER); // -∞
+		drawTxt(vg, FONT_BOLD, mm2px(27.6f), mm2px(86.5f), 9.f, radioText(), "+12", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, mm2px(20.32f), mm2px(91.5f), 10.f, radioText(), "CV", NVG_ALIGN_CENTER);
 		// LEFT / RIGHT labels on the output plate.
 		drawTxt(vg, FONT_BOLD, mm2px(OUT_L_X), mm2px(AK_PLATE_TOP_MM + AK_PLATE_LABEL_DY_MM), 8.5f,
-			AK_PLATE_TEXT, "LEFT", NVG_ALIGN_CENTER);
+			akPlateText(), "LEFT", NVG_ALIGN_CENTER);
 		drawTxt(vg, FONT_BOLD, mm2px(OUT_R_X), mm2px(AK_PLATE_TOP_MM + AK_PLATE_LABEL_DY_MM), 8.5f,
-			AK_PLATE_TEXT, "RIGHT", NVG_ALIGN_CENTER);
+			akPlateText(), "RIGHT", NVG_ALIGN_CENTER);
 		// "AK" maker mark at the bottom, in the spot VCV uses for its logo — large + bold.
-		drawTxt(vg, FONT_BOLD, mm2px(20.32f), mm2px(AK_MARK_Y_MM), 16.f, RADIO_TEXT, "AK", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, mm2px(20.32f), mm2px(AK_MARK_Y_MM), 16.f, radioText(), "AK", NVG_ALIGN_CENTER);
 		Widget::draw(args);
 	}
 };
@@ -371,7 +374,7 @@ static void drawStationBadge(NVGcontext* vg, const std::string& icon, const std:
 	if (font && font->handle >= 0) {
 		nvgFontFaceId(vg, font->handle);
 		nvgFontSize(vg, h * 0.5f);
-		nvgFillColor(vg, nvgRGBA(0x24, 0x27, 0x2b, 0x55));
+		nvgFillColor(vg, akTheme(nvgRGBA(0x24, 0x27, 0x2b, 0x55), nvgRGBA(0xed, 0xed, 0xed, 0x55)));
 		nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
 		nvgText(vg, x + w / 2, y + h / 2, "\xe2\x99\xaa", NULL); // ♪
 	}
@@ -637,10 +640,10 @@ struct StationArt : Widget {
 		// the next start() (stop() deliberately preserves it), so this self-clears
 		// when the user picks or plays another station.
 		if (module && module->stream.getState() == akaudio::StreamClient::State::Error) {
-			const NVGcolor err = nvgRGB(0xc0, 0x39, 0x2b);
+			const NVGcolor err = radioErr();
 			nvgBeginPath(vg);
 			nvgRoundedRect(vg, 0, 0, w, h, 5);
-			nvgFillColor(vg, nvgRGBA(0x50, 0x18, 0x18, 0x33));
+			nvgFillColor(vg, akTheme(nvgRGBA(0x50, 0x18, 0x18, 0x33), nvgRGBA(0xe0, 0x60, 0x52, 0x22)));
 			nvgFill(vg);
 			std::shared_ptr<window::Font> font = akLoadFont(FONT_BOLD);
 			if (font && font->handle >= 0) {
@@ -661,7 +664,7 @@ struct StationArt : Widget {
 		// Backing (shows through transparent favicons).
 		nvgBeginPath(vg);
 		nvgRoundedRect(vg, 0, 0, w, h, 5);
-		nvgFillColor(vg, nvgRGBA(0, 0, 0, 0x22));
+		nvgFillColor(vg, akShade(0x22));
 		nvgFill(vg);
 		drawStationBadge(vg, module ? module->icon : "", module ? module->stationName : "",
 			0, 0, w, h, 5);
@@ -674,6 +677,9 @@ struct StationChoice : LedDisplayChoice {
 	ModuleWidget* mw = nullptr;
 
 	void step() override {
+		// Track the panel theme (cheap plain-struct assignments).
+		color = radioText();
+		bgColor = akShade(0x14);
 		// Assign only on change: this runs per UI frame and text is heap-allocating.
 		const std::string& want = (module && !module->stationName.empty())
 			? module->stationName : pickPrompt();
@@ -701,7 +707,7 @@ struct StatusLine : Widget {
 	void draw(const DrawArgs& args) override {
 		if (!module || module->importMsg.empty())
 			return;
-		NVGcolor col = module->importError ? nvgRGB(0xc0, 0x39, 0x2b) : nvgRGB(0x2e, 0x7d, 0x46);
+		NVGcolor col = module->importError ? radioErr() : radioOk();
 		nvgScissor(args.vg, 0, 0, box.size.x, box.size.y);
 		drawTxt(args.vg, FONT_BOLD, box.size.x / 2, box.size.y / 2, 9.5f,
 			col, module->importMsg, NVG_ALIGN_CENTER);
@@ -732,7 +738,7 @@ struct StepButton : HoverButton {
 		const float w = box.size.x, h = box.size.y;
 		nvgBeginPath(vg);
 		nvgRoundedRect(vg, 0, 0, w, h, 2.f);
-		nvgFillColor(vg, hovered ? nvgRGBA(0, 0, 0, 0x1e) : nvgRGBA(0, 0, 0, 0x12));
+		nvgFillColor(vg, akShade(hovered ? 0x1e : 0x12));
 		nvgFill(vg);
 		// Centered triangle (up or down).
 		const float cx = w / 2, cy = h / 2, tw = w * 0.24f, th = h * 0.20f;
@@ -747,7 +753,7 @@ struct StepButton : HoverButton {
 			nvgLineTo(vg, cx + tw, cy - th);
 		}
 		nvgClosePath(vg);
-		nvgFillColor(vg, hovered ? RADIO_TEXT : RADIO_TEXT_DIM);
+		nvgFillColor(vg, hovered ? radioText() : radioTextDim());
 		nvgFill(vg);
 	}
 };
@@ -827,17 +833,18 @@ struct RadioWidget : ModuleWidget {
 
 	RadioWidget(Radio* module) {
 		setModule(module);
-		setPanel(createPanel(asset::plugin(pluginInstance, "res/Radio.svg")));
+		setPanel(createPanel(asset::plugin(pluginInstance, "res/Radio.svg"),
+			asset::plugin(pluginInstance, "res/Radio-dark.svg")));
 
 		// Code-drawn title + L/R labels (NanoSVG won't render <text>).
 		RadioDecor* decor = new RadioDecor;
 		decor->box.size = box.size;
 		addChild(decor);
 
-		addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
-		addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
-		addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
-		addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
+		addChild(createWidget<ThemedScrew>(Vec(RACK_GRID_WIDTH, 0)));
+		addChild(createWidget<ThemedScrew>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
+		addChild(createWidget<ThemedScrew>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
+		addChild(createWidget<ThemedScrew>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
 		// Station artwork (visual identification) — a logo square on the left; the
 		// right strip holds the status LED + prev/next stepper.
@@ -869,8 +876,7 @@ struct RadioWidget : ModuleWidget {
 		StationChoice* choice = new StationChoice;
 		choice->module = module;
 		choice->mw = this;
-		choice->color = RADIO_TEXT;
-		choice->bgColor = nvgRGBA(0, 0, 0, 0x14);
+		// (color/bgColor track the theme in StationChoice::step.)
 		choice->fontPath = asset::system("res/fonts/DejaVuSans.ttf");
 		choice->box.pos = mm2px(Vec(3.0, 46.0));
 		choice->box.size = mm2px(Vec(34.64, 8.5));
@@ -895,11 +901,11 @@ struct RadioWidget : ModuleWidget {
 		// Built-in VCA: the AUDIO module's LEVEL knob (RoundLargeBlackKnob), with an
 		// optional CV cable below. "LEVEL"/"CV"/"−∞"/"+12" are drawn by RadioDecor.
 		addParam(createParamCentered<RoundLargeBlackKnob>(mm2px(Vec(20.32, 77.362)), module, Radio::LEVEL_PARAM));
-		addInput(createInputCentered<PJ301MPort>(mm2px(Vec(20.32, AK_ROW_CV_MM)), module, Radio::LEVEL_INPUT));
+		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(Vec(20.32, AK_ROW_CV_MM)), module, Radio::LEVEL_INPUT));
 
 		// Stereo outputs on the dark plate (drawn by RadioDecor; LEFT/RIGHT labels too).
-		addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(OUT_L_X, AK_ROW_OUT_MM)), module, Radio::LEFT_OUTPUT));
-		addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(OUT_R_X, AK_ROW_OUT_MM)), module, Radio::RIGHT_OUTPUT));
+		addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(OUT_L_X, AK_ROW_OUT_MM)), module, Radio::LEFT_OUTPUT));
+		addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(OUT_R_X, AK_ROW_OUT_MM)), module, Radio::RIGHT_OUTPUT));
 
 		// Audition status line in the gap under the picker (empty when idle).
 		StatusLine* status = new StatusLine;

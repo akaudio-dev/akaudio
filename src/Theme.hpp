@@ -23,9 +23,20 @@ static const char* FONT_REG = "res/fonts/DejaVuSans.ttf";
 static const char* FONT_MONO = "res/fonts/ShareTechMono-Regular.ttf"; // TTY chat console
 
 // ---- Shared palette ----
-static const NVGcolor AK_PLATE      = nvgRGB(0x1f, 0x1f, 0x1f); // output-plate black (core/Fundamental)
-static const NVGcolor AK_PLATE_TEXT = nvgRGB(0xf0, 0xf0, 0xf0); // labels on the dark plate (AUDIO #f0f0f0)
-static const NVGcolor AK_LED_GREEN  = nvgRGB(0x3a, 0xd0, 0x6a); // live LED / current-station ring
+// Both panels follow Fundamental's dark-panel convention (View > Use dark panels):
+// the panel SVG swaps via ThemedSvgPanel, and the code-drawn decoration reads
+// settings::preferDarkPanels per frame through these helpers. Dark inverts like
+// Fundamental: near-black bg (#2a2a2b→#171717), #ededed text, and the #1f1f1f
+// output plate flips to a light #ededed plate with #1f1f1f labels.
+inline bool akDark() { return settings::preferDarkPanels; }
+inline NVGcolor akTheme(NVGcolor light, NVGcolor dark) { return akDark() ? dark : light; }
+
+inline NVGcolor akPlate()     { return akTheme(nvgRGB(0x1f, 0x1f, 0x1f), nvgRGB(0xed, 0xed, 0xed)); } // output plate (core/Fundamental)
+inline NVGcolor akPlateText() { return akTheme(nvgRGB(0xf0, 0xf0, 0xf0), nvgRGB(0x1f, 0x1f, 0x1f)); } // labels on the plate
+// Neutral translucent ink for wells/hovers/backings drawn on the panel bg:
+// black-alpha on the light panel, white-alpha on the dark one.
+inline NVGcolor akShade(unsigned char a) { return akDark() ? nvgRGBA(0xff, 0xff, 0xff, a) : nvgRGBA(0x00, 0x00, 0x00, a); }
+static const NVGcolor AK_LED_GREEN  = nvgRGB(0x3a, 0xd0, 0x6a); // live LED / current-station ring (both themes)
 
 // ---- Output-plate geometry (mm) ----
 // Fundamental: 39.16 px tall, r 2.83 px on a 75 px panel → 13.26 mm / 0.96 mm.
