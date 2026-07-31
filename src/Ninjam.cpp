@@ -103,6 +103,35 @@ struct Ninjam : Module {
 	std::string joinUser = "";  // display name; empty -> anonymous
 	std::string joinPass = "";  // empty -> anonymous; set for a registered/private server
 	std::atomic<bool> joined{false};
+	// Global display name for anonymous (public-directory) joins: on the wire we log in
+	// as "anonymous:<displayName>" (bare "anonymous" when empty). One name across all
+	// public rooms, persisted only in the global file (saveGlobal) — never in a patch.
+	// Distinct from joinUser, which is whatever identity the *current session* was
+	// started with (this name for a browser join, or the private card's username).
+	std::string displayName = "";
+	// The wire identity a public-room click will use right now (shown on the name chip).
+	std::string publicJoinName() const {
+		return displayName.empty() ? std::string("anonymous") : "anonymous:" + displayName;
+	}
+	// UI-thread setter: trims, caps, and persists on change. Applies at the next join —
+	// NINJAM fixes the name at auth, so a live session keeps the name it connected with.
+	void setDisplayName(std::string name) {
+		while (!name.empty() && std::isspace((unsigned char) name.front()))
+			name.erase(name.begin());
+		while (!name.empty() && std::isspace((unsigned char) name.back()))
+			name.pop_back();
+		// Keep it sane on the wire (and on other clients' rosters); don't split UTF-8.
+		size_t cap = 32;
+		if (name.size() > cap) {
+			while (cap > 0 && (name[cap] & 0xC0) == 0x80)
+				cap--;
+			name.resize(cap);
+		}
+		if (name == displayName)
+			return;
+		displayName = name;
+		saveGlobal();
+	}
 	// Most-recent-first "host:port" of servers we've joined, for the panel dropdown.
 	std::vector<std::string> serverHistory;
 	// Per-server credentials keyed by "host:port". Persisted ONLY in the global file
@@ -289,6 +318,7 @@ struct Ninjam : Module {
 		json_t* root = json_load_file(globalConfigPath().c_str(), 0, &err);
 		if (!root)
 			return;
+		displayName = jsonStr(json_object_get(root, "displayName"));
 		serverHistory.clear();
 		serverCreds.clear();
 		if (json_t* servers = json_object_get(root, "servers")) {
@@ -334,6 +364,7 @@ struct Ninjam : Module {
 
 	void saveGlobal() {
 		json_t* root = json_object();
+		json_object_set_new(root, "displayName", json_string(displayName.c_str()));
 		json_t* servers = json_array();
 		for (const std::string& hp : serverHistory) {
 			std::string host; int port = 2049;
@@ -504,6 +535,13 @@ struct Ninjam : Module {
 		mode = MODE_JOIN;
 		joinHost = room.host;
 		joinPort = room.port;
+		// A public-directory join is always anonymous under the global display name.
+		// Never inherit whatever the private-server card last held: a stale registered
+		// password here would attempt a registered login at the public server (auth
+		// fails, the click mysteriously does nothing) and then get stored under this
+		// room's host:port by joinStart().
+		joinUser = displayName;
+		joinPass = "";
 		roomLabel = room.name.empty() ? room.host : room.name;
 		// Joining a jam means playing in it: auto-enable TX on every *explicit* join
 		// (here and joinManual) so the user isn't silent because they forgot the toggle.
@@ -564,7 +602,12 @@ struct Ninjam : Module {
 		njclient.start(joinHost, joinPort, joinUser, joinPass, jamCallbacks());
 		joined = true;
 		std::string hp = joinHost + ":" + std::to_string(joinPort);
-		serverCreds[hp] = { joinUser, joinPass };
+		// Remember how we joined — except never overwrite a stored registered login
+		// with an anonymous one: clicking a room in the browser (always anonymous)
+		// must not erase a password the user saved for that same server.
+		auto it = serverCreds.find(hp);
+		if (!(joinPass.empty() && it != serverCreds.end() && !it->second.pass.empty()))
+			serverCreds[hp] = { joinUser, joinPass };
 		addServerHistory(hp);
 		saveGlobal(); // remember this server + its credentials for the next fresh module
 	}
@@ -1258,7 +1301,7 @@ struct RoomBrowser : ui::ScrollWidget {
 struct SearchField : ui::TextField {
 	Ninjam* module = nullptr;
 	SearchField() {
-		placeholder = "Filter rooms or players\xe2\x80\xa6";
+		placeholder = "Filter rooms\xe2\x80\xa6";
 	}
 	void onSelect(const SelectEvent& e) override {
 		// Focusing the filter is a user-initiated request for the list — load it if the
@@ -1288,10 +1331,24 @@ struct ChatField : ui::TextField {
 		nvgScissor(vg, RECT_ARGS(args.clipBox));
 		const float size = 12.5f, cy = box.size.y / 2.f;
 		const bool focused = (this == APP->event->getSelectedWidget());
-		// Prompt.
-		const char* prompt = "\xe2\x80\xba "; // "› "
-		drawTxt(vg, FONT_MONO, 3.f, cy, size, TH_CON_NAME, prompt, NVG_ALIGN_LEFT);
-		const float tx = 3.f + textWidth(vg, FONT_MONO, size, prompt);
+		// Prompt: "<name> › " — the identity this session joined under (joinUser is
+		// fixed at auth, so a live display-name edit doesn't change it mid-jam). Own-name
+		// colour, matching our lines in the log above. Capped so typing room remains
+		// (UTF-8-safe: back off over continuation bytes).
+		std::string self = (module && !module->joinUser.empty())
+			? module->joinUser : std::string("anonymous");
+		size_t cap = 12;
+		if (self.size() > cap) {
+			while (cap > 0 && (self[cap] & 0xC0) == 0x80)
+				cap--;
+			self.resize(cap);
+			self += "\xe2\x80\xa6";
+		}
+		drawTxt(vg, FONT_MONO, 3.f, cy, size, TH_CON_MINE, self, NVG_ALIGN_LEFT);
+		const float nameW = textWidth(vg, FONT_MONO, size, self);
+		const char* prompt = " \xe2\x80\xba "; // " › "
+		drawTxt(vg, FONT_MONO, 3.f + nameW, cy, size, TH_CON_NAME, prompt, NVG_ALIGN_LEFT);
+		const float tx = 3.f + nameW + textWidth(vg, FONT_MONO, size, prompt);
 		if (text.empty() && !focused) {
 			drawTxt(vg, FONT_MONO, tx, cy, size, TH_CON_DIM, placeholder, NVG_ALIGN_LEFT,
 				box.size.x - tx - 3.f);
@@ -1339,6 +1396,74 @@ struct RefreshButton : HoverButton {
 		bool loading = module && module->directory.loading();
 		drawTxt(vg, FONT_REG, box.size.x / 2, box.size.y / 2, 16.f,
 			loading ? njGreen() : thText(), "\xe2\x86\xbb", NVG_ALIGN_CENTER); // ↻
+	}
+};
+
+// Editable display-name field (used in the name chip's menu and the module context
+// menu). Live-saves to the global config on every edit via setDisplayName().
+struct NameMenuField : ui::TextField {
+	Ninjam* module = nullptr;
+	ui::MenuLabel* wireLabel = nullptr; // optional "joins as ..." hint to keep updated
+	NameMenuField() {
+		placeholder = "anonymous";
+		box.size = Vec(180, 20);
+	}
+	void syncHint() {
+		if (module && wireLabel)
+			wireLabel->text = "joins as \"" + module->publicJoinName() + "\"";
+	}
+	void onChange(const ChangeEvent& e) override {
+		if (module)
+			module->setDisplayName(text);
+		syncHint();
+		ui::TextField::onChange(e);
+	}
+};
+
+// "you: <name>" chip beside the room-list filter: shows the display name a public-room
+// click will join under, and opens a small menu to edit it. Answers "what will my name
+// be?" right where the join decision happens.
+struct NameChip : HoverButton {
+	Ninjam* module = nullptr;
+	void onPress(const ButtonEvent& e) override {
+		if (!module) {
+			e.consume(this);
+			return;
+		}
+		ui::Menu* menu = createMenu();
+		menu->addChild(createMenuLabel("Your name in public jams"));
+		NameMenuField* nf = new NameMenuField;
+		nf->module = module;
+		nf->text = module->displayName;
+		menu->addChild(nf);
+		ui::MenuLabel* hint = new ui::MenuLabel;
+		nf->wireLabel = hint;
+		nf->syncHint();
+		menu->addChild(hint);
+		menu->addChild(createMenuLabel("applies at the next join"));
+		APP->event->setSelectedWidget(nf);
+		nf->selectAll();
+		e.consume(this);
+	}
+	void draw(const DrawArgs& args) override {
+		NVGcontext* vg = args.vg;
+		nvgBeginPath(vg);
+		nvgRoundedRect(vg, 0, 0, box.size.x, box.size.y, 3);
+		nvgFillColor(vg, hovered ? akShade(0x18) : thWell());
+		nvgFill(vg);
+		nvgStrokeColor(vg, thCardBd());
+		nvgStroke(vg);
+		if (!module)
+			return;
+		const float cy = box.size.y / 2, pad = 6.f, dropW = 10.f;
+		const char* pre = "you: ";
+		float preW = textWidth(vg, FONT_REG, 10.5f, pre);
+		drawTxt(vg, FONT_REG, pad, cy, 10.5f, thTextDim(), pre, NVG_ALIGN_LEFT);
+		std::string name = module->displayName.empty() ? "anonymous" : module->displayName;
+		drawTxt(vg, FONT_BOLD, pad + preW, cy, 10.5f, njGreenDeep(), name,
+			NVG_ALIGN_LEFT, box.size.x - pad - preW - dropW - 2.f);
+		drawTxt(vg, FONT_REG, box.size.x - pad, cy, 9.f, thTextDim(), "\xe2\x96\xbe", // ▾
+			NVG_ALIGN_RIGHT);
 	}
 };
 
@@ -1925,6 +2050,7 @@ struct NinjamWidget : ModuleWidget {
 	// State-dependent widgets: connect UI (shown when disconnected) vs jam view (connected).
 	Widget* joinCard = nullptr;
 	Widget* search = nullptr;
+	Widget* nameChip = nullptr;
 	Widget* refresh = nullptr;
 	Widget* browser = nullptr;
 	Widget* jamView = nullptr;
@@ -1978,9 +2104,17 @@ struct NinjamWidget : ModuleWidget {
 		SearchField* s = new SearchField;
 		s->module = module;
 		s->box.pos = Vec(8, 100);
-		s->box.size = Vec(W - 8 - 40, 20);
+		s->box.size = Vec(124, 20);
 		addChild(s);
 		search = s;
+
+		// "you: <name>" chip — the identity a public-room click joins under (click to edit).
+		NameChip* nc = new NameChip;
+		nc->module = module;
+		nc->box.pos = Vec(136, 100);
+		nc->box.size = Vec(W - 136 - 40, 20);
+		addChild(nc);
+		nameChip = nc;
 
 		RefreshButton* rb = new RefreshButton;
 		rb->module = module;
@@ -2080,6 +2214,7 @@ struct NinjamWidget : ModuleWidget {
 		bool joined = nj && nj->joined;
 		if (joinCard) joinCard->visible = !joined;
 		if (search) search->visible = !joined;
+		if (nameChip) nameChip->visible = !joined;
 		if (refresh) refresh->visible = !joined;
 		if (browser) browser->visible = !joined;
 		if (jamView) jamView->visible = joined;
@@ -2101,6 +2236,14 @@ struct NinjamWidget : ModuleWidget {
 		Ninjam* module = getModule<Ninjam>();
 		if (!module)
 			return;
+		menu->addChild(new MenuSeparator);
+		menu->addChild(createMenuLabel("Display name (public jams)"));
+		{
+			NameMenuField* nf = new NameMenuField;
+			nf->module = module;
+			nf->text = module->displayName;
+			menu->addChild(nf);
+		}
 		menu->addChild(new MenuSeparator);
 		menu->addChild(createMenuItem("Refresh room list", "", [module]() {
 			module->directory.refresh();

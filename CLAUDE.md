@@ -276,7 +276,11 @@ arrow at the TX LED; clicking it or the LED starts TX and retires it). The slug 
 **NINJAM credentials never go in a patch.** The join server host/port, username, and
 password are persisted **only** in the global file `asset::user("akaudio-ninjam.json")`
 (`0600`), as an ordered, per-server keyed store (`servers[]`, most-recent-first, cap 12,
-recalled by `host:port` in the panel dropdown). `dataToJson` deliberately omits all of it
+recalled by `host:port` in the panel dropdown). The same file holds the global
+`displayName` — the one name used for all anonymous public-room joins (wire identity
+`anonymous:<name>`), shown/edited via the "you: <name>" chip beside the room filter and
+the module context menu; a room-browser click always joins anonymously with it, never
+with the private card's credentials. `dataToJson` deliberately omits all of it
 (and omits `roomLabel` in JOIN mode, since it echoes the private host), so a shared `.vcv`
 leaks no credentials. On patch load the module reconnects to the local default server from
 that file, not one named by the patch. The old flat single-credential format is migrated
