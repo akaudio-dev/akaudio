@@ -4,6 +4,96 @@ All notable changes to **AK Audio** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow VCV Rack's
 scheme (`MAJOR.MINOR.REVISION`, with `MAJOR` = the Rack major version).
 
+## [2.0.5] — 2026-07-31
+
+### Added
+
+- **Dark panels.** Both modules follow Rack's *View → Use dark panels*, with the same
+  inversion convention as VCV Fundamental — near-black panels, light text, and the
+  Radio output plate flipping to a light plate with dark labels. The Ninjam chat
+  console deliberately stays dark in both themes, like Rack's LED displays.
+- **Global display name for public jams.** A **"you: \<name\>"** chip beside the room
+  filter (also in the module context menu) sets the one name used for every anonymous
+  public-room join; the chat prompt shows your session identity. The name lives only in
+  the local settings file — never in a patch — and applies at the next join (NINJAM
+  fixes the name at login).
+
+### Fixed
+
+- Clicking a public room in the browser now always joins **anonymously** with the
+  display name, instead of silently inheriting whatever username/password the private
+  server card last held. A stale registered password there used to make the click
+  appear to do nothing (the login failed) and then mis-filed the private credentials
+  under the public server's address. Joining anonymously also no longer overwrites a
+  stored registered login.
+
+## [2.0.4] — 2026-07-25
+
+Includes the unreleased 2.0.2/2.0.3 work. Ninjam's sync engine was rebuilt for latency,
+and AAC/HLS went cross-platform.
+
+### Added
+
+- **AAC and HLS on Windows and Linux** (via vendored FAAD2, full HE-AAC v2) — formerly
+  macOS-only. BBC Radio 4 and friends now play everywhere.
+- **Voice mode** (Ninjam context menu): rolling ~2 s chunks for near-live, unsynced
+  talkback alongside the beat-synced jam.
+- `tools/install_win.ps1`: one-command build + install on Windows (MSYS2/MINGW64).
+
+### Changed
+
+- **Much lower Ninjam latency.** Receive playout is arrival-locked (uniform ~one-interval
+  latency instead of one-to-two); transmit streams each interval while it is being
+  captured, like the canonical njclient.
+- **The join gap is bridged.** Until a channel's interval chain locks, its in-flight
+  interval plays as a live preview (~1 s behind the sender) and hands over seamlessly;
+  the transport bar counts down "audio in ~Xs".
+- Transmit now works in rooms whose interval exceeds the capture ring, and never
+  auto-resumes on patch load — a pulsing **START TRANSMITTING** nudge appears instead
+  when you sit silent in a room with an instrument plugged into IN.
+
+### Fixed
+
+- Linux crash (SIGSEGV) the moment any AAC/HLS stream started — FAAD2's internal FFT
+  symbols collided with `libRack.so` exports; now compiled with hidden visibility.
+- Replaced rotted bundled stations.
+
+## [2.0.1] — 2026-07-18
+
+A hardening pass across the whole network layer — security, privacy, and reliability —
+ahead of wider distribution.
+
+### Security
+
+- Redirects that resolve to private/loopback/link-local addresses (SSRF) and any
+  `https → http` downgrade are refused, for both audio streams and small fetches.
+- URLs containing raw control bytes are rejected (playlist/redirect header injection);
+  logged and displayed URLs are redacted of credentials and query strings.
+- Hardened parsers and buffers: ICO palette/offset overflow clamp, chat-line length cap
+  against hostile-server memory bloat, `FD_SET` overflow guard.
+
+### Privacy
+
+- NINJAM credentials moved out of patches into a local per-server store
+  (`akaudio-ninjam.json`, 0600) — a shared `.vcv` leaks nothing.
+- Favicons are stored as portable `cache:<file>` references, never absolute paths that
+  embed the account's home directory.
+- Transmit never auto-resumes on patch load; the ninbot room-directory fetch is strictly
+  user-initiated; networking initializes lazily on first connect, not at plugin load.
+
+### Changed
+
+- Faster, sturdier connects: parallel candidate racing (happy eyeballs), abortable
+  DNS/TLS, bounded idle timeouts, and failures-only diagnostics in Rack's `log.txt`.
+- Both modules surface stream errors on the panel (reason text instead of a stuck LED
+  or station art).
+
+### Fixed
+
+- Windows exit hangs, zombie sessions on rapid station/room switches, an audition
+  state-machine race, a draw regression, and several rotted bundled stations
+  (redirects, raw-AAC HLS, Radio France URL scheme).
+
 ## [2.0.0] — 2026-06-30
 
 First public release: two network-audio modules sharing a common streaming, decode, and
@@ -47,4 +137,7 @@ lock-free ring-buffer layer.
   [README](README.md#privacy) for the full breakdown, including that JOIN transmits your
   input audio.
 
+[2.0.5]: https://github.com/akaudio-dev/akaudio/releases/tag/v2.0.5
+[2.0.4]: https://github.com/akaudio-dev/akaudio/releases/tag/v2.0.4
+[2.0.1]: https://github.com/akaudio-dev/akaudio/releases/tag/v2.0.1
 [2.0.0]: https://github.com/akaudio-dev/akaudio/releases/tag/v2.0.0
