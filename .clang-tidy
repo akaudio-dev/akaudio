@@ -1,0 +1,45 @@
+# clang-tidy config for the akaudio sources. Bug-finding groups only — style/
+# readability groups are deliberately off (repo style is enforced by review, and
+# cppcheck covers the lint tier; see tools/cppcheck.sh).
+#
+# Run via tools/clang_tidy.sh (needs a compile_commands.json: bear -- make).
+#
+# Disabled within the groups:
+#   bugprone-easily-swappable-parameters  — flags every (l, r) / (host, port) pair; pure noise here
+#   bugprone-narrowing-conversions        — DSP code converts float/double/int constantly by design
+#   bugprone-throwing-static-initialization — Rack's own idiom: Model* registration and NVGcolor
+#                                           theme constants must run at static init
+#   cert-err58-cpp                        — same static-init pattern, CERT spelling
+#   bugprone-signed-char-misuse           — dup of cert-str34-c on byte-buffer code
+#   cert-str34-c                          — as above
+#   performance-enum-size                 — micro-packing advice, irrelevant
+#   portability-avoid-pragma-once         — #pragma once is Rack's (and this repo's) convention
+Checks: >
+  bugprone-*,
+  clang-analyzer-*,
+  concurrency-*,
+  cert-*,
+  performance-*,
+  portability-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -bugprone-throwing-static-initialization,
+  -cert-err58-cpp,
+  -bugprone-signed-char-misuse,
+  -cert-str34-c,
+  -performance-enum-size,
+  -portability-avoid-pragma-once
+CheckOptions:
+  # Allocation failure (bad_alloc, string length_error) is unrecoverable in a Rack
+  # plugin; treating it as a reportable escape would flag every string-capturing UI
+  # lambda. Destructor/thread-entry escapes of real exceptions still report.
+  # (bad_array_new_length is what libc++ string/vector allocation actually throws;
+  # the list is COMMA-separated — semicolons silently match nothing)
+  bugprone-exception-escape.IgnoredExceptions: 'bad_alloc,bad_array_new_length,length_error'
+WarningsAsErrors: ''
+# Report findings in our own headers (src/*.hpp, src/net/**) but never in
+# vendored src/dep/ (ExcludeHeaderFilter catches the src/net/../dep/ spelling)
+# or the Rack SDK includes.
+HeaderFilterRegex: '(src/net/|src/[A-Za-z]+\.hpp)'
+ExcludeHeaderFilterRegex: '.*/dep/.*'
+FormatStyle: none
