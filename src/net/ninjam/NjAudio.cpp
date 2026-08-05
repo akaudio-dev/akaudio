@@ -121,7 +121,7 @@ void NjAudio::refreshSlots() {
 	// Free slots whose user no longer has any channel; recompute the poly channel count.
 	for (auto it = userSlot.begin(); it != userSlot.end();) {
 		bool present = false;
-		for (auto& kv : channels)
+		for (const auto& kv : channels)
 			if (kv.second.user == it->first) { present = true; break; }
 		if (!present) {
 			slotUsed[it->second] = false;
@@ -398,7 +398,6 @@ std::vector<float> NjAudio::decodeOgg(const uint8_t* data, size_t len, int frame
 		: (size_t)frames;
 	std::vector<float> in((expectFrames + CHUNK) * nch);
 	size_t used = 0; // floats written so far
-	int got;
 	for (;;) {
 		// Guarantee at least CHUNK*nch floats of headroom before each decode call —
 		// stb_vorbis writes up to that many and doesn't know the remaining capacity,
@@ -406,7 +405,7 @@ std::vector<float> NjAudio::decodeOgg(const uint8_t* data, size_t len, int frame
 		// already large) is not enough; take the max with the exact requirement.
 		if (in.size() - used < CHUNK * nch)
 			in.resize(std::max(in.size() + in.size() / 2, used + CHUNK * nch));
-		got = stb_vorbis_get_samples_float_interleaved(v, nch, in.data() + used, (int)(CHUNK * nch));
+		int got = stb_vorbis_get_samples_float_interleaved(v, nch, in.data() + used, (int)(CHUNK * nch));
 		if (got <= 0)
 			break;
 		used += (size_t)got * nch;
@@ -452,15 +451,15 @@ std::vector<float> NjAudio::decodeOgg(const uint8_t* data, size_t len, int frame
 	return out;
 }
 
-void NjAudio::setTransmit(int channels, float quality, bool voice) {
-	if (channels > MAX_TX) channels = MAX_TX;
+void NjAudio::setTransmit(int nch, float quality, bool voice) {
+	if (nch > MAX_TX) nch = MAX_TX;
 	// Atomics only — the capture rings are built once in start() (see below), never here,
 	// so this can't race txLoop iterating the vector. captureFrame gates on txRings, so
 	// setting txActive before the rings exist (setTransmit called pre-join) is harmless.
 	txQuality.store(quality, std::memory_order_relaxed);
 	txVoice.store(voice, std::memory_order_relaxed);
-	nTx.store(channels, std::memory_order_release);
-	txActive.store(channels > 0, std::memory_order_release);
+	nTx.store(nch, std::memory_order_release);
+	txActive.store(nch > 0, std::memory_order_release);
 }
 
 void NjAudio::start() {

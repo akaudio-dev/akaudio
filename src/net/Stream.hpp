@@ -64,7 +64,7 @@ public:
 
 private:
 	void run(std::string url);
-	void runHls(std::string url); // HLS (.m3u8) path: poll playlist, demux TS, decode AAC
+	void runHls(const std::string& url); // HLS (.m3u8) path: poll playlist, demux TS, decode AAC
 	void setStatus(State s, const std::string& text);
 
 	StereoRingBuffer ring{1 << 16}; // 65536 frames ≈ 1.4 s at 48 kHz of headroom

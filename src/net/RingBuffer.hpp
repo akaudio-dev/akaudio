@@ -105,7 +105,7 @@ public:
 	using FrameRingBuffer<2>::pull;
 
 	bool push(float l, float r) {
-		float f[2] = {l, r};
+		const float f[2] = {l, r};
 		return FrameRingBuffer<2>::push(f);
 	}
 	bool pull(float& l, float& r) {

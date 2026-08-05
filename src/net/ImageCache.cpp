@@ -63,8 +63,9 @@ bool writeFile(const std::string& path, const std::string& data) {
 	if (!f)
 		return false;
 	size_t n = data.empty() ? 0 : std::fwrite(data.data(), 1, data.size(), f);
-	std::fclose(f);
-	return n == data.size();
+	// fclose flushes; a failure there means the bytes may not have hit disk.
+	bool flushed = std::fclose(f) == 0;
+	return flushed && n == data.size();
 }
 
 // Convert an .ico to a stb-loadable payload. Picks the largest/deepest frame; an

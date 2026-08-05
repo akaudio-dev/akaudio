@@ -29,9 +29,10 @@ void netStartup() {
 		// covers everything else (e.g. Ninjam transmit) regardless of platform.
 		// Default SIGPIPE action kills the process and leaves no crash report.
 		// (Windows has no SIGPIPE.)
-		std::signal(SIGPIPE, SIG_IGN);
+		(void) std::signal(SIGPIPE, SIG_IGN);
 #endif
 		return true;
+		// cppcheck-suppress knownConditionTrueFalse // always-true by design: run-once lazy-init idiom
 	}();
 	(void) once;
 }
@@ -55,7 +56,7 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 	int pendingIdx[FD_SETSIZE];
 	int npending = 0;
 	int addrCount = 0;
-	for (addrinfo* ai = res; ai; ai = ai->ai_next)
+	for (const addrinfo* ai = res; ai; ai = ai->ai_next)
 		addrCount++;
 
 	auto logCandidateFailed = [&](int idx, const addrinfo* ai, const char* what) {
@@ -146,9 +147,14 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 		FD_ZERO(&wf);
 		int maxFd = -1;
 		for (int i = 0; i < npending; i++) {
-			FD_SET(pending[i], &wf);
-			if (pending[i] > maxFd)
-				maxFd = pending[i];
+			// Bound re-check before indexing the fd_set bitmap. Unreachable (every
+			// entry was guarded at insert), but keeps the invariant provable locally.
+			const int f = pending[i];
+			if (f < 0 || f >= FD_SETSIZE)
+				continue;
+			FD_SET(f, &wf);
+			if (f > maxFd)
+				maxFd = f;
 		}
 		timeval tv{0, 100 * 1000};
 		int s = ::select(maxFd + 1, nullptr, npending ? &wf : nullptr, nullptr, &tv);
@@ -158,9 +164,11 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 		}
 		if (s > 0) {
 			for (int i = 0; i < npending; i++) {
-				if (!FD_ISSET(pending[i], &wf))
-					continue;
 				int fd = pending[i];
+				if (fd < 0 || fd >= FD_SETSIZE)
+					continue; // see bound re-check above
+				if (!FD_ISSET(fd, &wf))
+					continue;
 				const int winIdx = pendingIdx[i];
 				if (netSoError(fd) == 0) {
 					// Winner: first candidate to complete the handshake.
@@ -209,7 +217,8 @@ bool isPrivateOrLoopback(const sockaddr* sa) {
 	if (!sa)
 		return false;
 	if (sa->sa_family == AF_INET) {
-		const uint8_t* b = (const uint8_t*) &((const sockaddr_in*) sa)->sin_addr.s_addr;
+		const uint8_t* b = reinterpret_cast<const uint8_t*>(
+			&reinterpret_cast<const sockaddr_in*>(sa)->sin_addr.s_addr);
 		if (b[0] == 127) return true;                        // 127.0.0.0/8 loopback
 		if (b[0] == 10) return true;                         // 10.0.0.0/8
 		if (b[0] == 172 && (b[1] & 0xf0) == 16) return true; // 172.16.0.0/12
@@ -220,7 +229,7 @@ bool isPrivateOrLoopback(const sockaddr* sa) {
 		return false;
 	}
 	if (sa->sa_family == AF_INET6) {
-		const in6_addr& a = ((const sockaddr_in6*) sa)->sin6_addr;
+		const in6_addr& a = reinterpret_cast<const sockaddr_in6*>(sa)->sin6_addr;
 		if (IN6_IS_ADDR_LOOPBACK(&a) || IN6_IS_ADDR_LINKLOCAL(&a)
 				|| IN6_IS_ADDR_UNSPECIFIED(&a))
 			return true;
@@ -255,6 +264,7 @@ struct ResolveJob {
 	addrinfo* res = nullptr;
 };
 
+// NOLINTNEXTLINE(performance-unnecessary-value-param) — the copy IS the ownership: it keeps the job alive after the caller abandons it
 void resolveThread(std::shared_ptr<ResolveJob> job) {
 	addrinfo hints{};
 	hints.ai_family = AF_UNSPEC;
@@ -328,7 +338,7 @@ int netResolveConnect(const std::string& host, const std::string& port,
 	// loopback/link-local address. Conservative (refuse on ANY such address, not just
 	// the first) so a rebinding response that mixes public + internal can't slip through.
 	if (blockPrivate) {
-		for (addrinfo* ai = res; ai; ai = ai->ai_next) {
+		for (const addrinfo* ai = res; ai; ai = ai->ai_next) {
 			if (isPrivateOrLoopback(ai->ai_addr)) {
 				::freeaddrinfo(res);
 				netLog("connect " + host + " BLOCKED: redirect resolves to a private/"

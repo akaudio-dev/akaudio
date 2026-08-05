@@ -80,7 +80,7 @@ public:
 	// Set the number of local channels to broadcast + VBR quality. Allocates capture
 	// buffers (call from the UI/setup thread, before start() ideally). `voice` = the
 	// channels are NINJAM voice chat: rolling ~2 s upload intervals, no beat grid.
-	void setTransmit(int channels, float quality, bool voice = false);
+	void setTransmit(int nch, float quality, bool voice = false);
 	// Audio thread: align interval capture to the room's beat grid. Called at a beat
 	// boundary; the elapsed part of the current interval (beats 0..beatIndex-1 of
 	// beatCount) is pre-filled with silence so uploads stay downbeat-aligned while
@@ -117,7 +117,7 @@ public:
 		float f[RING_CH];
 		if (!ring.pull(f)) return false;
 		l = 0.f; r = 0.f;
-		for (int i = 0; i < MAX_PLAYERS; i++) { l += f[i * 2]; r += f[i * 2 + 1]; }
+		for (int i = 0; i < MAX_PLAYERS; i++) { l += f[(size_t) i * 2]; r += f[(size_t) i * 2 + 1]; }
 		return true;
 	}
 

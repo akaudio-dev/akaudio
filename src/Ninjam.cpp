@@ -37,7 +37,7 @@ static void parseHostPort(const std::string& s, std::string& host, int& port) {
 	size_t colon = s.rfind(':');
 	if (colon != std::string::npos) {
 		host = s.substr(0, colon);
-		port = std::atoi(s.substr(colon + 1).c_str());
+		port = (int) std::strtol(s.c_str() + colon + 1, nullptr, 10);
 	} else {
 		host = s;
 		port = 0;
@@ -625,6 +625,7 @@ struct Ninjam : Module {
 		bool voice = txVoice.load(std::memory_order_relaxed);
 		if (desired != txDeclared || (int) voice != txDeclaredVoice) {
 			std::vector<std::string> names;
+			names.reserve(desired);
 			for (int i = 0; i < desired; i++)
 				names.push_back((voice ? "voice" : "ch") + std::to_string(i + 1));
 			njclient.setTransmit(names, txQuality, voice);
@@ -743,8 +744,8 @@ struct Ninjam : Module {
 			outputs[POLY_L_OUTPUT].setChannels(np);
 			outputs[POLY_R_OUTPUT].setChannels(np);
 			for (int i = 0; i < akaudio::nj::MAX_PLAYERS; i++) {
-				float pl = got ? frame[i * 2] : 0.f;
-				float pr = got ? frame[i * 2 + 1] : 0.f;
+				float pl = got ? frame[(size_t) i * 2] : 0.f;
+				float pr = got ? frame[(size_t) i * 2 + 1] : 0.f;
 				if (i < np) {
 					outputs[POLY_L_OUTPUT].setVoltage(pl * 5.f, i);
 					outputs[POLY_R_OUTPUT].setVoltage(pr * 5.f, i);
@@ -943,7 +944,7 @@ struct Ninjam : Module {
 // Shared connect action for the in-panel Direct Join card: pulls username/password from
 // their fields and the host:port from the server field, then joins (private/registered
 // servers that aren't in the public directory).
-static void directJoin(Ninjam* module, ui::TextField* userF, ui::TextField* passF, ui::TextField* serverF) {
+static void directJoin(Ninjam* module, const ui::TextField* userF, const ui::TextField* passF, ui::TextField* serverF) {
 	if (!module || !serverF || serverF->text.empty())
 		return;
 	std::string host;
@@ -1147,7 +1148,8 @@ struct RoomRow : HoverButton {
 				return;
 			}
 		}
-		OpaqueWidget::onButton(e); // not on an icon: fall through (row itself is inert)
+		// NOLINTNEXTLINE(bugprone-parent-virtual-call) — deliberate: skip HoverButton's press handling, the row itself is inert
+		OpaqueWidget::onButton(e); // not on an icon: fall through
 	}
 
 	void draw(const DrawArgs& args) override {
@@ -1626,12 +1628,12 @@ struct JamView : Widget {
 			const float ty = 4.f, gap = 3.f, rowGap = 3.f, minTW = 10.f;
 			// How many ticks fit per row at the legible minimum, then balance across rows.
 			int perRow = std::max(1, (int) std::floor((avail + gap) / (minTW + gap)));
-			int rows = std::min(4, (bpi + perRow - 1) / perRow);
-			perRow = (bpi + rows - 1) / rows;
+			int tickRows = std::min(4, (bpi + perRow - 1) / perRow);
+			perRow = (bpi + tickRows - 1) / tickRows;
 			float tw = (avail - (perRow - 1) * gap) / perRow;
 			if (tw < 1.f) tw = 1.f;
 			// Tick height: full 20 px for a single row, shrinking as rows stack (cap block ~40 px).
-			float th = std::min(20.f, (40.f - (rows - 1) * rowGap) / rows);
+			float th = std::min(20.f, (40.f - (tickRows - 1) * rowGap) / tickRows);
 			for (int b = 0; b < bpi; b++) {
 				int row = b / perRow, col = b % perRow;
 				float x = pad + col * (tw + gap);
@@ -1645,7 +1647,7 @@ struct JamView : Widget {
 				nvgFillColor(vg, c);
 				nvgFill(vg);
 			}
-			tickBottom = ty + rows * th + (rows - 1) * rowGap;
+			tickBottom = ty + tickRows * th + (tickRows - 1) * rowGap;
 		}
 
 		// Info line: beat counter (left) + who's here (right), just under the ticks.
@@ -1752,6 +1754,7 @@ struct ServerDropdownButton : HoverButton {
 	ui::TextField* passField = nullptr;
 	void onPress(const ButtonEvent& e) override {
 		if (!module) {
+			// NOLINTNEXTLINE(bugprone-parent-virtual-call) — deliberate: HoverButton::onButton would re-enter onPress
 			OpaqueWidget::onButton(e);
 			return;
 		}
@@ -2058,7 +2061,7 @@ struct NinjamWidget : ModuleWidget {
 	Widget* chatField = nullptr;
 	Widget* txNudge = nullptr;
 
-	NinjamWidget(Ninjam* module) {
+	explicit NinjamWidget(Ninjam* module) {
 		nj = module;
 		setModule(module);
 		setPanel(createPanel(asset::plugin(pluginInstance, "res/Ninjam.svg"),

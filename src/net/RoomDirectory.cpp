@@ -54,17 +54,17 @@ void RoomDirectory::fetch(unsigned bust) {
 	bool ok = httpGet(url, body, &abort_);
 
 	std::vector<Room> parsed;
-	std::string status;
+	std::string st;
 
 	if (!ok) {
-		status = "Fetch failed";
+		st = "Fetch failed";
 	}
 	else {
 		json_error_t err;
 		json_t* root = json_loads(body.c_str(), 0, &err);
 		json_t* servers = root ? json_object_get(root, "servers") : nullptr;
 		if (!servers || !json_is_array(servers)) {
-			status = "Bad response";
+			st = "Bad response";
 		}
 		else {
 			size_t i;
@@ -102,7 +102,7 @@ void RoomDirectory::fetch(unsigned bust) {
 				if (!r.name.empty())
 					parsed.push_back(std::move(r));
 			}
-			status = "Loaded " + std::to_string(parsed.size()) + " rooms";
+			st = "Loaded " + std::to_string(parsed.size()) + " rooms";
 		}
 		if (root)
 			json_decref(root);
@@ -120,7 +120,7 @@ void RoomDirectory::fetch(unsigned bust) {
 		std::lock_guard<std::mutex> lock(mutex);
 		if (ok)
 			rooms_ = std::move(parsed);
-		status_ = status;
+		status_ = st;
 	}
 	// Log only FAILURES (fetch/parse failed, or an implausible empty directory),
 	// and only when the outcome changes — the 30 s re-poll must not tick
@@ -128,9 +128,9 @@ void RoomDirectory::fetch(unsigned bust) {
 	// until the network heals; a healthy fetch just clears the memory).
 	// fetch() runs one-at-a-time (loading_ guards it): plain member is fine.
 	if (!healthy) {
-		if (status != lastLogged_) {
-			netLog("room directory: " + status);
-			lastLogged_ = status;
+		if (st != lastLogged_) {
+			netLog("room directory: " + st);
+			lastLogged_ = st;
 		}
 	} else {
 		lastLogged_.clear();

@@ -61,7 +61,7 @@ std::string firstPlaylistUrl(const std::string& body) {
 		// playlist working while never emitting a URL with an embedded CR/LF.
 		size_t ctl = u.find_first_of("\r\n");
 		if (ctl != std::string::npos)
-			u = u.substr(0, ctl);
+			u.resize(ctl);
 		while (!u.empty() && (u.back() == ' ' || u.back() == '\t'))
 			u.pop_back();
 		if (!u.empty())
@@ -162,11 +162,11 @@ struct ResampleCtx {
 // Context handed to dr_mp3's read callback: serves the post-header leftover bytes
 // first, then reads directly from the socket (idle-bounded).
 struct ReadCtx {
-	int fd;
-	const Tls* tls;
+	int fd = -1;
+	const Tls* tls = nullptr;
 	std::string leftover;
 	size_t leftoverPos = 0;
-	const std::atomic<bool>* abort;
+	const std::atomic<bool>* abort = nullptr;
 };
 
 size_t onRead(void* pUserData, void* pBufferOut, size_t bytesToRead) {
@@ -190,7 +190,14 @@ size_t onRead(void* pUserData, void* pBufferOut, size_t bytesToRead) {
 } // namespace
 
 StreamClient::~StreamClient() {
-	stop();
+	// Never let an exception escape a destructor: stop() joins the bg thread, and
+	// std::thread::join can throw std::system_error (e.g. deadlock detection).
+	try {
+		stop();
+	}
+	catch (...) {
+		netLog("StreamClient dtor: exception while stopping (thread join failed?)");
+	}
 }
 
 void StreamClient::setStatus(State s, const std::string& text) {
@@ -451,7 +458,7 @@ cleanup:
 	running.store(false, std::memory_order_release);
 }
 
-void StreamClient::runHls(std::string url) {
+void StreamClient::runHls(const std::string& url) {
 	if (!AacDecoder::available()) {
 		setStatus(State::Error, "HLS unsupported");
 		return;

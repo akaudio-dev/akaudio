@@ -39,7 +39,7 @@ struct AacDecoder::Impl {
 		dstFmt.mFramesPerPacket = 1;
 		dstFmt.mBytesPerFrame = dstFmt.mChannelsPerFrame * sizeof(float);
 		dstFmt.mBytesPerPacket = dstFmt.mBytesPerFrame;
-		if (AudioConverterNew(&srcFmt, &dstFmt, &converter) != noErr) {
+		if (AudioConverterNew(&srcFmt, &dstFmt, &converter) != noErr || !converter) {
 			failed = true;
 			return;
 		}
@@ -93,6 +93,7 @@ static void propProc(void* userData, AudioFileStreamID stream, AudioFileStreamPr
 		// data arrived. Converting with the stale format means the wrong
 		// rate/pitch, so rebuild; onPCM picks up the new dstFmt rate on the
 		// next batch.
+		// NOLINTNEXTLINE(bugprone-suspicious-memory-comparison,cert-exp42-c,cert-flp37-c) — ASBD is padding-free (one Float64 + eight UInt32s)
 		if (impl->converter && std::memcmp(&prev, &impl->srcFmt, sizeof(prev)) != 0) {
 			AudioConverterDispose(impl->converter);
 			impl->converter = nullptr;
@@ -303,7 +304,7 @@ bool AacDecoder::feed(const uint8_t* data, size_t n) {
 
 		NeAACDecFrameInfo fi;
 		std::memset(&fi, 0, sizeof(fi));
-		void* pcm = NeAACDecDecode(impl->dec, &fi, &b[pos], (unsigned long)(b.size() - pos));
+		const void* pcm = NeAACDecDecode(impl->dec, &fi, &b[pos], (unsigned long)(b.size() - pos));
 
 		if (fi.error != 0) {               // corrupt frame — skip it, keep decoding
 			pos += flen;

@@ -381,7 +381,7 @@ static void drawStationBadge(NVGcontext* vg, const std::string& icon, const std:
 }
 
 // Strip a leading "NN_" ordering prefix (Rack's preset-sort convention).
-static std::string prettyPresetName(std::string stem) {
+static std::string prettyPresetName(const std::string& stem) {
 	size_t us = stem.find('_');
 	if (us != std::string::npos && us > 0) {
 		bool allDigits = true;
@@ -573,7 +573,7 @@ static std::vector<StationInfo> collectStations(ModuleWidget* mw) {
 // station rows. Mirrors Rack's own factory-preset folder convention, so the
 // native Preset menu groups identically.
 static void appendStationDir(Menu* menu, ModuleWidget* mw, const std::string& dir) {
-	Radio* module = dynamic_cast<Radio*>(mw->module);
+	const Radio* module = dynamic_cast<Radio*>(mw->module);
 	std::vector<std::string> entries = system::getEntries(dir);
 	std::sort(entries.begin(), entries.end());
 	int count = 0;
@@ -683,6 +683,7 @@ struct StationChoice : LedDisplayChoice {
 		// Assign only on change: this runs per UI frame and text is heap-allocating.
 		const std::string& want = (module && !module->stationName.empty())
 			? module->stationName : pickPrompt();
+		// cppcheck-suppress duplicateConditionalAssign // the guard skips a per-frame heap copy
 		if (text != want)
 			text = want;
 		LedDisplayChoice::step();
@@ -779,8 +780,9 @@ struct RadioWidget : ModuleWidget {
 			// Live status while a run is in flight; otherwise count the outcome down.
 			if (module->importer.running()) {
 				module->setImportMsg(module->importer.status(), false);
-			} else if (module->importMsgTtl > 0 && --module->importMsgTtl == 0) {
-				module->importMsg = "";
+			} else if (module->importMsgTtl > 0) {
+				if (--module->importMsgTtl == 0)
+					module->importMsg = "";
 			}
 
 			unsigned g = module->importer.generation();
@@ -831,7 +833,7 @@ struct RadioWidget : ModuleWidget {
 		loadStation(this, stations[next].path);
 	}
 
-	RadioWidget(Radio* module) {
+	explicit RadioWidget(Radio* module) {
 		setModule(module);
 		setPanel(createPanel(asset::plugin(pluginInstance, "res/Radio.svg"),
 			asset::plugin(pluginInstance, "res/Radio-dark.svg")));

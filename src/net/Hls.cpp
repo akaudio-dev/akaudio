@@ -62,7 +62,7 @@ HlsPlaylist parseHlsPlaylist(const std::string& body) {
 				// Remote-controlled value: clamp so the poll cadence stays sane
 				// and the caller's double→int ms conversion can't hit UB on an
 				// absurd value. NaN fails both comparisons → default kept.
-				double v = std::atof(line.c_str() + 22);
+				double v = std::strtod(line.c_str() + 22, nullptr);
 				if (v >= 1.0 && v <= 60.0)
 					pl.targetDuration = v;
 			}
@@ -144,6 +144,7 @@ void hlsSegmentToAdts(const uint8_t* d, size_t n, std::string& out) {
 	// body size, plus a 10-byte footer when the ID3v2.4 footer flag is set), then
 	// require an ADTS syncword before appending.
 	size_t off = 0;
+	// cppcheck-suppress knownConditionTrueFalse // FP: cppcheck only follows the n==0 path; reachable when d[0] != 0x47
 	while (n - off >= 10 && d[off] == 'I' && d[off + 1] == 'D' && d[off + 2] == '3') {
 		size_t sz = ((size_t)(d[off + 6] & 0x7f) << 21) | ((size_t)(d[off + 7] & 0x7f) << 14)
 		          | ((size_t)(d[off + 8] & 0x7f) << 7) | (size_t)(d[off + 9] & 0x7f);
@@ -154,6 +155,7 @@ void hlsSegmentToAdts(const uint8_t* d, size_t n, std::string& out) {
 			break;
 		}
 	}
+	// cppcheck-suppress knownConditionTrueFalse // FP: same n==0-only path assumption as above
 	if (n - off >= 2 && d[off] == 0xff && (d[off + 1] & 0xf0) == 0xf0)
 		out.append(reinterpret_cast<const char*>(d) + off, n - off);
 }

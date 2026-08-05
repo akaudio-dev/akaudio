@@ -23,7 +23,7 @@ inline int flexInt(json_t* v, int fallback = 0) {
 	if (json_is_string(v)) {
 		const char* s = json_string_value(v);
 		if (s && *s)
-			return std::atoi(s);
+			return (int) std::strtol(s, nullptr, 10);
 	}
 	return fallback;
 }

@@ -207,16 +207,16 @@ public:
 	// Another thread: interrupt a blocked recv/send on the owner. No-op if closed.
 	void shutdown() {
 		std::lock_guard<std::mutex> lock(mu_);
-		int fd = sock_.load(std::memory_order_acquire);
-		if (fd >= 0)
-			netShutdown(fd);
+		int s = sock_.load(std::memory_order_acquire);
+		if (s >= 0)
+			netShutdown(s);
 	}
 	// Owner: close + clear the fd, atomic with a concurrent shutdown().
 	void closeOwned() {
 		std::lock_guard<std::mutex> lock(mu_);
-		int fd = sock_.exchange(-1, std::memory_order_acq_rel);
-		if (fd >= 0)
-			netClose(fd);
+		int s = sock_.exchange(-1, std::memory_order_acq_rel);
+		if (s >= 0)
+			netClose(s);
 	}
 
 private:
@@ -224,12 +224,26 @@ private:
 	std::mutex mu_;
 };
 
+#ifndef _WIN32
+// strerror() hands back a static buffer (thread-unsafe; netErrorStr runs on the bg
+// net threads). strerror_r is safe but has two ABIs — POSIX fills the buffer and
+// returns int, glibc with _GNU_SOURCE (any g++ build) returns the string and may
+// ignore the buffer — so the result is picked apart by overload.
+inline std::string netStrerrorResult(int rc, const char* buf) {
+	return (rc == 0 && buf[0]) ? buf : "unknown error";
+}
+inline std::string netStrerrorResult(const char* s, const char*) {
+	return s ? s : "unknown error";
+}
+#endif
+
 // Human-readable last socket error (for logs).
 inline std::string netErrorStr() {
 #ifdef _WIN32
 	return "socket error " + std::to_string(WSAGetLastError());
 #else
-	return std::strerror(errno);
+	char buf[128] = {};
+	return netStrerrorResult(strerror_r(errno, buf, sizeof(buf)), buf);
 #endif
 }
 

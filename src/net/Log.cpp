@@ -31,11 +31,13 @@ std::string redactUrl(const std::string& url) {
 	size_t at = s.find('@', hostStart);
 	size_t slash = s.find('/', hostStart);
 	if (at != std::string::npos && (slash == std::string::npos || at < slash))
-		s = s.substr(0, hostStart) + s.substr(at + 1);
+		s.erase(hostStart, at + 1 - hostStart);
 	// Drop any query string (session tokens live there); mark that one was present.
 	size_t q = s.find('?');
-	if (q != std::string::npos)
-		s = s.substr(0, q) + "?\xe2\x80\xa6"; // "?…"
+	if (q != std::string::npos) {
+		s.erase(q);
+		s += "?\xe2\x80\xa6"; // "?…"
+	}
 	return s;
 }
 

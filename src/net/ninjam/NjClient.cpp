@@ -242,6 +242,8 @@ int NjClient::recvFrame(uint8_t& type, std::vector<uint8_t>& payload) {
 	return 1;
 }
 
+// cppcheck-suppress passedByValueCallback // thread entry: by-value copies must outlive start()'s locals
+// NOLINTNEXTLINE(performance-unnecessary-value-param) — same: std::thread invokes this with copies it owns
 void NjClient::run(std::string host, int port, std::string user, std::string pass) {
 	// Per-user subscribed-channel bitmask (SET_USERMASK); session-local by construction.
 	std::map<std::string, uint32_t> subMask;

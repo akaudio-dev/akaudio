@@ -40,7 +40,7 @@ std::string hashKey(const std::string& s) {
 	for (char c : s)
 		h = (h ^ (unsigned char) c) * 16777619u;
 	char buf[9];
-	std::snprintf(buf, sizeof(buf), "%08x", h);
+	(void) std::snprintf(buf, sizeof(buf), "%08x", h); // "%08x" always fits: 8 chars + NUL
 	return buf;
 }
 
