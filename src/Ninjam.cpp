@@ -400,7 +400,6 @@ struct Ninjam : Module {
 			}
 			if (s == State::Error)
 				WARN("akaudio.Ninjam: %s", msg.c_str());
-			// INFO("akaudio.Ninjam: state=%s %s", akaudio::nj::stateName(s), msg.c_str());
 		};
 		cb.onLog = [](const std::string& m) { WARN("akaudio.Ninjam: %s", m.c_str()); };
 		cb.onConfig = [this](int bpm, int bpi) {
