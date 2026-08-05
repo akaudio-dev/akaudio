@@ -1,0 +1,51 @@
+# CodeQL code scanning (C/C++). Free for public repos.
+#
+# Manual build mode: the plugin builds against the Rack SDK, which autobuild
+# can't guess — tools/get_sdk.sh fetches the lin-x64 SDK into ../Rack-SDK and
+# the Makefile auto-detects it there. The Linux build compiles the vendored
+# FAAD2/ogg/vorbis path (same code the VCV Library farm builds).
+#
+# src/dep/ (vendored dr_mp3, stb_vorbis, FAAD2, libogg, libvorbis) is excluded
+# from alerts: we don't maintain that code, and upstream-tracking noise would
+# drown the signal from src/ and src/net/ — the taint-tracking targets
+# (Http/Stream/NjProtocol) are all first-party.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '30 5 * * 1' # weekly Mon 05:30 UTC: pick up new query packs
+
+jobs:
+  analyze:
+    name: Analyze C/C++
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write # upload SARIF results
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch Rack SDK
+        run: tools/get_sdk.sh
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          queries: security-and-quality
+          config: |
+            paths-ignore:
+              - src/dep
+
+      - name: Build
+        run: make -j"$(nproc)"
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:c-cpp"
