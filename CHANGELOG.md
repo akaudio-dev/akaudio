@@ -4,6 +4,19 @@ All notable changes to **AK Audio** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow VCV Rack's
 scheme (`MAJOR.MINOR.REVISION`, with `MAJOR` = the Rack major version).
 
+## [2.0.6] — 2026-08-08
+
+### Added
+
+- **MIDI-mappable transport** — Radio's play/stop and Ninjam's metronome are now
+  MIDI-Map/CAT-learnable params (visuals unchanged), with a context-menu toggle between
+  LATCH (default) and MOMENTARY for note/pad triggers.
+
+### Internal
+
+- CodeQL scanning plus repeatable static-analysis/TSan sweeps; fixed all cppcheck and
+  clang-tidy findings across `src/`.
+
 ## [2.0.5] — 2026-07-31
 
 ### Added
@@ -137,6 +150,7 @@ lock-free ring-buffer layer.
   [README](README.md#privacy) for the full breakdown, including that JOIN transmits your
   input audio.
 
+[2.0.6]: https://github.com/akaudio-dev/akaudio/releases/tag/v2.0.6
 [2.0.5]: https://github.com/akaudio-dev/akaudio/releases/tag/v2.0.5
 [2.0.4]: https://github.com/akaudio-dev/akaudio/releases/tag/v2.0.4
 [2.0.1]: https://github.com/akaudio-dev/akaudio/releases/tag/v2.0.1
