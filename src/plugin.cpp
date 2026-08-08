@@ -5,6 +5,11 @@
 
 #include <string>
 
+// Fonts defined in Theme.hpp
+const char* FONT_BOLD = "res/fonts/Nunito-Bold.ttf";
+const char* FONT_REG = "res/fonts/DejaVuSans.ttf";
+const char* FONT_MONO = "res/fonts/ShareTechMono-Regular.ttf";
+
 namespace akaudio {
 void netLogSetSink(void (*)(const std::string&)); // net/Log.cpp — diagnostics sink
 }

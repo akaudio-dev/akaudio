@@ -18,9 +18,9 @@ using namespace rack;
 // helpers every widget uses.
 
 // ---- Fonts (Rack system assets) ----
-static const char* FONT_BOLD = "res/fonts/Nunito-Bold.ttf";
-static const char* FONT_REG = "res/fonts/DejaVuSans.ttf";
-static const char* FONT_MONO = "res/fonts/ShareTechMono-Regular.ttf"; // TTY chat console
+extern const char* FONT_BOLD;
+extern const char* FONT_REG;
+extern const char* FONT_MONO;
 
 // ---- Shared palette ----
 // Both panels follow Fundamental's dark-panel convention (View > Use dark panels):
