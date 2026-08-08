@@ -28,6 +28,11 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+// Windows socket handles can exceed the default FD_SETSIZE (64); set it high enough
+// to support our happy-eyeballs parallel connect (typically <16 in-flight, but be generous)
+#ifndef FD_SETSIZE
+#define FD_SETSIZE 512
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #ifndef SHUT_RDWR
