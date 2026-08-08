@@ -143,8 +143,9 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 			return -1; // every candidate failed synchronously
 
 		// Poll all in-flight attempts for up to 100 ms (also the abort/stagger tick).
-		fd_set wf;
+		fd_set wf, ef;
 		FD_ZERO(&wf);
+		FD_ZERO(&ef);
 		int maxFd = -1;
 		for (int i = 0; i < npending; i++) {
 			// Bound re-check before indexing the fd_set bitmap. Unreachable (every
@@ -153,11 +154,12 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 			if (f < 0 || f >= FD_SETSIZE)
 				continue;
 			FD_SET(f, &wf);
+			FD_SET(f, &ef); // Windows: failed connects are reported as exceptions
 			if (f > maxFd)
 				maxFd = f;
 		}
 		timeval tv{0, 100 * 1000};
-		int s = ::select(maxFd + 1, nullptr, npending ? &wf : nullptr, nullptr, &tv);
+		int s = ::select(maxFd + 1, nullptr, npending ? &wf : nullptr, npending ? &ef : nullptr, &tv);
 		if (s < 0 && !netInterrupted() && npending) {
 			// select itself failed (shouldn't happen): fall back to failing out.
 			break;
@@ -167,7 +169,9 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 				int fd = pending[i];
 				if (fd < 0 || fd >= FD_SETSIZE)
 					continue; // see bound re-check above
-				if (!FD_ISSET(fd, &wf))
+				bool isWritable = FD_ISSET(fd, &wf) != 0;
+				bool isException = FD_ISSET(fd, &ef) != 0;
+				if (!isWritable && !isException)
 					continue;
 				const int winIdx = pendingIdx[i];
 				if (netSoError(fd) == 0) {
