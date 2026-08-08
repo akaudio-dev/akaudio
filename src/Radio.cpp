@@ -97,6 +97,7 @@ static std::string portableIcon(const std::string& p) {
 struct Radio : Module {
 	enum ParamId {
 		LEVEL_PARAM,
+		PLAY_PARAM,  // on/off; MIDI-mappable (latch = value is play state, or momentary toggle)
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -128,6 +129,12 @@ struct Radio : Module {
 	std::string icon = "";
 	bool playing = false;
 
+	// MIDI button mode for PLAY_PARAM (persisted, UI thread only): false = latch
+	// (param value is the play state — intuitive for a mapped CC), true = momentary
+	// (a rising edge toggles — one press per toggle for a note/pad). The widget
+	// reconciles param <-> playing each frame (RadioWidget::step / ParamStateSync).
+	bool midiToggleMode = false;
+
 	// --- Audition / import coordination (UI thread only) ---
 	// Snapshot of the station before an audition, restored if the audition fails.
 	std::string prevUrl, prevName, prevIcon;
@@ -146,6 +153,11 @@ struct Radio : Module {
 		// Built-in VCA, identical to the core AUDIO module's LEVEL knob: 0–2 linear
 		// param (default 1 = unity), shown as dB (−∞ … +12), gain = param².
 		configParam(LEVEL_PARAM, 0.f, 2.f, 1.f, "Level", " dB", -10, 40);
+		// Two-state play/stop switch so it is MIDI-mappable. The value is the play
+		// state (latch mode); the widget reconciles it with the actual stream on the
+		// UI thread, where start/stop is safe (start/stop joins the stream's bg
+		// thread, so it must never run on the audio thread). See midiToggleMode.
+		configSwitch(PLAY_PARAM, 0.f, 1.f, 0.f, "Play / stop", {"Stopped", "Playing"});
 		configInput(LEVEL_INPUT, "Level CV");
 		configOutput(LEFT_OUTPUT, "Left");
 		configOutput(RIGHT_OUTPUT, "Right");
@@ -251,7 +263,9 @@ struct Radio : Module {
 	}
 
 	json_t* dataToJson() override {
-		return stationData(url, stationName, icon, playing);
+		json_t* root = stationData(url, stationName, icon, playing);
+		json_object_set_new(root, "midiToggleMode", json_boolean(midiToggleMode));
+		return root;
 	}
 
 	void dataFromJson(json_t* root) override {
@@ -266,6 +280,8 @@ struct Radio : Module {
 		url = jsonStr(json_object_get(root, "url"), url);
 		stationName = jsonStr(json_object_get(root, "stationName"), stationName);
 		icon = jsonStr(json_object_get(root, "icon"), icon);
+		if (json_t* j = json_object_get(root, "midiToggleMode"))
+			midiToggleMode = json_boolean_value(j);
 		// Loading a preset/patch: apply its playing state. (Stream already stopped above,
 		// so play() restarts cleanly on the new URL.)
 		bool wantPlay = false;
@@ -763,6 +779,9 @@ struct RadioWidget : ModuleWidget {
 	// Audition-outcome tracking (was a dedicated invisible watcher widget).
 	unsigned importGen = 0;
 	bool importGenInited = false;
+	ParamLed* playLed = nullptr;
+	// Keeps PLAY_PARAM and the actual playback in sync each frame (UI thread).
+	ParamStateSync playSync;
 
 	// UI thread, per frame: drive the audition outcome — apply the live importer
 	// status, then on completion either commit + save (identified), await a name
@@ -770,6 +789,16 @@ struct RadioWidget : ModuleWidget {
 	// centralised here so no failed audition leaves lingering state.
 	void step() override {
 		if (Radio* module = getModule<Radio>()) {
+			// Reconcile the mappable PLAY_PARAM with the actual stream, on the UI
+			// thread (togglePlay start/stops the stream — joins its bg thread — so it
+			// must never run on the audio thread). Latch or momentary per the module's
+			// MIDI mode; the widget follows suit so a physical click behaves the same.
+			if (playLed)
+				playLed->momentary = module->midiToggleMode;
+			playSync.reconcile(module->params[Radio::PLAY_PARAM], module->midiToggleMode,
+				[module]() { return module->playing; },
+				[module](bool want) { if (want != module->playing) module->togglePlay(); });
+
 			// On first appearance, sync to the current generation so a stale result
 			// from before this widget existed isn't re-applied (e.g. patch reopen).
 			if (!importGenInited) {
@@ -857,20 +886,21 @@ struct RadioWidget : ModuleWidget {
 		addChild(art);
 
 		// Clickable status LED at the top of the right strip beside the artwork:
-		// green=playing, amber=connecting, red=stopped. Click toggles playback.
-		ClickableLed* led = new ClickableLed;
-		led->box.size = mm2px(Vec(5.0, 5.0));
-		led->box.pos = mm2px(Vec(31.14, 19.75));
+		// green=playing, amber=connecting, red=stopped. It is a two-state param
+		// (PLAY_PARAM) so play/stop is MIDI-mappable; RadioWidget::step reconciles the
+		// param with the actual stream (latch or momentary per Radio::midiToggleMode).
+		playLed = createParam<ParamLed>(
+			mm2px(Vec(31.14, 19.75)), module, Radio::PLAY_PARAM);
+		playLed->box.size = mm2px(Vec(5.0, 5.0));
 		// Green only when audio is *actually flowing* (Playing AND frames decoded),
 		// so a connected-but-silent stream reads as pending (amber), not live.
 		auto reallyLive = [](Radio* m) {
 			return m && m->stream.getState() == akaudio::StreamClient::State::Playing
 				&& m->stream.producedFrames() > 0;
 		};
-		led->isLive = [module, reallyLive]() { return reallyLive(module); };
-		led->isPending = [module, reallyLive]() { return module && module->playing && !reallyLive(module); };
-		led->onClick = [module]() { if (module) module->togglePlay(); };
-		addChild(led);
+		playLed->isLive = [module, reallyLive]() { return reallyLive(module); };
+		playLed->isPending = [module, reallyLive]() { return module && module->playing && !reallyLive(module); };
+		addParam(playLed);
 
 		// On-panel station picker (click to choose a bundled station). Dark text on a
 		// subtle recessed field, matching the silver Fundamental theme. Near full width
@@ -940,6 +970,15 @@ struct RadioWidget : ModuleWidget {
 		menu->addChild(createMenuItem(module->playing ? "Stop" : "Play", "", [module]() {
 			module->togglePlay();
 		}));
+
+		// How a mapped MIDI control drives the play LED. Off (default) = latch: the
+		// control's value is the play state (a CC / latching button / click — stays in
+		// sync). On = momentary: a rising edge toggles (a note / pad — one press per
+		// toggle). See ParamStateSync; the note-vs-CC ambiguity has no single right
+		// answer, so the user picks.
+		menu->addChild(createCheckMenuItem("MIDI play: toggle on trigger (notes/pads)", "",
+			[module]() { return module->midiToggleMode; },
+			[module]() { module->midiToggleMode = !module->midiToggleMode; }));
 
 		// No "Stations" submenu here: the on-panel picker (StationChoice) is the
 		// nice one (artwork + ✓current), and Rack's native "Preset ▸" menu already

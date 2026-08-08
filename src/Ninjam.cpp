@@ -48,6 +48,7 @@ static void parseHostPort(const std::string& s, std::string& host, int& port) {
 
 struct Ninjam : Module {
 	enum ParamId {
+		CLICK_PARAM,  // metronome on/off; MIDI-mappable (latch value, or momentary toggle)
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -141,6 +142,11 @@ struct Ninjam : Module {
 
 	// ---- Beat clock + metronome (meaningful only when joined to a tempo) ----
 	std::atomic<bool> clickEnabled{false}; // metronome audible-click toggle (persisted)
+	// MIDI button mode for CLICK_PARAM (persisted, UI thread only): false = latch
+	// (param value is the metronome state — intuitive for a mapped CC), true =
+	// momentary (a rising edge toggles — one press per toggle for a note/pad). The
+	// widget reconciles param <-> clickEnabled each frame (see ParamStateSync).
+	bool midiToggleMode = false;
 	// CLOCK output resolution in pulses per beat (PPQN). 1 = 1 pulse/beat (a step
 	// sequencer steps once per beat); 2 (default) suits modules that detect tempo
 	// assuming 2 pulses/beat; 24 ≈ MIDI-clock-style sync. Persisted.
@@ -277,6 +283,10 @@ struct Ninjam : Module {
 
 	Ninjam() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
+		// Two-state param so the metronome toggle is MIDI-mappable. The value is the
+		// on/off state (latch mode); the widget reconciles it with clickEnabled on the
+		// UI thread each frame. See midiToggleMode for the note-vs-CC mode choice.
+		configSwitch(CLICK_PARAM, 0.f, 1.f, 0.f, "Metronome click", {"Off", "On"});
 		configOutput(LEFT_OUTPUT, "Main mix L");
 		configOutput(RIGHT_OUTPUT, "Main mix R");
 		configOutput(POLY_L_OUTPUT, "Players L (poly: channel = player)");
@@ -884,6 +894,7 @@ struct Ninjam : Module {
 		// live only in the global file (saveGlobal), so a shared patch leaks no credentials.
 		json_object_set_new(root, "joined", json_boolean(joined));
 		json_object_set_new(root, "clickEnabled", json_boolean(clickEnabled));
+		json_object_set_new(root, "midiToggleMode", json_boolean(midiToggleMode));
 		json_object_set_new(root, "clockPpqn", json_integer(clockPpqn.load(std::memory_order_relaxed)));
 		// NOTE: `transmitting` is deliberately NOT persisted — broadcasting your live audio
 		// input must be a fresh, explicit per-session choice, never something a loaded patch
@@ -915,6 +926,8 @@ struct Ninjam : Module {
 			roomLabel = joinHost;
 		if (json_t* j = json_object_get(root, "clickEnabled"))
 			clickEnabled = json_boolean_value(j);
+		if (json_t* j = json_object_get(root, "midiToggleMode"))
+			midiToggleMode = json_boolean_value(j);
 		if (json_t* j = json_object_get(root, "clockPpqn"))
 			clockPpqn.store((int) json_integer_value(j), std::memory_order_relaxed);
 		// Transmit always starts OFF on load (not persisted, above) — a loaded patch may
@@ -1525,16 +1538,22 @@ static void drawMetronomeIcon(NVGcontext* vg, float cx, float cy, float s, NVGco
 	nvgFill(vg);
 }
 
-// Metronome click toggle (lights green when on).
-struct MetronomeToggle : HoverButton {
-	Ninjam* module = nullptr;
-	void onPress(const ButtonEvent& e) override {
-		if (module)
-			module->clickEnabled = !module->clickEnabled;
-		e.consume(this);
+// Metronome click toggle (lights green when on). A two-state param (CLICK_PARAM)
+// so it's MIDI-mappable; NinjamWidget::step reconciles the param with
+// clickEnabled and sets `momentary` per the module's MIDI mode.
+struct MetronomeToggle : app::Switch {
+	bool hovered = false;
+	void onEnter(const EnterEvent& e) override {
+		hovered = true;
+		app::Switch::onEnter(e);
+	}
+	void onLeave(const LeaveEvent& e) override {
+		hovered = false;
+		app::Switch::onLeave(e);
 	}
 	void draw(const DrawArgs& args) override {
-		bool on = module && module->clickEnabled;
+		Ninjam* nj = module ? static_cast<Ninjam*>(module) : nullptr;
+		bool on = nj && nj->clickEnabled;
 		NVGcolor col = on ? njGreen()
 		             : hovered ? thText() : akShade(0x55);
 		drawMetronomeIcon(args.vg, box.size.x / 2, box.size.y / 2, std::min(box.size.x, box.size.y), col);
@@ -2056,9 +2075,11 @@ struct NinjamWidget : ModuleWidget {
 	Widget* refresh = nullptr;
 	Widget* browser = nullptr;
 	Widget* jamView = nullptr;
-	Widget* metro = nullptr;
+	MetronomeToggle* metro = nullptr;
 	Widget* chatField = nullptr;
 	Widget* txNudge = nullptr;
+	// Keeps CLICK_PARAM and clickEnabled in sync each frame (UI thread).
+	ParamStateSync clickSync;
 
 	explicit NinjamWidget(Ninjam* module) {
 		nj = module;
@@ -2089,12 +2110,12 @@ struct NinjamWidget : ModuleWidget {
 		led->onClick = [module]() { if (module && module->isActive()) module->stopAll(); };
 		addChild(led);
 
-		// Metronome toggle (left of the LED) — shown only when joined.
-		MetronomeToggle* m = new MetronomeToggle;
-		m->module = module;
+		// Metronome toggle (left of the LED) — shown only when joined. A momentary
+		// param widget so it's MIDI-mappable (see Ninjam::CLICK_PARAM).
+		MetronomeToggle* m = createParam<MetronomeToggle>(
+			Vec(W - 6 - 4 - 13 - 6 - 16, 21), module, Ninjam::CLICK_PARAM);
 		m->box.size = Vec(16, 16);
-		m->box.pos = Vec(W - 6 - 4 - 13 - 6 - 16, 21);
-		addChild(m);
+		addParam(m);
 		metro = m;
 
 		// ---- Disconnected: server-selection UI ----
@@ -2213,6 +2234,17 @@ struct NinjamWidget : ModuleWidget {
 		// shows on the status bar, and the room browser returns for another pick.
 		if (nj && nj->listenFailed())
 			nj->handleListenError();
+		// Reconcile the mappable metronome param with clickEnabled (UI thread). Latch
+		// or momentary per the module's MIDI mode; the widget follows so a physical
+		// click behaves the same. Runs even when the toggle is hidden (not joined) so
+		// a mapped control still works, and stays in sync with the context-menu item.
+		if (nj) {
+			if (metro)
+				metro->momentary = nj->midiToggleMode;
+			clickSync.reconcile(nj->params[Ninjam::CLICK_PARAM], nj->midiToggleMode,
+				[this]() { return nj->clickEnabled.load(std::memory_order_relaxed); },
+				[this](bool want) { nj->clickEnabled.store(want, std::memory_order_relaxed); });
+		}
 		bool joined = nj && nj->joined;
 		if (joinCard) joinCard->visible = !joined;
 		if (search) search->visible = !joined;
@@ -2256,6 +2288,15 @@ struct NinjamWidget : ModuleWidget {
 		menu->addChild(createCheckMenuItem("Metronome click", "",
 			[module]() { return module->clickEnabled.load(std::memory_order_relaxed); },
 			[module]() { module->clickEnabled = !module->clickEnabled; }));
+
+		// How a mapped MIDI control drives the metronome toggle. Off (default) =
+		// latch: the control's value is the on/off state (a CC / latching button /
+		// click — stays in sync). On = momentary: a rising edge toggles (a note / pad
+		// — one press per toggle). See ParamStateSync; the note-vs-CC ambiguity has no
+		// single right answer, so the user picks.
+		menu->addChild(createCheckMenuItem("MIDI metronome: toggle on trigger (notes/pads)", "",
+			[module]() { return module->midiToggleMode; },
+			[module]() { module->midiToggleMode = !module->midiToggleMode; }));
 
 		// CLOCK output resolution. 1 = once per beat (step sequencers); 2 (default) for
 		// modules that detect tempo assuming 2 pulses/beat; 24 ≈ MIDI-clock sync.
