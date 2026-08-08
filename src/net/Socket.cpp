@@ -160,11 +160,15 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 		}
 		timeval tv{0, 100 * 1000};
 		int s = ::select(maxFd + 1, nullptr, npending ? &wf : nullptr, npending ? &ef : nullptr, &tv);
-		if (s < 0 && !netInterrupted() && npending) {
-			// select itself failed (shouldn't happen): fall back to failing out.
-			break;
+		if (s < 0) {
+			netLog("select error: " + netErrorStr() + " (npending=" + std::to_string(npending) + " maxFd=" + std::to_string(maxFd) + ")");
+			if (!netInterrupted() && npending) {
+				// select itself failed (shouldn't happen): fall back to failing out.
+				break;
+			}
 		}
 		if (s > 0) {
+			netLog("select returned " + std::to_string(s) + " (npending=" + std::to_string(npending) + ")");
 			for (int i = 0; i < npending; i++) {
 				int fd = pending[i];
 				if (fd < 0 || fd >= FD_SETSIZE)
@@ -174,7 +178,9 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 				if (!isWritable && !isException)
 					continue;
 				const int winIdx = pendingIdx[i];
-				if (netSoError(fd) == 0) {
+				int soErr = netSoError(fd);
+				netLog("fd " + std::to_string(fd) + " SO_ERROR=" + std::to_string(soErr) + " writable=" + std::to_string(isWritable) + " exception=" + std::to_string(isException));
+				if (soErr == 0) {
 					// Winner: first candidate to complete the handshake.
 					pending[i] = pending[npending - 1];
 					pendingIdx[i] = pendingIdx[npending - 1];
