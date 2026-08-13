@@ -1567,8 +1567,6 @@ struct MetronomeToggle : app::Switch {
 struct TransportBlock : Widget {
 	Ninjam* module = nullptr;
 	void draw(const DrawArgs& args) override {
-		if (!module)
-			return;
 		NVGcontext* vg = args.vg;
 		const float w = box.size.x, h = box.size.y;
 		nvgBeginPath(vg);
@@ -1577,6 +1575,13 @@ struct TransportBlock : Widget {
 		nvgFill(vg);
 		nvgStrokeColor(vg, thCardBd());
 		nvgStroke(vg);
+		// Module browser / library previews render with module == nullptr: show the
+		// same idle directory line a freshly added instance shows.
+		if (!module) {
+			drawTxt(vg, FONT_BOLD, 8, h / 2, 11.5f, thTextDim(), "Not loaded",
+				NVG_ALIGN_LEFT, w - 8 - 44);
+			return;
+		}
 		std::string jam = module->jamStatusText();
 		const bool joined = !jam.empty();
 		// When not joined, an unexpected drop reason (kick / server loss) takes over the line in
@@ -1630,12 +1635,13 @@ struct JamView : Widget {
 	}
 
 	void draw(const DrawArgs& args) override {
-		if (!module)
-			return;
 		NVGcontext* vg = args.vg;
 		const float w = box.size.x, pad = 12.f, avail = w - 2 * pad;
-		int bpi = module->jamBpi.load(std::memory_order_relaxed);
-		int cur = module->currentBeat.load(std::memory_order_relaxed);
+		// Module browser / library previews render with module == nullptr (the view is
+		// normally hidden there — step() shows the room browser — but never draw blank):
+		// fall back to a representative mid-bar jam with an empty console.
+		int bpi = module ? module->jamBpi.load(std::memory_order_relaxed) : 8;
+		int cur = module ? module->currentBeat.load(std::memory_order_relaxed) : 2;
 
 		// Beat ticks — one tick per beat in the bar, reflowed into as many rows as it takes
 		// to keep each tick legible. BPI is server-driven and changes live when any admin
@@ -1673,9 +1679,10 @@ struct JamView : Widget {
 		if (cur >= 0)
 			drawTxt(vg, FONT_REG, pad, infoY, 10.5f, thTextDim(),
 				string::f("%d BPM \xc2\xb7 beat %d / %d",
-					module->jamBpm.load(std::memory_order_relaxed), cur + 1, bpi),
+					module ? module->jamBpm.load(std::memory_order_relaxed) : 120,
+					cur + 1, bpi),
 				NVG_ALIGN_LEFT);
-		std::string who = module->rosterText();
+		std::string who = module ? module->rosterText() : "";
 		std::string here = who.empty() ? std::string("just you")
 		                               : (std::string("here: you, ") + who);
 		drawTxt(vg, FONT_REG, w - pad, infoY, 10.5f, njGreenDeep(), here,
@@ -1704,8 +1711,8 @@ struct JamView : Widget {
 		// Message log — monospace, newest at the bottom. Each chat line is word-wrapped into
 		// one or more physical "rows"; we flatten them all, then show the window that fits.
 		const float tpad = pad + inset, tclip = avail - 2 * inset;
-		unsigned gen = module->chatGen.load(std::memory_order_acquire);
-		if (gen != rowsGen || tclip != rowsClip) {
+		unsigned gen = module ? module->chatGen.load(std::memory_order_acquire) : 0;
+		if (module && (gen != rowsGen || tclip != rowsClip)) {
 			rowsGen = gen;
 			rowsClip = tclip;
 			rows.clear();

@@ -324,7 +324,7 @@ static bool drawStationArt(NVGcontext* vg, const std::string& iconPath,
 		else
 			lastFile = asset::plugin(pluginInstance, "res/" + iconPath);
 	}
-	std::shared_ptr<window::Image> img = APP->window->loadImage(lastFile);
+	std::shared_ptr<window::Image> img = akLoadImage(lastFile);
 	if (!img || img->handle < 0)
 		return false;
 	NVGpaint paint = nvgImagePattern(vg, x, y, w, h, 0.f, img->handle, 1.f);

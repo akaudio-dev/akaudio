@@ -60,6 +60,13 @@ inline std::shared_ptr<window::Font> akLoadFont(const char* fontRes) {
 	return APP->window->loadFont(path);
 }
 
+// Fetch an image through Rack's per-window cache. Called every frame from draw
+// code, same contract as akLoadFont — the returned handle is used immediately,
+// never stored across frames (Rack v2 migration rule for fonts/images).
+inline std::shared_ptr<window::Image> akLoadImage(const std::string& path) {
+	return APP->window->loadImage(path);
+}
+
 // Draw left-aligned (or centered) text, vertically centered on y, optionally
 // ellipsized to clipW px.
 inline void drawTxt(NVGcontext* vg, const char* fontRes, float x, float y, float size,
