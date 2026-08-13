@@ -4,6 +4,15 @@ All notable changes to **AK Audio** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow VCV Rack's
 scheme (`MAJOR.MINOR.REVISION`, with `MAJOR` = the Rack major version).
 
+## [2.0.7] — 2026-08-12
+
+### Internal
+
+- Fixed the VCV Library pattern-check findings from the 2.0.6 review: Ninjam's
+  transport/jam views no longer draw blank in the module browser and website previews
+  (`module == nullptr`), and Radio's station art loads through a recognized per-frame
+  image-cache helper (that finding was benign — the load was already per-frame).
+
 ## [2.0.6] — 2026-08-08
 
 ### Added
