@@ -5,13 +5,15 @@
 // Design: docs/LOOPER_DESIGN.md. This is the **UX scaffold** (milestone "UX"): the
 // complete panel and the real slot state machine (arm → commit at the boundary,
 // scenes, stops, repeats/decay, selection, menus) driven by a SIMULATED interval
-// clock, so the feel of queued actions can be settled before any engine exists.
+// clock when no Ninjam is adjacent (M0 added the real clock: an adjacent, joined
+// Ninjam's JamClockMessage drives the boundary, countdown and grid generation).
 // What is real: the armed slot's live fill and capture thumbnails come from the inputs,
 // and the inputs pass through to MIX. What is not: no audio
 // is stored or played back, and there is no Ninjam clock yet (JamClock, milestone M0).
 
 #include "plugin.hpp"
 #include "Theme.hpp"
+#include "JamClock.hpp"
 
 #include <atomic>
 #include <cmath>
@@ -154,12 +156,20 @@ struct Looper : Module {
 	std::atomic<int> defRepeats{0};
 	std::atomic<float> defDecayDb{0.f};
 
-	// ---- Simulated interval clock (scaffold only) ----
+	// ---- Clock source ----
+	// A live Ninjam clock (expander message, either side, chained) wins; otherwise the
+	// simulated clock runs so the UX works with nothing else in the rack.
 	std::atomic<int> simSecondsIdx{1};      // index into SIM_SECONDS (4 s)
+	std::atomic<bool> ninjamClock{false};   // UI: source LED / header
+	std::atomic<int> clockBpm{0}, clockBpi{0};
 	std::atomic<float> phase{0.f};          // 0..1 interval progress (UI)
 	std::atomic<float> secsLeft{0.f};       // seconds to the next boundary (UI)
-	int64_t frameInInterval = 0;            // process() only
-	int64_t intervalFrames = 1;
+	int64_t frameInInterval = 0;            // process() only: position within the interval
+	int64_t intervalFrames = 1;             // process() only: N of the active source
+	int64_t simFrame = -1;                  // simulated clock position (−1 = first frame)
+	uint64_t lastSession[2] = {0, 0};       // liveness: Ninjam advances sessionFrame every frame
+	uint32_t lastGen = 0;                   // gridGeneration last seen (regrid detection)
+	bool lastNinjam = false;
 	uint32_t lcg = 0x9e3779b9u;             // synthetic thumbnails for unpatched tracks
 
 	dsp::BooleanTrigger slotTrig[TRACKS * SLOTS];
@@ -169,6 +179,13 @@ struct Looper : Module {
 
 	Looper() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
+		// Expander message buffers (both sides — Ninjam may be left or right). Ninjam
+		// writes the producer side, Rack flips at the end of the timestep, we read the
+		// consumer side. Freed in the destructor.
+		leftExpander.producerMessage = new akaudio::JamClockMessage();
+		leftExpander.consumerMessage = new akaudio::JamClockMessage();
+		rightExpander.producerMessage = new akaudio::JamClockMessage();
+		rightExpander.consumerMessage = new akaudio::JamClockMessage();
 		for (int t = 0; t < TRACKS; t++)
 			trackNames[t] = defaultTrackName(t);
 		for (int t = 0; t < TRACKS; t++) {
@@ -190,6 +207,13 @@ struct Looper : Module {
 		configSwitch(OVERDUB_PARAM, 0.f, 1.f, 0.f, "Overdub mode", {"Off", "On"});
 		configOutput(MIX_L_OUTPUT, "Mix L (to Ninjam IN)");
 		configOutput(MIX_R_OUTPUT, "Mix R (to Ninjam IN)");
+	}
+
+	~Looper() override {
+		delete (akaudio::JamClockMessage*) leftExpander.producerMessage;
+		delete (akaudio::JamClockMessage*) leftExpander.consumerMessage;
+		delete (akaudio::JamClockMessage*) rightExpander.producerMessage;
+		delete (akaudio::JamClockMessage*) rightExpander.consumerMessage;
 	}
 
 	static std::string defaultTrackName(int t) { return string::f("-%02d-", t + 1); }
@@ -320,10 +344,63 @@ struct Looper : Module {
 		}
 	}
 
+	// The grid moved (join, tempo change, sample rate, clock source switch): queued
+	// actions were aimed at the old grid — cancel them; the rolling recorders restart.
+	void onRegrid() {
+		for (int t = 0; t < TRACKS; t++) {
+			Track& tr = tracks[t];
+			for (int s = 0; s < SLOTS; s++)
+				tr.slots[s].pending.store(NONE, std::memory_order_relaxed);
+			for (int i = 0; i < THUMB_BINS; i++) tr.live[i] = 0.f;
+			tr.peak = 0.f;
+		}
+	}
+
+	// Pick the clock for this frame: a live Ninjam message from either side, else the
+	// simulated clock. Returns true on an interval boundary (this frame is frame 0).
+	bool tickClock(const ProcessArgs& args) {
+		const akaudio::JamClockMessage* src = nullptr;
+		for (int side = 0; side < 2; side++) {
+			const akaudio::JamClockMessage* m = (const akaudio::JamClockMessage*)
+				(side ? rightExpander.consumerMessage : leftExpander.consumerMessage);
+			if (!m) continue;
+			// Live = running and advancing: a removed Ninjam leaves a frozen message.
+			bool live = m->running && m->sessionFrame != lastSession[side];
+			lastSession[side] = m->sessionFrame;
+			if (live && !src) src = m;
+		}
+		bool downbeat;
+		if (src) {
+			if (!lastNinjam || src->gridGeneration != lastGen) onRegrid();
+			lastGen = src->gridGeneration;
+			intervalFrames = std::max(1, src->intervalFrames);
+			frameInInterval = src->frameInInterval;
+			downbeat = src->downbeat;
+			clockBpm.store(src->bpm, std::memory_order_relaxed);
+			clockBpi.store(src->bpi, std::memory_order_relaxed);
+			simFrame = -1;
+		} else {
+			if (lastNinjam) onRegrid();
+			intervalFrames = std::max<int64_t>(1,
+				(int64_t) (SIM_SECONDS[simSecondsIdx.load(std::memory_order_relaxed)] * args.sampleRate));
+			if (++simFrame >= intervalFrames) simFrame = 0;
+			frameInInterval = simFrame;
+			downbeat = simFrame == 0;
+			clockBpm.store(0, std::memory_order_relaxed);
+			clockBpi.store(0, std::memory_order_relaxed);
+		}
+		lastNinjam = src != nullptr;
+		ninjamClock.store(lastNinjam, std::memory_order_relaxed);
+		phase.store((float) frameInInterval / (float) intervalFrames, std::memory_order_relaxed);
+		secsLeft.store((float) (intervalFrames - frameInInterval) / args.sampleRate, std::memory_order_relaxed);
+		return downbeat;
+	}
+
 	void process(const ProcessArgs& args) override {
-		// Simulated clock.
-		intervalFrames = std::max<int64_t>(1,
-			(int64_t) (SIM_SECONDS[simSecondsIdx.load(std::memory_order_relaxed)] * args.sampleRate));
+		// Clock first: a boundary finishes the previous interval before this frame is
+		// recorded into the new one.
+		if (tickClock(args))
+			boundary();
 		const int bin = (int) std::min<int64_t>(THUMB_BINS - 1, frameInInterval * THUMB_BINS / intervalFrames);
 
 		// Buttons (edges on the audio thread — where the real engine will read them).
@@ -374,15 +451,6 @@ struct Looper : Module {
 		outputs[MIX_R_OUTPUT].setVoltage(clamp(mixR, -1.f, 1.f) * 5.f);
 
 		lights[OVERDUB_LIGHT].setBrightness(params[OVERDUB_PARAM].getValue() > 0.5f ? 1.f : 0.f);
-
-		// Clock advance + boundary.
-		frameInInterval++;
-		if (frameInInterval >= intervalFrames) {
-			frameInInterval = 0;
-			boundary();
-		}
-		phase.store((float) frameInInterval / (float) intervalFrames, std::memory_order_relaxed);
-		secsLeft.store((float) (intervalFrames - frameInInterval) / args.sampleRate, std::memory_order_relaxed);
 	}
 
 	// ---- UI-thread helpers ----
@@ -474,14 +542,28 @@ struct HeaderStatus : Widget {
 			s = "UX scaffold";
 		} else {
 			int sel = lp->selected.load(std::memory_order_relaxed);
-			s = string::f("SIMULATED CLOCK \xc2\xb7 %d s interval \xc2\xb7 next in %.1f s",
-				SIM_SECONDS[lp->simSecondsIdx.load(std::memory_order_relaxed)],
-				lp->secsLeft.load(std::memory_order_relaxed));
+			if (lp->ninjamClock.load(std::memory_order_relaxed))
+				s = string::f("NINJAM \xc2\xb7 %d BPM \xc2\xb7 %d BPI \xc2\xb7 next in %.1f s",
+					lp->clockBpm.load(std::memory_order_relaxed), lp->clockBpi.load(std::memory_order_relaxed),
+					lp->secsLeft.load(std::memory_order_relaxed));
+			else
+				s = string::f("SIMULATED CLOCK \xc2\xb7 %d s interval \xc2\xb7 next in %.1f s",
+					SIM_SECONDS[lp->simSecondsIdx.load(std::memory_order_relaxed)],
+					lp->secsLeft.load(std::memory_order_relaxed));
 			int pc = lp->pendingCount();
 			if (pc) s += string::f(" \xc2\xb7 %d queued", pc);
 			if (sel >= 0) s += string::f(" \xc2\xb7 sel %d.%d", sel / SLOTS + 1, sel % SLOTS + 1);
 		}
 		drawTxt(args.vg, FONT_BOLD, box.size.x, box.size.y / 2, 9.f, lpTextDim(), s, NVG_ALIGN_RIGHT);
+		// Sync LED: green = locked to a Ninjam clock; dim = simulated / none.
+		if (lp) {
+			float tw = textWidth(args.vg, FONT_BOLD, 9.f, s);
+			bool on = lp->ninjamClock.load(std::memory_order_relaxed);
+			nvgBeginPath(args.vg);
+			nvgCircle(args.vg, box.size.x - tw - 10.f, box.size.y / 2, 4.f);
+			nvgFillColor(args.vg, on ? lpGreen() : akShade(0x30));
+			nvgFill(args.vg);
+		}
 		// Interval progress bar along the bottom edge of the header.
 		if (lp) {
 			float ph = lp->phase.load(std::memory_order_relaxed);
@@ -899,8 +981,8 @@ struct LooperWidget : ModuleWidget {
 		Looper* m = lp;
 		if (!m) return;
 		menu->addChild(new MenuSeparator);
-		menu->addChild(createMenuLabel("UX scaffold \xe2\x80\x94 simulated clock, no audio stored"));
-		menu->addChild(createIndexSubmenuItem("Simulated interval", {"2 s", "4 s", "8 s", "16 s", "32 s"},
+		menu->addChild(createMenuLabel("UX scaffold \xe2\x80\x94 no audio stored"));
+		menu->addChild(createIndexSubmenuItem("Simulated interval (when no Ninjam clock)", {"2 s", "4 s", "8 s", "16 s", "32 s"},
 			[m]() { return (size_t) m->simSecondsIdx.load(std::memory_order_relaxed); },
 			[m](size_t i) { m->simSecondsIdx.store((int) i, std::memory_order_relaxed); }));
 		menu->addChild(createIndexSubmenuItem("New clips: repeats",

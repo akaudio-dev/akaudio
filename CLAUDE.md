@@ -51,8 +51,12 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
     `net/RoomDirectory` (background fetch of ninbot's directory). UI never blocks on the
     network. Open polish items in `TODO.md`.
 
-- **Looper + Recorder** (designed; Looper UX scaffold built in `src/Looper.cpp` —
-  simulated clock, no audio stored — canonical design
+- **Looper + Recorder** (designed; Looper UX scaffold built in `src/Looper.cpp`, no
+  audio stored yet; it already takes the **real interval grid** from an adjacent Ninjam
+  via expander messages — `src/JamClock.hpp` holds `JamClockMessage` + the
+  integer-frame `JamClock` that Ninjam's beat clock now runs on and publishes to every
+  chained Looper on both sides (`Ninjam::publishClock`); a Looper falls back to a
+  simulated clock when no Ninjam clock is live — canonical design
   `docs/LOOPER_DESIGN.md`, decision log `docs/looper_plan.md`) — two Ninjam expanders:
   an 8×8 Session-style interval looper for our instruments (grid from Ninjam via
   expander messaging, `src/JamClock.hpp`) and a wire-archive recorder (per-player raw
@@ -378,6 +382,10 @@ with undo).
   # capture a few seconds of any AAC/AAC+ stream, then:
   build/aac_decode_test sample.aac   # exit 0 = real audio; HE-AAC verifies SBR (22050→44100)
   ```
+- `jamclock_test.cpp` — offline check of `JamClock` (integer interval length vs NjAudio's
+  formula, one downbeat + `bpi` beats per interval, session timeline across a tempo
+  change, new session on rejoin). Header-only, no deps:
+  `c++ -std=c++11 -I src test/jamclock_test.cpp -o build/jamclock_test && build/jamclock_test`
 - `njclient_test.cpp` — NINJAM protocol client against a server.
 - `enc_test.cpp` — OGG-Vorbis encoder.
 

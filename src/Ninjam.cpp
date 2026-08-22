@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Andrei Kozlov
 
 #include "plugin.hpp"
+#include "JamClock.hpp"
 #include "net/Stream.hpp"
 #include "net/RoomDirectory.hpp"
 #include "net/ninjam/NjClient.hpp"
@@ -154,16 +155,15 @@ struct Ninjam : Module {
 	std::atomic<int> currentBeat{-1};     // UI reads this; -1 = idle
 	std::atomic<float> jamPhase{0.f};     // 0..1 interval progress (UI progress bar)
 	std::atomic<bool> resyncBeat{false};  // set on join / tempo change to reset the clock
-	// process()-thread only beat/click state:
-	double beatPhase = 0.0;
-	int beatIndex = 0;
+	// process()-thread only beat/click state. The grid itself is a JamClock (integer
+	// frames against the TX encoder's interval length — see JamClock.hpp); it is also
+	// what gets published to adjacent Looper expanders every frame.
+	akaudio::JamClock clock;
 	float clickEnv = 0.f, clickPhase = 0.f, clickFreq = 880.f, clickAmp = 0.f;
 	// Cached per-rate/per-tempo values so process() pays a compare per frame instead of
 	// an exp() (peak release) and a division (samples per beat):
 	float cachedRate = 0.f;
 	float peakDecay = 0.f;
-	double spb = 0.0; // samples per beat
-	int spbBpm = 0;
 
 	// Human label for the picked room (room name, or host). Shown on the panel and
 	// persisted; shared across modes since only one is active at a time.
@@ -734,6 +734,28 @@ struct Ninjam : Module {
 		njclient.setSampleRate(e.sampleRate);
 	}
 
+	// ---- Expander clock: hand this frame's grid to every adjacent Looper ----
+	// Rack's expander messages: we write into the neighbour's buffer that faces us and
+	// request a flip; the engine flips every module's buffers at the end of the
+	// timestep, so a chain of Loopers (Ninjam-Looper-Looper…) all see the same frame
+	// with a uniform 1-sample latency. Any non-Looper module ends the chain. Expander
+	// pointers are updated by the engine between blocks, so chasing them here is safe.
+	void publishClock(const akaudio::JamClockMessage& m) {
+		for (int side = 0; side < 2; side++) {
+			Module* x = side ? rightExpander.module : leftExpander.module;
+			int hops = 0;
+			while (x && x->model == modelLooper && hops++ < 8) {
+				Expander& rx = side ? x->leftExpander : x->rightExpander; // its buffer facing us
+				akaudio::JamClockMessage* buf = (akaudio::JamClockMessage*) rx.producerMessage;
+				if (!buf)
+					break;
+				*buf = m;
+				rx.requestMessageFlip();
+				x = side ? x->rightExpander.module : x->leftExpander.module;
+			}
+		}
+	}
+
 	void process(const ProcessArgs& args) override {
 		// Audio thread: read the UI-owned flags once, relaxed (they're mode
 		// switches, not synchronization points).
@@ -771,34 +793,30 @@ struct Ninjam : Module {
 		// ---- Beat clock + metronome (only when joined to a tempo) ----
 		int bpmL = jamBpm.load(std::memory_order_relaxed);
 		int bpiL = jamBpi.load(std::memory_order_relaxed);
+		bool rateChanged = false;
 		if (args.sampleRate != cachedRate) {
 			cachedRate = args.sampleRate;
 			peakDecay = std::exp(-args.sampleTime / 0.15f);
-			spbBpm = 0; // force samples-per-beat recompute
+			rateChanged = true;
 		}
 		float click = 0.f, clockG = 0.f, resetG = 0.f, runG = 0.f, phaseV = 0.f;
+		akaudio::JamClockMessage jam;
 		if (bpmL > 0 && bpiL > 0) {
 			// Cheap relaxed load first; the RMW runs only on the rare resync frame.
-			if (resyncBeat.load(std::memory_order_relaxed)
-			        && resyncBeat.exchange(false, std::memory_order_acq_rel)) {
-				beatPhase = 0.0;
-				beatIndex = 0;
+			bool resync = resyncBeat.load(std::memory_order_relaxed)
+			        && resyncBeat.exchange(false, std::memory_order_acq_rel);
+			if (resync || rateChanged || !clock.running || clock.bpm != bpmL || clock.bpi != bpiL) {
+				// The grid moved (join / server tempo change / sample rate): re-phase to
+				// frame 0 and disarm capture so the next beat re-arms it against the NEW
+				// grid with a fresh silence prefill (txLoop closes the in-flight interval).
+				clock.regrid(bpmL, bpiL, args.sampleRate);
 				currentBeat.store(0, std::memory_order_relaxed);
 				clickEnv = 0.f;
-				// The grid moved (join / server tempo change): disarm capture so the
-				// next beat boundary re-arms it against the NEW grid with a fresh
-				// silence prefill (txLoop closes the in-flight interval on re-arm).
 				txArmed.store(false, std::memory_order_relaxed);
 			}
-			if (bpmL != spbBpm) {
-				spbBpm = bpmL;
-				spb = 60.0 * args.sampleRate / (double) bpmL; // samples per beat
-			}
-			beatPhase += 1.0;
-			if (beatPhase >= spb) {
-				beatPhase -= spb;
-				beatIndex = (beatIndex + 1) % bpiL;
-				currentBeat.store(beatIndex, std::memory_order_relaxed);
+			jam = clock.tick();
+			if (jam.beat) {
+				currentBeat.store(jam.beatIndex, std::memory_order_relaxed);
 				// Arm transmit capture at the NEXT BEAT after TX comes on (≤1 beat of
 				// wait), not the next interval downbeat (≤1 whole interval — half a
 				// minute in a 32-BPI room). armTransmit tells the TX thread how much
@@ -808,15 +826,13 @@ struct Ninjam : Module {
 				if (transmittingL && joinedL && txDeclaredL > 0 && !txVoiceL
 				        && !txArmed.load(std::memory_order_relaxed)) {
 					txArmed.store(true, std::memory_order_relaxed);
-					njclient.armTransmit(beatIndex, bpiL);
+					njclient.armTransmit(jam.beatIndex, bpiL);
 				}
 				clickEnv = 1.f; // arm a click; accent the downbeat
 				clickPhase = 0.f;
-				clickFreq = (beatIndex == 0) ? 1760.f : 880.f;
-				clickAmp = (beatIndex == 0) ? 0.9f : 0.55f;
+				clickFreq = (jam.beatIndex == 0) ? 1760.f : 880.f;
+				clickAmp = (jam.beatIndex == 0) ? 0.9f : 0.55f;
 			}
-			if (currentBeat.load(std::memory_order_relaxed) < 0)
-				currentBeat.store(beatIndex, std::memory_order_relaxed);
 			// Always synthesize the click tone (accented downbeat: higher + louder). It
 			// goes to the CLICK jack unconditionally; the metronome toggle only decides
 			// whether it is also mixed into the MAIN output (done below).
@@ -830,24 +846,25 @@ struct Ninjam : Module {
 			// CV sync outs: CLOCK = 50%-duty gate, `clockPpqn` pulses per beat; RESET = a
 			// pulse only on the interval downbeat; RUN high while playing; PHASE = 0-10V
 			// ramp across the interval.
-			float beatFrac = (float) (beatPhase / spb);                 // 0..1 within beat
-			float intervalPhase = ((float) beatIndex + beatFrac) / (float) bpiL; // 0..1
+			float beatFrac = (float) akaudio::JamClock::beatFrac(jam);          // 0..1 within beat
+			float intervalPhase = akaudio::JamClock::intervalPhase(jam);         // 0..1
 			int ppqn = clockPpqn.load(std::memory_order_relaxed);
 			if (ppqn < 1) ppqn = 1;
 			float subFrac = beatFrac * (float) ppqn;
 			subFrac -= (float) (int) subFrac;                           // 0..1 within each sub-pulse
 			clockG = (subFrac < 0.5f) ? 10.f : 0.f;
-			resetG = (beatIndex == 0 && beatFrac < 0.5f) ? 10.f : 0.f;
+			resetG = (jam.beatIndex == 0 && beatFrac < 0.5f) ? 10.f : 0.f;
 			runG = 10.f;
 			phaseV = intervalPhase * 10.f;
 			jamPhase.store(intervalPhase, std::memory_order_relaxed);
 		} else {
+			clock.stop();
+			jam = clock.tick(); // running = false; carries the generation
 			currentBeat.store(-1, std::memory_order_relaxed);
 			jamPhase.store(0.f, std::memory_order_relaxed);
-			beatPhase = 0.0;
-			beatIndex = 0;
 			clickEnv = 0.f;
 		}
+		publishClock(jam);
 		// ---- Transmit capture: feed input frames once armed at a beat boundary ----
 		// (voice mode: immediately — it has no grid to align to)
 		if (transmittingL && joinedL && txDeclaredL > 0
