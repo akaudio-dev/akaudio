@@ -40,6 +40,7 @@ void init(Plugin* p) {
 	// This only stores a function pointer — no network activity.
 	akaudio::netLogSetSink([](const std::string& m) { INFO("akaudio.net: %s", m.c_str()); });
 
+	p->addModel(modelLooper);
 	p->addModel(modelNinjam);
 	p->addModel(modelRadio);
 }

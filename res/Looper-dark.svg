@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="223.52mm" height="128.5mm" viewBox="0 0 223.52 128.5">
+  <defs>
+    <!-- Dark twin of Looper.svg (same palette as Ninjam-dark.svg). -->
+    <linearGradient id="bg" x1="111.76" y1="0" x2="111.76" y2="128.5" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2a2b2c"/>
+      <stop offset="1" stop-color="#171818"/>
+    </linearGradient>
+  </defs>
+  <rect width="223.52" height="128.5" fill="url(#bg)"/>
+  <rect width="223.52" height="14" fill="#333639"/>
+</svg>

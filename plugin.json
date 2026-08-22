@@ -14,16 +14,29 @@
   "changelogUrl": "https://github.com/akaudio-dev/akaudio/blob/main/CHANGELOG.md",
   "modules": [
     {
+      "slug": "Looper",
+      "name": "Looper",
+      "description": "Interval looper for NINJAM jams: an 8x8 Ableton-Session-style grid of one-interval loops, boundary-quantized from the Ninjam module's clock (expander). Scaffold: UX only, no audio yet.",
+      "tags": [
+        "Sampler",
+        "Utility"
+      ]
+    },
+    {
       "slug": "Ninjam",
       "name": "Ninjam",
       "description": "NINJAM jam client: listen to a room's public Icecast/HTTP stream, or join the protocol to decode the live multi-user mix and transmit your own audio.",
-      "tags": ["External"]
+      "tags": [
+        "External"
+      ]
     },
     {
       "slug": "Radio",
       "name": "Radio",
       "description": "Streaming internet radio source (Icecast/HTTP) feeding audio into a patch.",
-      "tags": ["External"]
+      "tags": [
+        "External"
+      ]
     }
   ]
 }

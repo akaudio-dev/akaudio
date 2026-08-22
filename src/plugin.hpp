@@ -10,6 +10,7 @@ using namespace rack;
 extern Plugin* pluginInstance;
 
 // One extern Model* per module. Add a line here for every new module.
+extern Model* modelLooper;
 extern Model* modelNinjam;
 extern Model* modelRadio;
 

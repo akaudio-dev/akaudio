@@ -1492,26 +1492,8 @@ struct TxToggle : HoverButton {
 		e.consume(this);
 	}
 	void draw(const DrawArgs& args) override {
-		NVGcontext* vg = args.vg;
 		bool on = module && module->transmitting;
-		const float cx = box.size.x / 2, cy = box.size.y / 2, r = box.size.x / 2 - 1.f;
-		// Soft glow when transmitting.
-		if (on) {
-			nvgBeginPath(vg);
-			nvgCircle(vg, cx, cy, r + 3.f);
-			NVGpaint glow = nvgRadialGradient(vg, cx, cy, r, r + 4.f,
-				nvgRGBA(0x2e, 0xd1, 0x6b, 0xb0), nvgRGBA(0x2e, 0xd1, 0x6b, 0x00));
-			nvgFillPaint(vg, glow);
-			nvgFill(vg);
-		}
-		nvgBeginPath(vg);
-		nvgCircle(vg, cx, cy, r);
-		nvgFillColor(vg, on ? (hovered ? nvgRGB(0x4a, 0xe0, 0x82) : njGreen())
-		                    : (hovered ? akShade(0x20) : thWell()));
-		nvgFill(vg);
-		nvgStrokeColor(vg, thCardBd());
-		nvgStrokeWidth(vg, 1.f);
-		nvgStroke(vg);
+		akDrawTxLed(args.vg, box.size.x / 2, box.size.y / 2, box.size.x / 2 - 1.f, on, hovered);
 	}
 };
 

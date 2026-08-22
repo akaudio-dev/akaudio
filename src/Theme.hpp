@@ -37,6 +37,29 @@ inline NVGcolor akPlateText() { return akTheme(nvgRGB(0xf0, 0xf0, 0xf0), nvgRGB(
 // black-alpha on the light panel, white-alpha on the dark one.
 inline NVGcolor akShade(unsigned char a) { return akDark() ? nvgRGBA(0xff, 0xff, 0xff, a) : nvgRGBA(0x00, 0x00, 0x00, a); }
 static const NVGcolor AK_LED_GREEN  = nvgRGB(0x3a, 0xd0, 0x6a); // live LED / current-station ring (both themes)
+inline NVGcolor akTxGreen() { return akTheme(nvgRGB(0x2a, 0xa8, 0x55), nvgRGB(0x3a, 0xd0, 0x6a)); } // transmit LED (= Ninjam's njGreen)
+
+// The TRANSMIT LED: green with a soft glow when on, a recessed well when off. One
+// drawing shared by Ninjam's TX toggle and the Looper's per-track TX buttons, so
+// "on air" looks the same everywhere in the plugin. (cx, cy, r) in local px.
+inline void akDrawTxLed(NVGcontext* vg, float cx, float cy, float r, bool on, bool hovered) {
+	if (on) {
+		nvgBeginPath(vg);
+		nvgCircle(vg, cx, cy, r + 3.f);
+		NVGpaint glow = nvgRadialGradient(vg, cx, cy, r, r + 4.f,
+			nvgRGBA(0x2e, 0xd1, 0x6b, 0xb0), nvgRGBA(0x2e, 0xd1, 0x6b, 0x00));
+		nvgFillPaint(vg, glow);
+		nvgFill(vg);
+	}
+	nvgBeginPath(vg);
+	nvgCircle(vg, cx, cy, r);
+	nvgFillColor(vg, on ? (hovered ? nvgRGB(0x4a, 0xe0, 0x82) : akTxGreen())
+	                    : (hovered ? akShade(0x20) : akShade(akDark() ? 0x14 : 0x10)));
+	nvgFill(vg);
+	nvgStrokeColor(vg, akShade(akDark() ? 0x2e : 0x26));
+	nvgStrokeWidth(vg, 1.f);
+	nvgStroke(vg);
+}
 
 // ---- Output-plate geometry (mm) ----
 // Fundamental: 39.16 px tall, r 2.83 px on a 75 px panel → 13.26 mm / 0.96 mm.

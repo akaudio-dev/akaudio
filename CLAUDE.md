@@ -51,6 +51,17 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
     `net/RoomDirectory` (background fetch of ninbot's directory). UI never blocks on the
     network. Open polish items in `TODO.md`.
 
+- **Looper + Recorder** (designed; Looper UX scaffold built in `src/Looper.cpp` —
+  simulated clock, no audio stored — canonical design
+  `docs/LOOPER_DESIGN.md`, decision log `docs/looper_plan.md`) — two Ninjam expanders:
+  an 8×8 Session-style interval looper for our instruments (grid from Ninjam via
+  expander messaging, `src/JamClock.hpp`) and a wire-archive recorder (per-player raw
+  OGG intervals on a shared timeline, for later DAW project export). A local checkout of the
+  reference looper code (**Lilac Loop**, GPL-3, github.com/grough/lilac-loop-vcv) lives
+  at `~/work/github/lilac-loop-vcv` — read `src/modules/looper/{engine,module,
+  MultiLoopWriter}.hpp` there before writing looper buffer/export code; borrow with
+  copyright notices preserved.
+
 ## Build / install
 
 You do **not** need a Rack *source* checkout. The Makefile builds against either a
@@ -79,7 +90,19 @@ running (locked DLL), and verifies `plugin.dll` still exports `init` before inst
 (the FAAD2 dllexport regression that once dropped it). `-BuildOnly` skips the install.
 
 `make install` writes the **shared** Rack user folder (also read by the user's Rack Pro
-app — accepted). The Makefile globs `src/**/*.cpp` via `find`, so new files under `src/`
+app — accepted). **A new, unpublished module can be invisible in Rack's module
+browser even though the plugin loaded it** (found 2026-08-22 with Looper): Rack Pro
+filters the browser by `settings.json → moduleWhitelist`, synced from the VCV Library
+account at every startup while logged in. If akaudio is subscribed there *per module*
+(`"akaudio": ["Ninjam","Radio"]`), anything not in that list is hidden; subscribing to
+the **whole plugin** on library.vcvrack.com makes it `"akaudio": true` and shows every
+module Rack loads. A hand edit to `"akaudio": true` works only until the next
+Library sync (`autoCheckUpdates: true` runs one at every startup and rewrote it back
+within seconds) — so during development also set `"autoCheckUpdates": false` (or
+log out of the Library); re-enable once the module is published. Edit with Rack
+closed (it rewrites `settings.json` on exit). Diagnose with
+`grep -A3 '"akaudio"' settings.json` and `log.txt`: `Loaded plugin akaudio` proves the
+plugin loaded, `Creating module widget AK Audio Looper` proves the browser showed it. The Makefile globs `src/**/*.cpp` via `find`, so new files under `src/`
 are picked up automatically. It also compiles vendored **libogg + libvorbis**
 (`src/dep/libogg`, `src/dep/libvorbis`) directly — for OGG-Vorbis *encoding* (NINJAM
 transmit); no separate `make dep`. Decoding uses **stb_vorbis** (NINJAM intervals),
