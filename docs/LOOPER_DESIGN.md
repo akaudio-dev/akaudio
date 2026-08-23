@@ -18,10 +18,11 @@ clock from Ninjam (M0), the Rack-free engine looping real audio (M1), the MIX + 
 buses, transmit-to-Ninjam over the expander, and **session files on disk** (M4): each
 committed take is encoded to OGG + indexed under `<base>/<stamp>_<room>/looper/`,
 overwritten/cleared takes retired into `history/`. The **Recorder** module and its wire
-archive (§4 items 3-4, §7, M3) are also built. Still on paper, marked *(planned)*: the
-timeline refinements in §7.3, the **clip loader** (restoring the grid on patch reload —
-v1 saves the files but reloads empty), and the DAW project generators (§12). §13 tracks
-per-milestone status.
+archive (§4 items 3-4, §7, M3) are also built, and **Ableton `.als` export** (§12)
+reconstructs the whole jam (Session-View loops + an Arrangement of every player's
+intervals). Still on paper, marked *(planned)*: the timeline refinements in §7.3, the
+**clip loader** (restoring the grid on patch reload — v1 saves the files but reloads
+empty), and the REAPER `.rpp` generator (§12). §13 tracks per-milestone status.
 
 ---
 
@@ -478,10 +479,14 @@ Radio/Ninjam (`ebebeb→e1e1e1`, `#1f1f1f` Nunito-Bold title).
   mute/level/pan — mute at the mixer, levels arrive set.
 - Controls column right of the scenes, top → bottom: **OVERDUB** (component-library
   bezel button + red light, as Fundamental's PUSH), REPEATS, DECAY, the poly **MULTI**
-  input, then **CUE** and **MIX** on output **plates** (L over R; Theme `AK_PLATE_*`
-  style; MIX aligned to Ninjam's two output rows). No per-track POLY out — Ninjam's
-  poly players out covers that. The **AK** mark at the shared `AK_MARK_Y_MM`. No
-  "SCENES" label; no RESET jack.
+  input, then three compact stacked output **plates** (Theme `AK_PLATE_*` style): **CUE**
+  over **POLY** over **MIX** (CUE/MIX are vertical stereo, L over R with the jacks squeezed
+  close; POLY is a single poly jack between them). **POLY** is the per-track direct out:
+  channels 2t / 2t+1 = track t L/R (mirroring the MULTI input's fixed pairs), each carrying
+  that track's own output (its loop + gated live-thru, no limiter) — a clean per-instrument
+  stem. The MIX plate bottom aligns with Ninjam's lower output-plate bottom, and the track
+  **STOP** buttons grow down to the same line, so the two modules' output rows read
+  together. The **AK** mark at the shared `AK_MARK_Y_MM`. No "SCENES" label; no RESET jack.
 - Header: source line ("NINJAM · bpm · bpi · next in Ns" or "SIMULATED CLOCK …") + a
   sync LED (green: locked to a Ninjam clock; dim: simulated/idle) and a progress bar.
 
@@ -573,12 +578,25 @@ otherwise).
 
 ---
 
-## 12. Deferred (v2+)
+## 12. DAW export + deferred (v2+)
 
-**DAW project generators** — the payoff of the timeline: REAPER `.rpp` (plain text,
-first) and Ableton `.als` (gzipped XML, reverse-engineered; Live imports Ogg Vorbis):
-8 Looper tracks with clips in Session View *and* an Arrangement of every player's
-intervals at their `sessionFrame`. Clip loader (restore grid on patch load; load from
+**Ableton Live `.als` export — built** (`src/looper/AlsExport.{hpp,cpp}` +
+`test/als_export_test.cpp`). The payoff of the shared timeline: the Looper's right-click
+**Export Ableton Live set (.als)** reads `<jam>/looper/session.json` and the Recorder's
+`<jam>/index.jsonl` and writes `<jam>/<name>.als` reconstructing the whole jam — the 8
+Looper tracks with each take as a **looping clip in its Session-View slot**, plus one
+**Arrangement** audio track per remote player and our TX with every interval clip placed
+at its `sessionFrame` (the session as heard here). Clips reference the raw take/interval
+OGGs directly (Live imports Ogg Vorbis — no re-encode); positions are computed in beats
+at the set tempo, clips unwarped so they play at true duration. `AlsExport` is Rack-free
+(pure structs → bytes; the Rack module parses the JSON with jansson) and needs no zlib —
+gzip is emitted with stored DEFLATE blocks + CRC32, validated against system `gunzip` +
+`xmllint` and an in-test inflater. **Caveat:** the `.als` schema is Ableton's,
+reverse-engineered; this targets **Live 11** and can't be validated without a Live
+install — expect to test in Live and iterate; absolute sample paths are primary (a local
+artifact), relative backup. Still deferred: the REAPER **`.rpp`** generator (plain text).
+
+**Deferred (v2+).** Clip loader (restore grid on patch load; load from
 files). Standalone clocking with per-track/per-take interval lengths. Duplicate /
 extend-with-silence (multi-interval loops). Follow actions; per-slot "no stop"; tape-
 style degradation. History browse. FLAC slot files. NINJAM silence-interval TX.
@@ -618,6 +636,10 @@ Tests (`test/`, no Rack link):
   bpm/`startFrame`), a late settings edit reflected, overwrite → the old take in `history/`,
   clear → the file retired + dropped from the manifest, no leftover `.tmp` (atomicity),
   and an untouched session that writes nothing. Folded into `make unittest`.
+- `als_export_test.cpp` *(built, passes)* — build an `.als` from synthetic jam data and
+  check the XML (10 tracks, session + arrangement clips, name escaping, beat positions at
+  tempo) and the gzip framing (a stored-block inflater reconstructs the XML byte-for-byte).
+  Folded into `make unittest`. Externally cross-checked with `gunzip` + `xmllint`.
 - `archive_test.cpp` *(built, passes)* — feed `NjArchive` synthetic RX/TX intervals
   (incl. a silence interval that writes no file) with changing session frames; assert
   the per-player/tx files, verbatim bytes, JSONL index entries, and stats. `make unittest`

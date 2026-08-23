@@ -278,10 +278,6 @@ struct Ninjam : Module, public akaudio::RecorderLink {
 	std::atomic<float> txQuality{0.5f};    // encoder VBR quality (persisted; ~190 kbps)
 	std::atomic<bool> txVoice{false};      // voice-chat mode: live, unsynced (persisted setting)
 	std::atomic<int> txDeclared{-1};       // last channel count declared (written on UI thread)
-	// Expander TX source: a Looper neighbour's MIX, read from our expander buffer each
-	// frame (see LooperAudioMessage). process()-thread values + a UI-visible flag.
-	float looperMixL = 0.f, looperMixR = 0.f;
-	std::atomic<bool> looperTx{false};     // a transmitting Looper is our neighbour (UI: declaration)
 	// ---- Wire archive (Recorder companion) ----
 	std::atomic<bool> recArmed_{false};    // the adjacent Recorder's REC latch
 	std::atomic<bool> recordOwnTx_{true};  // also archive our transmitted mix
@@ -295,12 +291,9 @@ struct Ninjam : Module, public akaudio::RecorderLink {
 
 	Ninjam() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
-		// Receive buffers for a Looper neighbour's MIX (either side). Harmless when no
-		// Looper is adjacent (stays zero). Freed in ~Ninjam.
-		leftExpander.producerMessage = new akaudio::LooperAudioMessage();
-		leftExpander.consumerMessage = new akaudio::LooperAudioMessage();
-		rightExpander.producerMessage = new akaudio::LooperAudioMessage();
-		rightExpander.consumerMessage = new akaudio::LooperAudioMessage();
+		// Ninjam publishes its clock into an adjacent Looper's own buffers (see
+		// publishClock); it receives nothing over the expander, so it allocates no expander
+		// message buffers of its own. (The Looper's MIX reaches TX via a real cable to IN.)
 		// Two-state param so the metronome toggle is MIDI-mappable. The value is the
 		// on/off state (latch mode); the widget reconciles it with clickEnabled on the
 		// UI thread each frame. See midiToggleMode for the note-vs-CC mode choice.
@@ -468,26 +461,6 @@ struct Ninjam : Module, public akaudio::RecorderLink {
 			// USERCOUNT and others: ignored (the roster already conveys presence).
 		};
 		return cb;
-	}
-
-	~Ninjam() override {
-		// njclient (declared last) is torn down after this body; freeing the expander
-		// buffers here is safe — the audio thread no longer runs by dtor time.
-		delete (akaudio::LooperAudioMessage*) leftExpander.producerMessage;
-		delete (akaudio::LooperAudioMessage*) leftExpander.consumerMessage;
-		delete (akaudio::LooperAudioMessage*) rightExpander.producerMessage;
-		delete (akaudio::LooperAudioMessage*) rightExpander.consumerMessage;
-	}
-
-	// A Looper neighbour is our transmit source (either side; left preferred — the
-	// instruments looper sits on Ninjam's left). Adjacency is authoritative: a removed
-	// Looper stops being trusted even if its last message said active. UI + audio thread.
-	akaudio::LooperAudioMessage* looperAudio() {
-		if (leftExpander.module && leftExpander.module->model == modelLooper)
-			return (akaudio::LooperAudioMessage*) leftExpander.consumerMessage;
-		if (rightExpander.module && rightExpander.module->model == modelLooper)
-			return (akaudio::LooperAudioMessage*) rightExpander.consumerMessage;
-		return nullptr;
 	}
 
 	// ---- RecorderLink (UI thread): a Recorder neighbour drives the wire archive ----
@@ -721,10 +694,7 @@ struct Ninjam : Module, public akaudio::RecorderLink {
 	int txDeclaredVoice = -1; // voice flag of the last declaration (UI thread only)
 	void syncTransmit() {
 		int desired = 0;
-		bool looper = looperAudio() != nullptr;
-		if (transmitting && joined && looper) {
-			desired = 1; // the Looper's MIX is a single stereo channel — no IN jack needed
-		} else if (transmitting && joined && inputs[LEFT_INPUT].isConnected()) {
+		if (transmitting && joined && inputs[LEFT_INPUT].isConnected()) {
 			int nin = inputs[LEFT_INPUT].getChannels();
 			if (nin < 1) nin = 1;
 			desired = std::min(nin, akaudio::nj::NjAudio::MAX_TX);
@@ -965,28 +935,17 @@ struct Ninjam : Module, public akaudio::RecorderLink {
 		publishClock(jam);
 		njclient.setArchiveSessionFrame(jam.sessionFrame);
 
-		// Expander TX source: read a Looper neighbour's MIX (its buffer, flipped last
-		// frame). Gated on live adjacency so a removed Looper is ignored.
-		akaudio::LooperAudioMessage* la = looperAudio();
-		bool looperTxL = la != nullptr;
-		looperTx.store(looperTxL, std::memory_order_relaxed);
-		if (looperTxL) { looperMixL = la->mixL; looperMixR = la->mixR; }
-		else { looperMixL = looperMixR = 0.f; }
 		// ---- Transmit capture: feed input frames once armed at a beat boundary ----
-		// (voice mode: immediately — it has no grid to align to). A Looper neighbour is
-		// the source when present (its MIX = one stereo channel, no IN cable); otherwise
-		// the poly IN jack, unchanged, for standalone Ninjam use.
+		// (voice mode: immediately — it has no grid to align to). Source is the poly IN
+		// jack; route a Looper's MIX here with a real cable (through the mixer).
 		if (transmittingL && joinedL && txDeclaredL > 0
-		        && (txVoiceL || txArmed.load(std::memory_order_relaxed))) {
-			if (looperTxL) {
-				njclient.captureFrame(0, looperMixL, looperMixR);
-			} else if (inputs[LEFT_INPUT].isConnected()) {
-				bool rConn = inputs[RIGHT_INPUT].isConnected();
-				for (int ch = 0; ch < txDeclaredL; ch++) {
-					float il = inputs[LEFT_INPUT].getPolyVoltage(ch) * 0.2f;  // ±5V -> ±1
-					float ir = rConn ? inputs[RIGHT_INPUT].getPolyVoltage(ch) * 0.2f : il;
-					njclient.captureFrame(ch, il, ir);
-				}
+		        && (txVoiceL || txArmed.load(std::memory_order_relaxed))
+		        && inputs[LEFT_INPUT].isConnected()) {
+			bool rConn = inputs[RIGHT_INPUT].isConnected();
+			for (int ch = 0; ch < txDeclaredL; ch++) {
+				float il = inputs[LEFT_INPUT].getPolyVoltage(ch) * 0.2f;  // ±5V -> ±1
+				float ir = rConn ? inputs[RIGHT_INPUT].getPolyVoltage(ch) * 0.2f : il;
+				njclient.captureFrame(ch, il, ir);
 			}
 		}
 
@@ -2184,6 +2143,27 @@ struct TxNudge : Widget {
 	}
 };
 
+// Spawn a companion module directly adjacent to `mw` (Looper on the left — the instruments
+// looper; Recorder on the right — the wire archive), the way Rack's own "add expander"
+// works: create the module + widget, force it against our edge (pushing neighbours aside),
+// and push an undo action. UI thread (context-menu action).
+static void addCompanion(app::ModuleWidget* mw, Model* model, bool left) {
+	if (!model)
+		return;
+	engine::Module* module = model->createModule();
+	APP->engine->addModule(module);
+	app::ModuleWidget* newMw = model->createModuleWidget(module);
+	APP->scene->rack->addModule(newMw);
+	math::Vec pos = mw->box.pos;
+	pos.x += left ? -newMw->box.size.x : mw->box.size.x;
+	APP->scene->rack->setModulePosForce(newMw, pos);
+
+	history::ModuleAdd* h = new history::ModuleAdd;
+	h->name = "add " + model->name;
+	h->setModule(newMw);
+	APP->history->push(h);
+}
+
 struct NinjamWidget : ModuleWidget {
 	Ninjam* nj = nullptr;
 	// State-dependent widgets: connect UI (shown when disconnected) vs jam view (connected).
@@ -2403,6 +2383,20 @@ struct NinjamWidget : ModuleWidget {
 		menu->addChild(createMenuItem("Stop", "", [module]() {
 			if (module->isActive()) module->stopAll();
 		}));
+		menu->addChild(new MenuSeparator);
+		menu->addChild(createMenuLabel("Companions"));
+		// Don't offer to add a companion that is already a neighbour (either side) — one of
+		// each is what's useful, and the Recorder/Looper only work when adjacent anyway.
+		Module* l = module->leftExpander.module;
+		Module* r = module->rightExpander.module;
+		bool looperAdj = (l && l->model == modelLooper) || (r && r->model == modelLooper);
+		bool recorderAdj = (l && l->model == modelRecorder) || (r && r->model == modelRecorder);
+		menu->addChild(createMenuItem("Add Looper (left)", looperAdj ? "already added" : "", [this]() {
+			addCompanion(this, modelLooper, /*left=*/true);
+		}, looperAdj));
+		menu->addChild(createMenuItem("Add Recorder (right)", recorderAdj ? "already added" : "", [this]() {
+			addCompanion(this, modelRecorder, /*left=*/false);
+		}, recorderAdj));
 		menu->addChild(createCheckMenuItem("Metronome click", "",
 			[module]() { return module->clickEnabled.load(std::memory_order_relaxed); },
 			[module]() { module->clickEnabled = !module->clickEnabled; }));

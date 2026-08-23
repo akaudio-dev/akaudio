@@ -33,15 +33,9 @@ struct JamClockMessage {
 	char roomLabel[64];      // NUL-terminated; "" until Ninjam publishes it
 };
 
-// Audio the other way: a Looper adjacent to Ninjam writes its on-air MIX here every
-// frame, and Ninjam transmits it as one stereo channel instead of its poly IN jack —
-// so a Looper next to Ninjam needs no MIX→IN cable. Ninjam OWNS this buffer (receiver);
-// the Looper writes it and requests the flip (1-sample latency, like the clock). Ninjam
-// trusts it only while a modelLooper is actually its neighbour (removal = ignore).
-struct LooperAudioMessage {
-	bool active;      // a Looper wrote this frame (its MIX is meaningful)
-	float mixL, mixR; // the Looper's on-air MIX, ±1
-};
+// (The Looper→Ninjam expander-audio path was removed 2026-08-23: route the Looper's MIX
+// OUT to Ninjam's IN through the mixer with a real cable — using the mixer to its fullest
+// — rather than an invisible connection. Only the clock travels over the expander now.)
 
 struct JamClock {
 	int bpm = 0, bpi = 0;

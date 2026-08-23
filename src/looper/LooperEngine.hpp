@@ -128,6 +128,7 @@ struct Slot {
 	std::atomic<int> repCount{0};
 	std::atomic<float> gain{1.f};
 	std::atomic<bool> playable{true};  // take length matches the live grid
+	std::atomic<bool> overdubbing{false}; // this slot is the live overdub target (UI marker)
 	std::atomic<double> flashAt{-1.0}; // wall time of a refused action (UI: red flash)
 	float thumb[THUMB_BINS] = {};      // display only; written at a boundary
 	// Audio-thread only.
@@ -178,8 +179,14 @@ public:
 	// `now` = wall-clock seconds for the UI's refusal flash (any monotonic clock).
 	// MIX = on-air tracks' live-thru + all loops; CUE = private (TX-off) tracks' live-thru
 	// (monitor what you're trying without the room hearing). Both through the safety limiter.
+	// `trackOutLR` (optional, ≥ nTracks*2 floats): each track's own pre-limiter output
+	// (loop + gated live-thru), interleaved 2t / 2t+1 — the per-channel POLY out.
+	// `wantMix`: when false, skip the MIX submix + its limiter (outL/outR = 0) — nothing
+	// is patched to MIX OUT, so there's no reason to compute it (recording, loops, CUE and
+	// the per-track POLY out are unaffected).
 	void tick(const ClockFrame& c, const TrackIn* in, int nTracks, double now,
-	          float& outL, float& outR, float& cueL, float& cueR);
+	          float& outL, float& outR, float& cueL, float& cueR, float* trackOutLR = nullptr,
+	          bool wantMix = true);
 	// Button intents (from param edges, audio thread).
 	void pressSlot(int t, int s, bool overdubMode);
 	void pressScene(int row);
@@ -193,6 +200,12 @@ public:
 
 	Track tracks[MAX_TRACKS];
 	LooperSink* sink = nullptr;          // worker-thread disk writer (M4); null = RAM only
+	// Continuous overdub (set each frame by the module): while the latch is on, the
+	// selected playing slot overdubs every interval; changing the selection moves the
+	// overdub to the newly selected cell at the next boundary.
+	std::atomic<bool> overdubMode{false};   // the OVERDUB latch
+	std::atomic<int> overdubSel{-1};        // selected slot index (track*MAX_SLOTS+slot), −1 none
+	std::atomic<bool> declickEnabled{true}; // fade each loop cycle's ends to 0 (no click); tests disable it
 	std::atomic<int> defRepeats{0};      // defaults for new captures
 	std::atomic<float> defDecayDb{0.f};
 	std::atomic<int> intervalFrames{0};  // current N (UI)
@@ -205,6 +218,7 @@ private:
 	void drainReplies();
 	void drainIntents();
 	void requestRec(int t);
+	bool armOverdub(int t, int s); // request staging = copy(take) for the next interval's overdub
 	void saveTake(int t, int s);  // enqueue an OGG save of the slot's committed take (M4)
 	void clearFile(int t, int s); // enqueue a retire of the slot's live file into history/ (M4)
 	void release(Buf* b);
@@ -222,8 +236,10 @@ private:
 	uint32_t gen = 0;
 	bool haveGrid = false;
 	float gateDecay = 0.f;
+	int declickN = 0;   // loop-end fade length in frames (~1.5 ms), computed on regrid
 	uint32_t seqCounter = 1;
 	int lastFrameRecorded = -1; // frames [0, lastFrameRecorded] of the interval are in `rec`
+	int odTrack = -1, odSlot = -1; // the slot currently accumulating a continuous overdub
 };
 
 } // namespace looper

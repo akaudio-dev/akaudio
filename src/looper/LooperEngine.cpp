@@ -95,6 +95,26 @@ void LooperEngine::clearFile(int t, int s) {
 	cmds.push(c);
 }
 
+// Arm a continuous overdub on (t,s) for the interval that is about to begin: ask the
+// worker for staging = a copy of the current take (upto=0 — we fold the whole interval as
+// it records). Returns true if the request was issued. The audio thread folds the rolling
+// buffer into staging as it records (see tick), and the boundary commits it.
+bool LooperEngine::armOverdub(int t, int s) {
+	Track& tr = tracks[t];
+	Slot& sl = tr.slots[s];
+	if (!tr.rec || !sl.take.buf || sl.take.frames != N)
+		return false;
+	Cmd cmd;
+	cmd.kind = Cmd::OVERDUB_COPY; cmd.track = t; cmd.slot = s; cmd.frames = N; cmd.upto = 0;
+	cmd.seq = seqCounter++; cmd.a = sl.take.buf; cmd.b = tr.rec;
+	if (!cmds.push(cmd))
+		return false;
+	sl.odSeq = cmd.seq;
+	sl.odCatch = 0;
+	sl.odReady = false;
+	return true;
+}
+
 void LooperEngine::dropOverdub(Slot& sl) {
 	if (sl.staging) {
 		release(sl.staging);
@@ -135,12 +155,13 @@ void LooperEngine::drainReplies() {
 				break;
 			case Reply::OVERDUB_COPY: {
 				Slot& sl = tr.slots[r.slot];
-				if (sl.pending.load(std::memory_order_relaxed) == OVERDUB && sl.odSeq == r.seq
-				        && r.buf && r.buf->frames == N) {
+				// Accept the staging only if it answers the current arm (odSeq) and fits the
+				// grid; a superseded / cancelled / regridded request is recycled.
+				if (sl.odSeq == r.seq && sl.odSeq != 0 && r.buf && r.buf->frames == N) {
 					sl.staging = r.buf;
 					sl.odReady = true;
 				} else {
-					release(r.buf); // cancelled / superseded / regridded
+					release(r.buf);
 				}
 				break;
 			}
@@ -159,6 +180,8 @@ void LooperEngine::drainIntents() {
 			case Intent::CLEAR: {
 				sl.pending.store(NONE, std::memory_order_relaxed);
 				dropOverdub(sl);
+				sl.overdubbing.store(false, std::memory_order_relaxed);
+				if (odTrack == i.track && odSlot == i.slot) { odTrack = odSlot = -1; }
 				if (tr.playingSlot.load(std::memory_order_relaxed) == i.slot)
 					tr.playingSlot.store(-1, std::memory_order_relaxed);
 				const bool hadTake = sl.take.buf != nullptr;
@@ -185,6 +208,7 @@ void LooperEngine::regrid(const ClockFrame& c) {
 	haveGrid = true;
 	intervalFrames.store(N, std::memory_order_relaxed);
 	gateDecay = sr > 0.f ? std::exp(-1.f / (0.1f * sr)) : 0.f; // ~100 ms release
+	declickN = N > 0 ? std::max(1, std::min(N / 4, (int) (sr * 0.0015f))) : 0; // ~1.5 ms loop-end fade
 	for (int t = 0; t < MAX_TRACKS; t++) {
 		Track& tr = tracks[t];
 		auto drop = [&](Buf*& b) { if (b && b->frames != N) { release(b); b = nullptr; } };
@@ -195,6 +219,7 @@ void LooperEngine::regrid(const ClockFrame& c) {
 			Slot& sl = tr.slots[s];
 			sl.pending.store(NONE, std::memory_order_relaxed);
 			dropOverdub(sl);
+			sl.overdubbing.store(false, std::memory_order_relaxed);
 			if (sl.state.load(std::memory_order_relaxed) == RECORDING)
 				sl.state.store(EMPTY, std::memory_order_relaxed);
 			bool ok = sl.take.buf && sl.take.frames == N && sl.take.sampleRate == sr;
@@ -209,6 +234,7 @@ void LooperEngine::regrid(const ClockFrame& c) {
 			requestRec(t);
 		tr.bufs.store((tr.rec ? 1 : 0) + (tr.last ? 1 : 0) + (tr.spare ? 1 : 0), std::memory_order_relaxed);
 	}
+	odTrack = odSlot = -1; // the overdub re-targets against the new grid at the next boundary
 }
 
 // Interval boundary (this frame is frame 0 of the next interval). Per track, in order:
@@ -219,11 +245,11 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 		Track& tr = tracks[t];
 		const bool present = tr.present.load(std::memory_order_relaxed);
 
-		// 0. An overdub whose staging arrived late in the interval: add the remaining
-		// frames of the rolling buffer (bounded by the worker's latency, ~ms).
-		for (int s = 0; s < MAX_SLOTS; s++) {
-			Slot& sl = tr.slots[s];
-			if (sl.pending.load(std::memory_order_relaxed) == OVERDUB && sl.odReady && sl.staging && tr.rec) {
+		// 0. The active overdub whose staging arrived late in the interval: add the
+		// remaining frames of the rolling buffer (bounded by the worker's latency, ~ms).
+		if (odTrack == t && odSlot >= 0) {
+			Slot& sl = tr.slots[odSlot];
+			if (sl.odReady && sl.staging && tr.rec) {
 				for (; sl.odCatch < N; sl.odCatch++) {
 					sl.staging->pcm[(size_t) sl.odCatch * 2]     += tr.rec->pcm[(size_t) sl.odCatch * 2];
 					sl.staging->pcm[(size_t) sl.odCatch * 2 + 1] += tr.rec->pcm[(size_t) sl.odCatch * 2 + 1];
@@ -297,29 +323,29 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 							tr.playingSlot.store(-1, std::memory_order_relaxed);
 					}
 					break;
-				case OVERDUB: {
-					// staging = take + this interval's input, built progressively; swap it in.
-					if (sl.state.load(std::memory_order_relaxed) != PLAYING || !sl.odReady || !sl.staging) {
-						refuse(sl, now);
-						dropOverdub(sl); // a late reply is released on arrival (seq no longer matches)
-						break;
-					}
-					if (sl.take.buf) release(sl.take.buf);
-					sl.take.buf = sl.staging;
-					sl.take.frames = N;
-					sl.take.peak = std::max(sl.take.peak, tr.lastPeak);
-					sl.staging = nullptr;
-					sl.odReady = false;
-					sl.odSeq = 0;
-					for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = std::min(1.f, std::max(sl.thumb[b], tr.lastLive[b]));
-					sl.repCount.store(0, std::memory_order_relaxed);
-					sl.gain.store(1.f, std::memory_order_relaxed);
-					sl.startedThisBoundary = true;
-					saveTake(t, s); // the overdubbed take replaces the file (old → history), M4
-					break;
-				}
 				default:
 					break;
+			}
+		}
+
+		// 2c. Commit the active continuous overdub on this track: staging (take + the
+		// interval that just ended) becomes the new take — the playhead / repeat counter
+		// keep running, so the loop layers without restarting. Dropped if it stopped
+		// playing this boundary (e.g. STOP) or its staging never arrived.
+		if (odTrack == t && odSlot >= 0) {
+			Slot& sl = tr.slots[odSlot];
+			if (sl.state.load(std::memory_order_relaxed) == PLAYING && sl.odReady && sl.staging) {
+				if (sl.take.buf) release(sl.take.buf);
+				sl.take.buf = sl.staging;
+				sl.take.frames = N;
+				sl.take.peak = std::max(sl.take.peak, tr.lastPeak);
+				sl.staging = nullptr;
+				sl.odReady = false;
+				sl.odSeq = 0;
+				for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = std::min(1.f, std::max(sl.thumb[b], tr.lastLive[b]));
+				saveTake(t, odSlot); // the overdubbed take replaces the file (old → history), M4
+			} else {
+				dropOverdub(sl);
 			}
 		}
 
@@ -354,6 +380,30 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 		}
 		tr.bufs.store((tr.rec ? 1 : 0) + (tr.last ? 1 : 0) + (tr.spare ? 1 : 0), std::memory_order_relaxed);
 	}
+
+	// Re-target the continuous overdub for the interval that just began: while the OVERDUB
+	// latch is on, the selected playing (patched) cell overdubs each interval; changing the
+	// selection (or disengaging the latch) moves/stops it here, at the boundary. The
+	// previous target committed above (2c), so this arms fresh on the current take.
+	if (odTrack >= 0 && odSlot >= 0)
+		tracks[odTrack].slots[odSlot].overdubbing.store(false, std::memory_order_relaxed);
+	odTrack = odSlot = -1;
+	if (overdubMode.load(std::memory_order_relaxed)) {
+		int sel = overdubSel.load(std::memory_order_relaxed);
+		if (sel >= 0 && sel < MAX_TRACKS * MAX_SLOTS) {
+			int st = sel / MAX_SLOTS, ss = sel % MAX_SLOTS;
+			Track& tr = tracks[st];
+			Slot& sl = tr.slots[ss];
+			if (tr.present.load(std::memory_order_relaxed)
+			        && sl.state.load(std::memory_order_relaxed) == PLAYING
+			        && sl.take.buf && sl.take.frames == N
+			        && armOverdub(st, ss)) {
+				odTrack = st;
+				odSlot = ss;
+				sl.overdubbing.store(true, std::memory_order_relaxed);
+			}
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------------
@@ -361,7 +411,8 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 // ---------------------------------------------------------------------------------
 
 void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, double now,
-                        float& outL, float& outR, float& cueL, float& cueR) {
+                        float& outL, float& outR, float& cueL, float& cueR, float* trackOutLR,
+                        bool wantMix) {
 	drainReplies();
 	drainIntents();
 	if (c.running && c.intervalFrames > 0) {
@@ -378,6 +429,8 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 	const int bin = inGrid ? (int) std::min<long long>(THUMB_BINS - 1, (long long) f * THUMB_BINS / N) : 0;
 	if (inGrid)
 		lastFrameRecorded = f;
+
+	const bool declick = declickEnabled.load(std::memory_order_relaxed) && declickN > 0;
 
 	float mixL = 0.f, mixR = 0.f, cuL = 0.f, cuR = 0.f;
 	for (int t = 0; t < MAX_TRACKS; t++) {
@@ -420,6 +473,16 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 			Slot& sl = tr.slots[ps];
 			if (sl.take.buf && f < sl.take.frames) {
 				float g = sl.gain.load(std::memory_order_relaxed);
+				// Declick: fade the first/last declickN frames of the cycle smoothly to 0, so
+				// the loop point (frame N-1 → 0) is continuous through zero — no click. The
+				// smoothstep has zero slope at the ends, so even a very short fade is clean.
+				if (declick) {
+					const int nf = sl.take.frames;
+					float ft = 1.f;
+					if (f < declickN)              ft = (f + 0.5f) / declickN;
+					else if (f >= nf - declickN)   ft = (nf - f - 0.5f) / declickN;
+					if (ft < 1.f) g *= ft * ft * (3.f - 2.f * ft);
+				}
 				loopL = sl.take.buf->pcm[(size_t) f * 2] * g;
 				loopR = sl.take.buf->pcm[(size_t) f * 2 + 1] * g;
 			}
@@ -439,10 +502,18 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 		// Loops always go to MIX — a recorded loop is the band's committed contribution,
 		// heard by the room regardless of the live TX state.
 		float thruGateL = open ? l : 0.f, thruGateR = open ? r : 0.f;
-		mixL += thruGateL * tr.txGain + loopL;
-		mixR += thruGateR * tr.txGain + loopR;
+		if (wantMix) {
+			mixL += thruGateL * tr.txGain + loopL;
+			mixR += thruGateR * tr.txGain + loopR;
+		}
 		cuL  += thruGateL * (1.f - tr.txGain);
 		cuR  += thruGateR * (1.f - tr.txGain);
+		// Per-track direct out (POLY): this channel's full output = its loop + its live-thru,
+		// regardless of TX routing — a clean per-instrument stem. No limiter (individual send).
+		if (trackOutLR && t < nTracks) {
+			trackOutLR[(size_t) t * 2]     = loopL + thruGateL;
+			trackOutLR[(size_t) t * 2 + 1] = loopR + thruGateR;
+		}
 	}
 
 	// Soft limiter: fully transparent up to full scale (internal 1.0 = ±5V), so a single
@@ -455,8 +526,8 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 		float y = 1.0f + 0.5f * std::tanh((ax - 1.0f) / 0.5f);
 		return x < 0.f ? -y : y;
 	};
-	outL = lim(mixL);
-	outR = lim(mixR);
+	outL = wantMix ? lim(mixL) : 0.f;
+	outR = wantMix ? lim(mixR) : 0.f;
 	cueL = lim(cuL);
 	cueR = lim(cuR);
 }
@@ -485,28 +556,12 @@ void LooperEngine::pressSlot(int t, int s, bool overdubMode) {
 			sl.pending.store(LAUNCH, std::memory_order_relaxed);
 			break;
 		case PLAYING:
-			if (!overdubMode) {
+			// Overdub is a continuous, selection-driven mode (see boundary): while the
+			// OVERDUB latch is on, pressing a playing cell just selects it as the overdub
+			// target (the module tracks selection) — it does not stop it. With the latch
+			// off, a press stops the loop, as before.
+			if (!overdubMode)
 				sl.pending.store(STOP, std::memory_order_relaxed);
-				break;
-			}
-			// Overdub: ask the worker for staging = take + the part of this interval
-			// already recorded; we keep adding from here on (see tick()).
-			if (!tr.rec || !sl.take.buf || sl.take.frames != N) break;
-			{
-				Cmd cmd;
-				cmd.kind = Cmd::OVERDUB_COPY; cmd.track = t; cmd.slot = s; cmd.frames = N;
-				cmd.upto = 0; // set below from the current frame via odCatch bookkeeping
-				cmd.seq = seqCounter++;
-				cmd.a = sl.take.buf; cmd.b = tr.rec;
-				// The frames already recorded are [0, lastFrame]; the worker adds [0, upto) and
-				// the audio thread continues from odCatch = upto.
-				cmd.upto = lastFrameRecorded + 1;
-				sl.odSeq = cmd.seq;
-				sl.odCatch = cmd.upto;
-				sl.odReady = false;
-				if (cmds.push(cmd))
-					sl.pending.store(OVERDUB, std::memory_order_relaxed);
-			}
 			break;
 	}
 }

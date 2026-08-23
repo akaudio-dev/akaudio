@@ -15,6 +15,7 @@
 #include "RecorderLink.hpp"
 #include "looper/LooperEngine.hpp"
 #include "looper/Session.hpp"
+#include "looper/AlsExport.hpp"
 
 #include <osdialog.h>
 
@@ -22,6 +23,10 @@
 #include <cmath>
 #include <cstdint>
 #include <ctime>
+#include <fstream>
+#include <map>
+#include <sstream>
+#include <sys/stat.h>
 
 namespace {
 
@@ -60,22 +65,33 @@ const float STOP_GAP = 6.f;                    // whitespace between the grid an
 const float STOP_Y = GRID_Y + 7 * ROW_H + BTN_H + STOP_GAP; // bottoms align with the MIX plate (stopH())
 // Controls column (x center RX), top → bottom.
 const float RX = 623.f;
-const float Y_DUB = 70.f;                      // overdub bezel button (label above, like Fundamental's PUSH)
-const float Y_REPEATS = 116.f, Y_DECAY = 162.f; // knob centers (labels 17 px above)
-// CUE and MIX: two IDENTICAL vertical stereo output plates (L over R) in the controls
-// column. One geometry for both — same jack spacing + margins as Ninjam's output jacks
-// — and the MIX plate's L jack sits on Ninjam's MAIN output row so the two line up.
-const float PLATE_W = 42.f;                    // plate width (jack + L/R label to its left)
-const float PLATE_JDY = 40.f;                  // L→R jack spacing (~Ninjam's pair spacing)
-const float PLATE_TOPGAP = 24.f;               // plate top → L jack (title sits above)
-const float PLATE_BOTGAP = 14.f;               // R jack → plate bottom
+const float Y_DUB = 62.f;                      // overdub bezel button (label above, like Fundamental's PUSH)
+const float Y_REPEATS = 100.f, Y_DECAY = 136.f; // knob centers (labels 17 px above) — raised to free plate room
+// Three stacked output plates: OUTS (the per-track poly out) over CUE (private) over MIX
+// (to Ninjam). CUE/MIX are vertical stereo plates (L over R, jacks squeezed together but
+// with clear margins — room above for the title, beside for the L/R labels); OUTS is a
+// single poly jack (MindMeld-style gold ring). Spread to fill the column; the MIX plate
+// bottom aligns with Ninjam's lower output plate bottom, so the two modules line up.
+const float PLATE_W = 50.f;                    // plate width (jack + L/R label to its left, with margins)
+const float PLATE_JDY = 28.f;                  // L→R jack spacing (close, but not touching)
+const float PLATE_TOPGAP = 27.f;               // plate top → L jack: room for the title, clear of the jack
+const float PLATE_BOTGAP = 14.f;               // R jack → plate bottom (jack has margin below)
 const float PLATE_H = PLATE_TOPGAP + PLATE_JDY + PLATE_BOTGAP;
-const float PLATE_JACK_X = RX + 6.f, PLATE_LAB_X = RX - 12.f;
-const float MIX_TOP = mm2px(AK_ROW_CV_MM) - PLATE_TOPGAP; // L jack on Ninjam's MAIN row
-const float CUE_TOP = MIX_TOP - 6.f - PLATE_H;            // stacked above MIX, 6 px gap
+const float PLATE_JACK_X = RX + 7.f, PLATE_LAB_X = RX - 15.f;
+const float PLATE_TITLE_DY = 7.f;              // title center below plate top (sits above the jack)
+const float OUTS_TOPGAP = 28.f;                // OUTS plate top → jack: room for title + the poly ring
+const float OUTS_BOTGAP = 16.f;
+const float OUTS_H = OUTS_TOPGAP + OUTS_BOTGAP;
+const float PLATE_GAP = 8.f;                   // gap between stacked plates
+// MIX bottom = Ninjam's lower (CV) output plate bottom → the modules line up; stack up.
+const float MIX_BOT = mm2px(AK_PLATE_TOP_MM + AK_PLATE_H_MM);
+const float MIX_TOP = MIX_BOT - PLATE_H;
+const float CUE_TOP = MIX_TOP - PLATE_GAP - PLATE_H;
+const float OUTS_TOP = CUE_TOP - PLATE_GAP - OUTS_H;
+const float OUTS_JACK_Y = OUTS_TOP + OUTS_TOPGAP;
 inline float plateLY(float top) { return top + PLATE_TOPGAP; }
 inline float plateRY(float top) { return top + PLATE_TOPGAP + PLATE_JDY; }
-inline float stopH() { return (MIX_TOP + PLATE_H) - STOP_Y; }
+inline float stopH() { return MIX_BOT - STOP_Y; } // stops grow down to Ninjam's output-plate bottom
 
 // Track label: MindMeld's amber-on-black on the dark panel; black on grey on the light one.
 inline NVGcolor lpLabelBg()   { return akTheme(nvgRGB(0xc4, 0xc7, 0xcb), nvgRGB(0x1a, 0x1a, 0x1a)); }
@@ -98,6 +114,21 @@ int decayIndex(float db) {
 	for (int i = 1; i < N_DECAY_CHOICES; i++)
 		if (std::fabs(DECAY_CHOICES[i] - db) < std::fabs(DECAY_CHOICES[best] - db)) best = i;
 	return best;
+}
+
+// ---- .als export helpers (UI thread) ----
+std::string readFile(const std::string& p) {
+	std::ifstream f(p, std::ios::binary);
+	if (!f) return "";
+	return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+long fileSizeOf(const std::string& p) {
+	struct stat st;
+	return stat(p.c_str(), &st) == 0 ? (long) st.st_size : 0;
+}
+std::string baseNameOf(const std::string& p) {
+	size_t sl = p.find_last_of('/');
+	return sl == std::string::npos ? p : p.substr(sl + 1);
 }
 
 } // namespace
@@ -123,6 +154,7 @@ struct Looper : Module {
 	enum OutputId {
 		MIX_L_OUTPUT, MIX_R_OUTPUT,
 		CUE_L_OUTPUT, CUE_R_OUTPUT,
+		POLY_OUTPUT,   // per-track direct out (poly): channels 2t, 2t+1 = track t L/R
 		OUTPUTS_LEN
 	};
 	enum LightId { OVERDUB_LIGHT, LIGHTS_LEN };
@@ -206,6 +238,7 @@ struct Looper : Module {
 		configOutput(MIX_R_OUTPUT, "Mix R (to Ninjam IN)");
 		configOutput(CUE_L_OUTPUT, "Cue L (private / non-transmitting tracks â your monitor)");
 		configOutput(CUE_R_OUTPUT, "Cue R (private / non-transmitting tracks â your monitor)");
+		configOutput(POLY_OUTPUT, "Per-track direct out (poly: ch 1-2 = track 1, 3-4 = track 2, ...)");
 		engine.setSink(&session); // takes are encoded + indexed by the session (M4)
 		engine.start();
 	}
@@ -318,24 +351,25 @@ struct Looper : Module {
 		}
 
 		float outL = 0.f, outR = 0.f, cueL = 0.f, cueR = 0.f;
-		engine.tick(tickClock(args), in, TRACKS, system::getTime(), outL, outR, cueL, cueR);
+		float trackLR[TRACKS * 2] = {};
+		// Route the MIX to your rig (and on to Ninjam's IN) with real cables through the
+		// mixer — there is no invisible Looper→Ninjam link. So the submix is only worth
+		// computing when the MIX jacks are actually patched.
+		const bool wantMix = outputs[MIX_L_OUTPUT].isConnected() || outputs[MIX_R_OUTPUT].isConnected();
+		// Continuous overdub: hand the engine the OVERDUB latch + current selection so the
+		// selected playing cell overdubs each interval while engaged (§ boundary re-target).
+		engine.overdubMode.store(params[OVERDUB_PARAM].getValue() > 0.5f, std::memory_order_relaxed);
+		engine.overdubSel.store(selected.load(std::memory_order_relaxed), std::memory_order_relaxed);
+		engine.tick(tickClock(args), in, TRACKS, system::getTime(), outL, outR, cueL, cueR, trackLR, wantMix);
 		outputs[MIX_L_OUTPUT].setVoltage(outL * 5.f);
 		outputs[MIX_R_OUTPUT].setVoltage(outR * 5.f);
 		outputs[CUE_L_OUTPUT].setVoltage(cueL * 5.f);
 		outputs[CUE_R_OUTPUT].setVoltage(cueR * 5.f);
-
-		// Transmit companion: if an adjacent module is Ninjam, hand it our MIX over the
-		// expander (into its buffer facing us, flipped for it to read next frame), so a
-		// Looper next to Ninjam transmits with no MIX→IN cable. We write into Ninjam's
-		// expander; Ninjam writes the clock into ours — the two flows don't collide.
-		for (int side = 0; side < 2; side++) {
-			Module* x = side ? rightExpander.module : leftExpander.module;
-			if (!x || x->model != modelNinjam) continue;
-			Expander& nx = side ? x->leftExpander : x->rightExpander; // Ninjam's buffer facing us
-			auto* buf = (akaudio::LooperAudioMessage*) nx.producerMessage;
-			if (!buf) continue;
-			buf->active = true; buf->mixL = outL; buf->mixR = outR;
-			nx.requestMessageFlip();
+		// POLY direct out: track t on channels 2t (L) / 2t+1 (R) — mirrors the MULTI input.
+		outputs[POLY_OUTPUT].setChannels(TRACKS * 2);
+		for (int t = 0; t < TRACKS; t++) {
+			outputs[POLY_OUTPUT].setVoltage(trackLR[t * 2] * 5.f, t * 2);
+			outputs[POLY_OUTPUT].setVoltage(trackLR[t * 2 + 1] * 5.f, t * 2 + 1);
 		}
 		lights[OVERDUB_LIGHT].setBrightness(params[OVERDUB_PARAM].getValue() > 0.5f ? 1.f : 0.f);
 	}
@@ -343,6 +377,131 @@ struct Looper : Module {
 	// ---- UI-thread helpers ----
 	void clearSlot(int t, int s) { engine.requestClear(t, s); }
 	int pendingCount() const { return engine.pendingCount(); }
+
+	// Reconstruct a jam as an Ableton Live Set. Reads `<jamRoot>/looper/session.json` (our
+	// takes → Session-View clips) and, if present, `<jamRoot>/index.jsonl` (the Recorder's
+	// wire archive → one Arrangement track per player + our TX, each interval at its
+	// sessionFrame). Writes `<jamRoot>/<name>.als`. Returns the path, "" if nothing to
+	// export or the write failed. UI thread (jansson + file I/O). docs/LOOPER_DESIGN.md §12.
+	std::string exportAls(const std::string& jamRoot) {
+		akaudio::looper::AlsProject proj;
+		proj.title = baseNameOf(jamRoot);
+		double tempo = 0.0;
+
+		// Looper session → Session-View clips.
+		std::string looperDir = jamRoot + "/looper";
+		std::string sjson = readFile(looperDir + "/session.json");
+		if (!sjson.empty()) {
+			json_error_t err;
+			if (json_t* root = json_loads(sjson.c_str(), 0, &err)) {
+				if (json_t* b = json_object_get(root, "bpm"))
+					if (json_number_value(b) > 0) tempo = json_number_value(b);
+				json_t* tracks = json_object_get(root, "tracks");
+				if (json_is_array(tracks)) {
+					size_t i; json_t* v;
+					json_array_foreach(tracks, i, v) {
+						int idx = (int) json_integer_value(json_object_get(v, "index"));
+						const char* nm = json_string_value(json_object_get(v, "name"));
+						if (idx >= 0 && idx < TRACKS && nm) proj.looperTrackNames[idx] = nm;
+					}
+				}
+				json_t* slots = json_object_get(root, "slots");
+				if (json_is_array(slots)) {
+					size_t i; json_t* v;
+					json_array_foreach(slots, i, v) {
+						const char* file = json_string_value(json_object_get(v, "file"));
+						if (!file || !*file) continue;
+						akaudio::looper::AlsSessionClip c;
+						c.track = (int) json_integer_value(json_object_get(v, "track"));
+						c.scene = (int) json_integer_value(json_object_get(v, "slot"));
+						c.relPath = std::string("looper/") + file;
+						c.absPath = looperDir + "/" + file;
+						c.frames = (long) json_integer_value(json_object_get(v, "frames"));
+						c.sampleRate = json_number_value(json_object_get(v, "sampleRate"));
+						c.bpm = json_number_value(json_object_get(v, "bpm"));
+						if (c.bpm <= 0) c.bpm = tempo > 0 ? tempo : 120;
+						if (c.sampleRate <= 0) c.sampleRate = 48000;
+						c.fileSize = fileSizeOf(c.absPath);
+						c.name = (c.track >= 0 && c.track < TRACKS && !proj.looperTrackNames[c.track].empty())
+						         ? proj.looperTrackNames[c.track] : ("clip " + std::to_string(c.scene + 1));
+						proj.sessionClips.push_back(c);
+					}
+				}
+				json_decref(root);
+			}
+		}
+
+		// Recorder wire archive → Arrangement tracks (one per player + TX).
+		std::string idxAll = readFile(jamRoot + "/index.jsonl");
+		if (!idxAll.empty()) {
+			std::map<std::string, size_t> byKey;
+			std::istringstream ss(idxAll);
+			std::string line;
+			while (std::getline(ss, line)) {
+				if (line.empty()) continue;
+				json_error_t err;
+				json_t* o = json_loads(line.c_str(), 0, &err);
+				if (!o) continue;
+				bool tx = json_is_true(json_object_get(o, "tx"));
+				const char* user = json_string_value(json_object_get(o, "user"));
+				int chidx = (int) json_integer_value(json_object_get(o, "chidx"));
+				const char* file = json_string_value(json_object_get(o, "file"));
+				long frames = (long) json_integer_value(json_object_get(o, "frames"));
+				double sr = json_number_value(json_object_get(o, "sampleRate"));
+				double bpm = json_number_value(json_object_get(o, "bpm"));
+				long seq = (long) json_integer_value(json_object_get(o, "seq"));
+				json_t* sf = json_object_get(o, "sessionFrame");
+				if (file && *file && frames > 0) {
+					if (tempo <= 0 && bpm > 0) tempo = bpm;
+					std::string u = user ? user : "player";
+					std::string key = tx ? "tx" : (u + "#" + std::to_string(chidx));
+					size_t ti;
+					auto it = byKey.find(key);
+					if (it == byKey.end()) {
+						akaudio::looper::AlsArrangementTrack tr;
+						tr.isTx = tx;
+						tr.name = tx ? "you (tx)" : (u + (chidx > 0 ? " ch" + std::to_string(chidx) : ""));
+						ti = proj.arrangementTracks.size();
+						proj.arrangementTracks.push_back(tr);
+						byKey[key] = ti;
+					} else {
+						ti = it->second;
+					}
+					akaudio::looper::AlsArrangementClip c;
+					c.name = (tx ? "tx " : (u + " ")) + std::to_string(seq);
+					c.relPath = file;
+					c.absPath = jamRoot + "/" + file;
+					c.sessionFrame = sf ? (uint64_t) json_integer_value(sf) : 0;
+					c.frames = frames;
+					c.sampleRate = sr > 0 ? sr : 48000;
+					c.fileSize = fileSizeOf(c.absPath);
+					proj.arrangementTracks[ti].clips.push_back(c);
+				}
+				json_decref(o);
+			}
+		}
+
+		if (proj.sessionClips.empty() && proj.arrangementTracks.empty())
+			return "";
+		proj.tempo = tempo > 0 ? tempo : 120;
+		proj.meterNum = 4;
+
+		std::vector<uint8_t> bytes = akaudio::looper::buildAls(proj);
+		std::string out = jamRoot + "/" + baseNameOf(jamRoot) + ".als";
+		std::ofstream f(out, std::ios::binary | std::ios::trunc);
+		if (!f) return "";
+		f.write((const char*) bytes.data(), (std::streamsize) bytes.size());
+		return f ? out : std::string();
+	}
+
+	// The current jam's root folder (parent of the `looper/` session dir), or "" if unset.
+	std::string currentJamRoot() const {
+		const std::string suffix = "/looper";
+		if (resolvedSessionDir.size() > suffix.size()
+		        && resolvedSessionDir.compare(resolvedSessionDir.size() - suffix.size(), suffix.size(), suffix) == 0)
+			return resolvedSessionDir.substr(0, resolvedSessionDir.size() - suffix.size());
+		return "";
+	}
 
 	// An adjacent Ninjam, as a RecorderLink — used only to borrow the exact jam folder it
 	// archives to (so the looper's takes land beside the Recorder's players/ + tx/).
@@ -432,27 +591,34 @@ struct LooperDecor : Widget {
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
 		drawTxt(vg, FONT_BOLD, 10.f, 21.f, 15.f, lpText(), "LOOPER");
-		drawTxt(vg, FONT_BOLD, SCENE_X + SCENE_W / 2, NAME_Y + NAME_H / 2, 9.f, lpText(), "MULTI", NVG_ALIGN_CENTER);
+		// INS: the poly instrument input (its jack is a PolyPort with the gold collar ring).
+		drawTxt(vg, FONT_BOLD, SCENE_X + SCENE_W / 2, NAME_Y + NAME_H / 2, 9.f, lpText(), "INS", NVG_ALIGN_CENTER);
 
 		// ---- Controls column: Radio/Ninjam plate geometry (Theme.hpp) ----
-		const float labDy = mm2px(AK_PLATE_LABEL_DY_MM);
 		const NVGcolor bd = nvgRGBA(0, 0, 0, 0x55);
 		drawTxt(vg, FONT_BOLD, RX, Y_DUB - 20.f, 11.f, lpText(), "OVERDUB", NVG_ALIGN_CENTER);
 		drawTxt(vg, FONT_BOLD, RX, Y_REPEATS - 17.f, 11.f, lpText(), "REPEATS", NVG_ALIGN_CENTER);
 		drawTxt(vg, FONT_BOLD, RX, Y_DECAY - 17.f, 11.f, lpText(), "DECAY", NVG_ALIGN_CENTER);
-		// Two identical vertical stereo plates: CUE (cyan title) above, MIX below.
-		auto plate = [&](float top, const char* title, NVGcolor titleCol) {
+		// Three stacked plates: OUTS (poly per-track out) over CUE (cyan) over MIX.
+		auto plateBox = [&](float top, float h) {
 			nvgBeginPath(vg);
-			nvgRoundedRect(vg, RX - PLATE_W / 2, top, PLATE_W, PLATE_H, mm2px(AK_PLATE_R_MM));
+			nvgRoundedRect(vg, RX - PLATE_W / 2, top, PLATE_W, h, mm2px(AK_PLATE_R_MM));
 			nvgFillColor(vg, akPlate());
 			nvgFill(vg);
 			nvgStrokeColor(vg, bd);
 			nvgStrokeWidth(vg, 1.f);
 			nvgStroke(vg);
-			drawTxt(vg, FONT_BOLD, RX, top + labDy, 11.f, titleCol, title, NVG_ALIGN_CENTER);
+		};
+		auto plate = [&](float top, const char* title, NVGcolor titleCol) {
+			plateBox(top, PLATE_H);
+			drawTxt(vg, FONT_BOLD, RX, top + PLATE_TITLE_DY, 11.f, titleCol, title, NVG_ALIGN_CENTER);
 			drawTxt(vg, FONT_BOLD, PLATE_LAB_X, plateLY(top), 11.f, akPlateText(), "L", NVG_ALIGN_CENTER);
 			drawTxt(vg, FONT_BOLD, PLATE_LAB_X, plateRY(top), 11.f, akPlateText(), "R", NVG_ALIGN_CENTER);
 		};
+		// OUTS: a compact single-jack poly plate (per-track direct out); its jack is a
+		// PolyPort (gold collar ring).
+		plateBox(OUTS_TOP, OUTS_H);
+		drawTxt(vg, FONT_BOLD, RX, OUTS_TOP + PLATE_TITLE_DY, 11.f, akPlateText(), "OUTS", NVG_ALIGN_CENTER);
 		plate(CUE_TOP, "CUE", akCueCyan());
 		plate(MIX_TOP, "MIX", akPlateText());
 		// "AK" maker mark at the bottom, where Radio/Ninjam put it.
@@ -592,7 +758,7 @@ struct SlotButton : HoverSwitch {
 		const float w = box.size.x, h = box.size.y;
 		int state = akaudio::looper::EMPTY, pending = akaudio::looper::NONE, reps = 0, repCount = 0;
 		float decay = 0.f, gain = 1.f;
-		bool sel = false, playable = true;
+		bool sel = false, playable = true, overdubbing = false;
 		const float* thumb = nullptr;
 		float preview[THUMB_BINS];
 		if (lp) {
@@ -605,6 +771,7 @@ struct SlotButton : HoverSwitch {
 			gain = sl.gain.load(std::memory_order_relaxed);
 			sel = lp->selected.load(std::memory_order_relaxed) == t * SLOTS + s;
 			playable = sl.playable.load(std::memory_order_relaxed);
+			overdubbing = sl.overdubbing.load(std::memory_order_relaxed);
 			thumb = sl.thumb;
 		} else if ((t * 3 + s * 5) % 7 < 2) {
 			// Library/browser preview: a few fake clips so the panel reads as a looper.
@@ -643,7 +810,7 @@ struct SlotButton : HoverSwitch {
 		// Recording (or overdubbing): the interval being recorded fills the slot
 		// left → right, like a recording clip — red while recording, amber over the
 		// take for overdub. The bins come from the track's rolling recorder.
-		if (lp && (state == akaudio::looper::RECORDING || pending == akaudio::looper::OVERDUB)) {
+		if (lp && (state == akaudio::looper::RECORDING || overdubbing)) {
 			akaudio::looper::Track& tr = lp->engine.tracks[t];
 			float ph = lp->phase.load(std::memory_order_relaxed);
 			const float bw = (w - 4.f) / THUMB_BINS;
@@ -675,13 +842,15 @@ struct SlotButton : HoverSwitch {
 			if (decay < -0.01f) tag += "\xe2\x86\x98";
 			drawTxt(vg, FONT_BOLD, w - 2.5f, 5.f, 7.f, lpText(), tag, NVG_ALIGN_RIGHT);
 		}
-		// Armed: blinking outline colored by the queued operation.
-		if (pending != akaudio::looper::NONE) {
+		// Armed: blinking outline colored by the queued operation; a steady amber outline
+		// marks the cell that is actively overdubbing (continuous, not a queued action).
+		if (pending != akaudio::looper::NONE || overdubbing) {
 			double tm = system::getTime();
-			float a = 0.45f + 0.55f * (float) (0.5 + 0.5 * std::sin(tm * 2.0 * M_PI * 2.5));
-			NVGcolor c = pending == akaudio::looper::CAPTURE ? lpRed()
+			float a = overdubbing ? 0.9f
+			                      : 0.45f + 0.55f * (float) (0.5 + 0.5 * std::sin(tm * 2.0 * M_PI * 2.5));
+			NVGcolor c = overdubbing ? lpAmber()
+			           : pending == akaudio::looper::CAPTURE ? lpRed()
 			           : pending == akaudio::looper::LAUNCH ? lpGreen()
-			           : pending == akaudio::looper::OVERDUB ? lpAmber()
 			           : lpTextDim();
 			nvgBeginPath(vg);
 			nvgRoundedRect(vg, 1.f, 1.f, w - 2.f, h - 2.f, 2.5f);
@@ -809,6 +978,30 @@ struct GlyphButton : HoverSwitch {
 	}
 };
 
+// MindMeld-style poly port: the standard PJ301M with a gold ring drawn inside the jack
+// (between the centre hole and the collar), so a poly I/O (the INS input, the OUTS
+// per-track output) reads as poly at a glance — matching how MindMeld colours the ring in
+// the jack, not a halo around it. Colours + proportions taken from MindMeldModular's
+// res/comp/jack-poly.svg (© 2019-2023 Marc Boulé & Steve Baker, GPL-3): the gold is a
+// vertical gradient #af9420→#99841c filling an annulus at 0.45–0.64 of the port radius
+// (their hole r=5.1, gold r=7.3 in an 11.34-radius jack).
+struct PolyPort : ThemedPJ301MPort {
+	void draw(const DrawArgs& args) override {
+		ThemedPJ301MPort::draw(args);
+		NVGcontext* vg = args.vg;
+		const float R = box.size.x / 2.f, cx = R, cy = box.size.y / 2.f;
+		const float outerR = R * 0.6437f, innerR = R * 0.4497f;
+		const float midR = (outerR + innerR) / 2.f, w = outerR - innerR;
+		NVGpaint gold = nvgLinearGradient(vg, cx, cy - outerR, cx, cy + outerR,
+			nvgRGB(0xaf, 0x94, 0x20), nvgRGB(0x99, 0x84, 0x1c));
+		nvgBeginPath(vg);
+		nvgCircle(vg, cx, cy, midR);
+		nvgStrokeWidth(vg, w);
+		nvgStrokePaint(vg, gold);
+		nvgStroke(vg);
+	}
+};
+
 struct LooperWidget : ModuleWidget {
 	Looper* lp = nullptr;
 	// Knob <-> selected-slot reconcile state (UI thread).
@@ -862,7 +1055,7 @@ struct LooperWidget : ModuleWidget {
 			tx->box.size = Vec(18.f, stopH());
 			addParam(tx);
 		}
-		addInput(createInputCentered<ThemedPJ301MPort>(Vec(SCENE_X + SCENE_W / 2, JACK_Y), module, Looper::MULTI_INPUT));
+		addInput(createInputCentered<PolyPort>(Vec(SCENE_X + SCENE_W / 2, JACK_Y), module, Looper::MULTI_INPUT));
 		for (int s = 0; s < SLOTS; s++) {
 			GlyphButton* sc = createParam<GlyphButton>(Vec(SCENE_X, GRID_Y + s * ROW_H), module, Looper::SCENE_PARAM + s);
 			sc->box.size = Vec(SCENE_W, BTN_H); sc->kind = GlyphButton::SCENE; sc->lp = module; sc->idx = s; sc->momentary = true;
@@ -875,6 +1068,7 @@ struct LooperWidget : ModuleWidget {
 		// Bottom I/O strip.
 		addParam(createParamCentered<RoundSmallBlackKnob>(Vec(RX, Y_REPEATS), module, Looper::REPEATS_PARAM));
 		addParam(createParamCentered<RoundSmallBlackKnob>(Vec(RX, Y_DECAY), module, Looper::DECAY_PARAM));
+		addOutput(createOutputCentered<PolyPort>(Vec(RX, OUTS_JACK_Y), module, Looper::POLY_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(PLATE_JACK_X, plateLY(CUE_TOP)), module, Looper::CUE_L_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(PLATE_JACK_X, plateRY(CUE_TOP)), module, Looper::CUE_R_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(PLATE_JACK_X, plateLY(MIX_TOP)), module, Looper::MIX_L_OUTPUT));
@@ -965,6 +1159,22 @@ struct LooperWidget : ModuleWidget {
 		menu->addChild(createMenuItem("Open this session's folder", "", [cur]() {
 			if (!cur.empty()) system::openDirectory(cur);
 		}, cur.empty()));
+
+		// Export the whole jam (our loops + every player's intervals) as an Ableton Live
+		// Set. Pick the jam folder (defaults to the current one); writes <folder>/<name>.als.
+		menu->addChild(createMenuItem("Export Ableton Live set (.als)\xe2\x80\xa6", "", [m]() {
+			std::string def = m->currentJamRoot();
+			char* pick = osdialog_file(OSDIALOG_OPEN_DIR, def.empty() ? NULL : def.c_str(), NULL, NULL);
+			if (!pick) return;
+			std::string root = pick;
+			std::free(pick);
+			std::string out = m->exportAls(root);
+			if (!out.empty())
+				system::openDirectory(root);
+			else
+				osdialog_message(OSDIALOG_INFO, OSDIALOG_OK,
+					"No jam found in that folder.\nPick a jam folder that contains looper/session.json or index.jsonl.");
+		}));
 	}
 };
 

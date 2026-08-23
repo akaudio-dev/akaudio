@@ -143,6 +143,8 @@ unittest: $(UT_OGG_OBJ)
 	$(CXX) -std=c++11 -O1 -I src test/jamclock_test.cpp -o build/jamclock_test && build/jamclock_test
 	$(CXX) -std=c++11 -O1 -I src test/looper_engine_test.cpp src/looper/LooperEngine.cpp \
 	  src/looper/LooperWorker.cpp -lpthread -o build/looper_engine_test && build/looper_engine_test
+	$(CXX) -std=c++11 -O1 -I src test/als_export_test.cpp src/looper/AlsExport.cpp \
+	  -o build/als_export_test && build/als_export_test
 	rm -rf build/session_test_out
 	$(CXX) -std=c++11 -O1 -I src $(UT_OGG_INC) test/session_test.cpp src/looper/Session.cpp \
 	  src/net/ninjam/NjEncoder.cpp $(UT_OGG_OBJ) -lpthread -o build/session_test \

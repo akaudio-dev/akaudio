@@ -122,6 +122,7 @@ int main() {
 	Sim sim;
 	MockSink sink;
 	sim.eng.setSink(&sink); // M4: observe the disk jobs (SAVE / CLEAR_FILE) the commits emit
+	sim.eng.declickEnabled.store(false); // off for the sample-exact playback checks below
 	sim.eng.start();
 	Slot& s0 = sim.slot(0);
 
@@ -177,23 +178,33 @@ int main() {
 	sim.interval(-1);                       // wrap with decay 0 → gain back to 1
 	CHECK(std::fabs(s0.gain.load() - 1.f) < 1e-6f, "gain 1 again (got %f)", s0.gain.load());
 
-	// ---- Overdub: press while playing, play interval 2 on top → take = 1 + 2 ----
-	sim.interval(2, true, [&](int f) { if (f == 100) sim.eng.pressSlot(0, 0, true); if (f == 101) Sim::nap(); });
-	CHECK(s0.pending.load() == OVERDUB, "overdub queued (pending %d)", s0.pending.load());
-	sim.interval(-1);
-	CHECK(s0.state.load() == PLAYING && s0.pending.load() == NONE, "overdub committed");
+	// ---- Continuous overdub: OVERDUB latch on + selection → the selected playing cell
+	// layers this interval's input onto its take each boundary, until the latch is off or
+	// the selection changes. slot 0 is playing signal 1. ----
+	sim.eng.overdubSel.store(0 * MAX_SLOTS + 0);   // select slot 0
+	sim.eng.overdubMode.store(true);           // engage the latch
+	CHECK(!s0.overdubbing.load(), "not overdubbing until the boundary arms it");
+	sim.interval(2);                           // boundary arms; this interval folds signal 2
+	CHECK(s0.overdubbing.load(), "selected playing cell overdubs while latched");
+	CHECK(s0.state.load() == PLAYING, "overdubbing cell keeps playing");
+	sim.interval(-1);                          // boundary commits: take = signal 1 + signal 2
 	{
 		bool ok = true;
 		for (int f = 0; f < N && ok; f++) {
 			float el = Sim::sig(1, f) + Sim::sig(2, f);
-			float er = -Sim::sig(1, f) + -Sim::sig(2, f);
+			float er = -Sim::sig(1, f) - Sim::sig(2, f);
 			if (std::fabs(sim.outL[f] - el) > 1e-6f || std::fabs(sim.outR[f] - er) > 1e-6f) {
 				std::printf("   overdub mismatch at %d: %.6f vs %.6f\n", f, sim.outL[f], el);
 				ok = false;
 			}
 		}
-		CHECK(ok, "overdubbed loop = original + what was played");
+		CHECK(ok, "overdub layered this interval's input onto the loop");
 	}
+	sim.eng.overdubMode.store(false);          // disengage → overdub stops after committing
+	sim.interval(-1);                          // commits the trailing (silent) overdub, no re-arm
+	CHECK(!s0.overdubbing.load(), "overdub stops when the latch is disengaged");
+	CHECK(s0.state.load() == PLAYING, "loop keeps playing after overdub stops");
+	sim.eng.overdubSel.store(-1);              // clear selection for the sections below
 
 	// ---- A silent recording is refused (slot goes back to Empty) ----
 	Slot& s1 = sim.slot(1);
@@ -280,6 +291,27 @@ int main() {
 	CHECK(sim.eng.allocations.load() <= 20, "allocation count bounded (got %ld)", sim.eng.allocations.load());
 
 	sim.eng.stop();
+
+	// ---- Declick: a playing loop fades each cycle's ends to 0, so the loop point is
+	// click-free, while the body plays sample-exactly ----
+	{
+		Sim d; // fresh engine: declick on by default
+		d.eng.start();
+		d.interval(0);                                             // warm-up (rolling buffers)
+		d.interval(-1, true, [&](int f) { if (f == 5) d.eng.pressSlot(0, 0, false); }); // arm capture
+		d.interval(2);                                             // records signal 2 as the take
+		d.interval(-1);                                            // committed + playing; outL = the loop
+		CHECK(d.slot(0).state.load() == PLAYING, "declick: loop is playing");
+		CHECK(std::fabs(d.outL[0]) < 0.02f, "declick: loop starts near zero (got %.4f)", d.outL[0]);
+		CHECK(std::fabs(d.outL[d.n - 1]) < 0.02f, "declick: loop ends near zero (got %.4f)", d.outL[d.n - 1]);
+		float mid = Sim::sig(2, d.n / 2);
+		CHECK(std::fabs(d.outL[d.n / 2] - mid) < 1e-4f, "declick: loop body is unattenuated (got %.4f want %.4f)", d.outL[d.n / 2], mid);
+		// The fade is short: well before the midpoint the loop is already at full level.
+		int q = d.n / 8;
+		CHECK(std::fabs(d.outL[q] - Sim::sig(2, q)) < 1e-4f, "declick: fade is short (full level by n/8)");
+		d.eng.stop();
+	}
+
 	std::printf("%s (%d failures)\n", fails ? "FAIL" : "PASS: LooperEngine", fails);
 	return fails ? 1 : 0;
 }
