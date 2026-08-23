@@ -62,13 +62,13 @@ struct Recorder : Module {
 
 	json_t* dataToJson() override {
 		json_t* root = json_object();
-		json_object_set_new(root, "sessionBase", json_string(sessionBase.c_str()));
+		json_object_set_new(root, "sessionBase", json_string(akaudio::collapseHome(sessionBase).c_str()));
 		return root;
 	}
 	void dataFromJson(json_t* root) override {
 		json_t* j = json_object_get(root, "sessionBase");
 		if (j && json_string_value(j) && *json_string_value(j))
-			sessionBase = json_string_value(j);
+			sessionBase = akaudio::expandHome(json_string_value(j));
 	}
 };
 

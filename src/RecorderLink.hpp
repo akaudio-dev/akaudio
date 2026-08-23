@@ -14,13 +14,28 @@
 namespace akaudio {
 
 // Default place for recorded jams: ~/Music/jams (discoverable, unlike Rack's user dir).
-inline std::string defaultJamsDir() {
+inline std::string homeDir() {
 #ifdef _WIN32
 	const char* h = std::getenv("USERPROFILE");
 #else
 	const char* h = std::getenv("HOME");
 #endif
-	return std::string(h && *h ? h : ".") + "/Music/jams";
+	return std::string(h && *h ? h : "");
+}
+inline std::string defaultJamsDir() { return homeDir() + "/Music/jams"; }
+
+// Store paths under the home dir as "~/..." so a shared patch never carries the real
+// user name; a path outside home is stored verbatim.
+inline std::string collapseHome(const std::string& p) {
+	std::string h = homeDir();
+	if (!h.empty() && p.compare(0, h.size(), h) == 0)
+		return "~" + p.substr(h.size());
+	return p;
+}
+inline std::string expandHome(const std::string& p) {
+	if (!p.empty() && p[0] == '~')
+		return homeDir() + p.substr(1);
+	return p;
 }
 
 struct RecStatusRow {
