@@ -653,21 +653,26 @@ Looper takes and received/sent intervals are all stamped on it (RX via
 `mixFrameStart + pullOffset`, no wide-ring side channel needed), which is what lets
 the `.als` place the whole jam as heard. See `docs/LOOPER_DESIGN.md` §7.
 
-## Resume point — 2026-08-22 (end of session)
+## Resume point — 2026-08-23 (end of session)
 
-On `main`, pushed through `1cbd281`. **Done + working on a real jam:** UX scaffold;
-M0 (`src/JamClock.hpp`, Ninjam publishes the integer interval clock to Looper
-expanders); M1 (`src/looper/` Rack-free engine — real looping, record-next-interval
-capture, overdub, repeats/decay, CUE bus, submix + safety limiter, TX-to-Ninjam over
-the expander so no MIX→IN cable); M3 (`src/net/ninjam/NjArchive.*` +
-`src/Recorder.cpp` + `src/RecorderLink.hpp` — the wire archive: raw per-player + TX
-OGG intervals to `~/Music/jams/<stamp>_<room>/` + `index.jsonl`). Tests: `make
-unittest` (jamclock / looper_engine / archive, all pass). Recorder folder is
-right-click-configurable; REC never persists armed.
+On `main`. **Done + working:** UX scaffold; M0, M1, M3 (as below), and now **M4** —
+the Looper's own take files. `src/looper/Session.{hpp,cpp}` is a Rack-free `LooperSink`:
+on each commit the audio thread enqueues `SAVE`/`CLEAR_FILE` on the worker's SPSC queue;
+the worker encodes each take to raw OGG (vendored libvorbis) and writes
+`t<t>_s<s>.ogg` + `session.json` atomically under `<base>/<stamp>_<room>/looper/`,
+retiring overwritten/cleared takes into `history/`. Base defaults to `~/Music/jams`
+(menu-configurable, persisted templated); the Looper borrows Ninjam's exact jam folder
+via `RecorderLink` when a Recorder is armed (else `<stamp>_session`), frozen after the
+first write. Buffer lifetime proven under ASan. Tests: `make unittest` now also runs
+`session_test` (all pass). Built + installed as v2.0.7. Earlier milestones: M0
+(`src/JamClock.hpp`, Ninjam publishes the integer interval clock); M1 (`src/looper/`
+engine — looping, capture/overdub, repeats/decay, CUE, submix + limiter, TX-over-expander);
+M3 (`NjArchive` + `Recorder` — the wire archive).
 
-**Next: M4** — the Looper's *own* take files (≤64 raw OGG grid + `session.json` +
-`history/` on overwrite, §5.4/§10/§11), so the user's loops survive a reload and reach
-a DAW. Separate from the Recorder's wire archive.
+**Next (v2 / open items):** the **clip loader** — reload currently comes up with an
+empty grid; the files + `session.json` are on disk, so restoring the grid on patch load
+is the natural next step. Then the DAW project generators (`.als`/`.rpp`), and the §7.3
+exact playout-start timestamp (M3 uses a coarse per-block one).
 
 **Open question to decide (§9.3):** losing the Ninjam clock mid-jam falls back to the
 simulated clock (a regrid) → mismatched-length takes greyed → playing loops can stop.

@@ -6,17 +6,22 @@
 // jacks, clock source, persistence) and the panel widgets. The looper itself —
 // always-record, boundary-quantized capture/launch/stop/overdub, scenes, repeats and
 // decay, the submix — is the Rack-free LooperEngine in src/looper/ (M1), driven by an
-// adjacent Ninjam's JamClockMessage (M0) or, without one, a simulated clock.
-// Not yet: session files (M4). Panel polish: M5.
+// adjacent Ninjam's JamClockMessage (M0) or, without one, a simulated clock. Committed
+// takes are encoded to OGG + indexed on disk by looper/Session (M4). Panel polish: M5.
 
 #include "plugin.hpp"
 #include "Theme.hpp"
 #include "JamClock.hpp"
+#include "RecorderLink.hpp"
 #include "looper/LooperEngine.hpp"
+#include "looper/Session.hpp"
+
+#include <osdialog.h>
 
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <ctime>
 
 namespace {
 
@@ -126,6 +131,15 @@ struct Looper : Module {
 	// boundary commits, playback, submix. Its worker thread owns all buffers.
 	akaudio::looper::LooperEngine engine;
 
+	// M4: the disk side. The engine's worker hands committed takes here to be encoded to
+	// OGG + indexed under `<sessionBase>/<stamp>_<room>/looper/` (shared with a Recorder's
+	// jam folder when one is armed). UI thread points it at the right folder (syncSession).
+	akaudio::looper::Session session;
+	std::string sessionBase = akaudio::defaultJamsDir(); // where jam folders go (persisted, templated)
+	std::string ownSessionFolder;      // <stamp>_session when jamming without a Recorder (formed once)
+	std::string resolvedSessionDir;    // the looper/ dir last handed to the session
+	std::string appliedSessionBase;    // sessionBase at the last resolve (menu change ⇒ re-resolve)
+
 	// Editable track labels (UI thread only; persisted). Default "-01-" … "-08-".
 	std::string trackNames[TRACKS];
 
@@ -192,6 +206,7 @@ struct Looper : Module {
 		configOutput(MIX_R_OUTPUT, "Mix R (to Ninjam IN)");
 		configOutput(CUE_L_OUTPUT, "Cue L (private / non-transmitting tracks â your monitor)");
 		configOutput(CUE_R_OUTPUT, "Cue R (private / non-transmitting tracks â your monitor)");
+		engine.setSink(&session); // takes are encoded + indexed by the session (M4)
 		engine.start();
 	}
 
@@ -329,9 +344,57 @@ struct Looper : Module {
 	void clearSlot(int t, int s) { engine.requestClear(t, s); }
 	int pendingCount() const { return engine.pendingCount(); }
 
+	// An adjacent Ninjam, as a RecorderLink — used only to borrow the exact jam folder it
+	// archives to (so the looper's takes land beside the Recorder's players/ + tx/).
+	akaudio::RecorderLink* adjacentRecorderLink() {
+		Module* l = leftExpander.module;
+		if (l && l->model == modelNinjam) return dynamic_cast<akaudio::RecorderLink*>(l);
+		Module* r = rightExpander.module;
+		if (r && r->model == modelNinjam) return dynamic_cast<akaudio::RecorderLink*>(r);
+		return nullptr;
+	}
+
+	// Point the session at the right `.../looper` folder and keep its manifest metadata
+	// current (UI thread, from the widget's step()). We prefer sharing the exact folder a
+	// Recorder is archiving to; otherwise our own `<stamp>_session`. The folder is frozen
+	// once a take has been written, so arming a Recorder mid-jam never splits takes across
+	// two folders — but a menu change of the base folder re-resolves.
+	void syncSession() {
+		std::string base, folder;
+		akaudio::RecorderLink* rl = adjacentRecorderLink();
+		if (rl && !rl->recSessionName().empty()) {
+			base = akaudio::expandHome(rl->sessionBase());
+			folder = rl->recSessionName();
+		} else {
+			base = akaudio::expandHome(sessionBase);
+			if (ownSessionFolder.empty()) {
+				std::time_t t = std::time(nullptr);
+				char stamp[32];
+				std::strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H%M", std::localtime(&t));
+				ownSessionFolder = std::string(stamp) + "_session";
+			}
+			folder = ownSessionFolder;
+		}
+		std::string dir = base + "/" + folder + "/looper";
+		bool baseChanged = sessionBase != appliedSessionBase;
+		if (resolvedSessionDir.empty() || !session.hasWritten() || baseChanged) {
+			if (dir != resolvedSessionDir) {
+				resolvedSessionDir = dir;
+				session.setDir(dir);
+				session.setRoom(folder);
+			}
+			appliedSessionBase = sessionBase;
+		}
+		for (int t = 0; t < TRACKS; t++)
+			session.setTrackName(t, trackNames[t]);
+	}
+
 	json_t* dataToJson() override {
 		json_t* root = json_object();
 		json_object_set_new(root, "simSecondsIdx", json_integer(simSecondsIdx.load()));
+		// Session folder (templated with ~ so a shared patch carries no user name). No audio
+		// in the patch: on reload the grid is empty and the files stay on disk (loader is v2).
+		json_object_set_new(root, "sessionBase", json_string(akaudio::collapseHome(sessionBase).c_str()));
 		json_object_set_new(root, "defRepeats", json_integer(engine.defRepeats.load()));
 		json_object_set_new(root, "defDecayDb", json_real(engine.defDecayDb.load()));
 		json_t* names = json_array();
@@ -344,6 +407,10 @@ struct Looper : Module {
 		json_t* j;
 		if ((j = json_object_get(root, "simSecondsIdx")))
 			simSecondsIdx.store(clamp((int) json_integer_value(j), 0, N_SIM_SECONDS - 1));
+		if ((j = json_object_get(root, "sessionBase")) && json_is_string(j)) {
+			const char* b = json_string_value(j);
+			if (b && *b) sessionBase = akaudio::expandHome(b);
+		}
 		if ((j = json_object_get(root, "defRepeats"))) engine.defRepeats.store((int) json_integer_value(j));
 		if ((j = json_object_get(root, "defDecayDb"))) engine.defDecayDb.store((float) json_number_value(j));
 		if ((j = json_object_get(root, "trackNames")) && json_is_array(j)) {
@@ -823,6 +890,7 @@ struct LooperWidget : ModuleWidget {
 	void step() override {
 		ModuleWidget::step();
 		if (!lp) return;
+		lp->syncSession(); // M4: keep the on-disk session folder + manifest current
 		int sel = lp->selected.load(std::memory_order_relaxed);
 		ParamQuantity* rq = lp->paramQuantities[Looper::REPEATS_PARAM];
 		ParamQuantity* dq = lp->paramQuantities[Looper::DECAY_PARAM];
@@ -855,13 +923,15 @@ struct LooperWidget : ModuleWidget {
 		if (curRep != lastRep) { lastRep = curRep; rq->setValue(curRep); }
 		float curDec = sl.decayDb.load(std::memory_order_relaxed);
 		if (curDec != lastDec) { lastDec = curDec; dq->setValue(curDec); }
+		// A repeats/decay change of an already-saved slot updates its manifest entry.
+		lp->session.setSlotSettings(sel / SLOTS, sel % SLOTS,
+			sl.repeats.load(std::memory_order_relaxed), sl.decayDb.load(std::memory_order_relaxed));
 	}
 
 	void appendContextMenu(Menu* menu) override {
 		Looper* m = lp;
 		if (!m) return;
 		menu->addChild(new MenuSeparator);
-		menu->addChild(createMenuLabel("UX scaffold \xe2\x80\x94 no audio stored"));
 		menu->addChild(createIndexSubmenuItem("Simulated interval (when no Ninjam clock)", {"2 s", "4 s", "8 s", "16 s", "32 s"},
 			[m]() { return (size_t) m->simSecondsIdx.load(std::memory_order_relaxed); },
 			[m](size_t i) { m->simSecondsIdx.store((int) i, std::memory_order_relaxed); }));
@@ -879,6 +949,22 @@ struct LooperWidget : ModuleWidget {
 					m->clearSlot(t, s);
 			m->selected.store(-1, std::memory_order_relaxed);
 		}));
+
+		// Session files (M4): loops are saved as OGG under this folder, sharing a Recorder's
+		// jam folder when one is armed. Takes survive a reload (the v2 loader restores them).
+		menu->addChild(new MenuSeparator);
+		menu->addChild(createMenuLabel("Loops saved to: " + akaudio::collapseHome(m->sessionBase)));
+		menu->addChild(createMenuItem("Choose folder\xe2\x80\xa6", "", [m]() {
+			char* path = osdialog_file(OSDIALOG_OPEN_DIR, m->sessionBase.c_str(), NULL, NULL);
+			if (path) { m->sessionBase = path; std::free(path); }
+		}));
+		menu->addChild(createMenuItem("Reset to ~/Music/jams", "", [m]() {
+			m->sessionBase = akaudio::defaultJamsDir();
+		}, m->sessionBase == akaudio::defaultJamsDir()));
+		std::string cur = m->resolvedSessionDir;
+		menu->addChild(createMenuItem("Open this session's folder", "", [cur]() {
+			if (!cur.empty()) system::openDirectory(cur);
+		}, cur.empty()));
 	}
 };
 

@@ -63,13 +63,39 @@ struct TrackIn {
 	float l, r;   // ±1
 };
 
+// Metadata for a committed take, handed to the sink so it can encode + index the file
+// (docs §10). All plain data — no Rack, no Buf ownership.
+struct TakeMeta {
+	int frames;
+	float sampleRate;
+	int bpm, bpi;
+	uint64_t startFrame; // session-timeline position of the take's first frame
+	float peak;
+	int repeats;
+	float decayDb;
+};
+
+// The disk side of the Looper (M4): the worker hands committed takes here to be encoded
+// to OGG and indexed, and overwritten/cleared takes to be retired into history/. The
+// engine calls it ONLY from the worker thread (never the audio thread), so implementations
+// may allocate / do file I/O freely. `pcm` is read-only and valid for the call's duration
+// (a committed take is immutable; its RELEASE is always ordered after its save). Left null
+// in tests that don't exercise persistence, so the engine/worker carry no encoder link.
+struct LooperSink {
+	virtual ~LooperSink() {}
+	virtual void save(int track, int slot, const float* pcm, const TakeMeta& meta) = 0;
+	virtual void clear(int track, int slot) = 0; // retire the slot's live file into history/
+	virtual void flush() = 0;                    // write the manifest if metadata changed
+};
+
 // Audio → worker.
 struct Cmd {
-	enum Kind { ALLOC, OVERDUB_COPY, RELEASE } kind;
+	enum Kind { ALLOC, OVERDUB_COPY, RELEASE, SAVE, CLEAR_FILE } kind;
 	int track, slot, frames, upto;
 	uint32_t seq;
-	Buf* a; // OVERDUB_COPY: the take to copy; RELEASE: the buffer
-	Buf* b; // OVERDUB_COPY: the rolling buffer whose [0, upto) is added
+	Buf* a;      // OVERDUB_COPY: the take to copy; RELEASE: the buffer; SAVE: the take to encode
+	Buf* b;      // OVERDUB_COPY: the rolling buffer whose [0, upto) is added
+	TakeMeta meta; // SAVE only
 };
 // Worker → audio.
 struct Reply {
@@ -139,6 +165,10 @@ public:
 	LooperEngine(const LooperEngine&) = delete;
 	LooperEngine& operator=(const LooperEngine&) = delete;
 
+	// Disk persistence sink (M4). Set before start(); the worker calls it. Null = takes
+	// stay in RAM only (the M1 behaviour, and what the engine tests use).
+	void setSink(LooperSink* s) { sink = s; }
+
 	// Worker thread lifecycle (UI/setup thread).
 	void start();
 	void stop();
@@ -162,6 +192,7 @@ public:
 	Slot& slotAt(int idx) { return tracks[idx / MAX_SLOTS].slots[idx % MAX_SLOTS]; }
 
 	Track tracks[MAX_TRACKS];
+	LooperSink* sink = nullptr;          // worker-thread disk writer (M4); null = RAM only
 	std::atomic<int> defRepeats{0};      // defaults for new captures
 	std::atomic<float> defDecayDb{0.f};
 	std::atomic<int> intervalFrames{0};  // current N (UI)
@@ -174,6 +205,8 @@ private:
 	void drainReplies();
 	void drainIntents();
 	void requestRec(int t);
+	void saveTake(int t, int s);  // enqueue an OGG save of the slot's committed take (M4)
+	void clearFile(int t, int s); // enqueue a retire of the slot's live file into history/ (M4)
 	void release(Buf* b);
 	void setPlaying(Track& tr, int s);
 	void refuse(Slot& sl, double now) { sl.flashAt.store(now, std::memory_order_relaxed); }

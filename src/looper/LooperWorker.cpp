@@ -100,15 +100,36 @@ void LooperWorker::run() {
 				case Cmd::RELEASE:
 					recycle(c.a);
 					break;
+				case Cmd::SAVE:
+					// Encode + index a committed take (M4). The buffer is read-only and stays
+					// valid: its RELEASE, if any, is queued after this. Slow (OGG encode + I/O),
+					// but takes commit at most a few per interval and intervals are seconds long.
+					if (engine.sink && c.a)
+						engine.sink->save(c.track, c.slot, c.a->pcm, c.meta);
+					break;
+				case Cmd::CLEAR_FILE:
+					if (engine.sink)
+						engine.sink->clear(c.track, c.slot);
+					break;
 			}
 		}
+		if (engine.sink)
+			engine.sink->flush(); // write the manifest if UI edits (names / settings) dirtied it
 		if (!did)
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
-	// Drain what's left so nothing leaks on shutdown.
-	while (engine.cmds.pop(c))
+	// Drain what's left so nothing leaks on shutdown; finish any pending saves first so a
+	// just-captured take reaches disk even if the module is closing.
+	while (engine.cmds.pop(c)) {
 		if (c.kind == Cmd::RELEASE)
 			recycle(c.a);
+		else if (c.kind == Cmd::SAVE && engine.sink && c.a)
+			engine.sink->save(c.track, c.slot, c.a->pcm, c.meta);
+		else if (c.kind == Cmd::CLEAR_FILE && engine.sink)
+			engine.sink->clear(c.track, c.slot);
+	}
+	if (engine.sink)
+		engine.sink->flush();
 }
 
 } // namespace looper

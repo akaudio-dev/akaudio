@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -22,6 +23,28 @@ using namespace akaudio::looper;
 
 static int fails = 0;
 #define CHECK(cond, ...) do { if (!(cond)) { fails++; std::printf("FAIL line %d: ", __LINE__); std::printf(__VA_ARGS__); std::printf("\n"); } } while (0)
+
+// Stands in for looper::Session: records the disk jobs the engine hands the worker, and
+// touches every sample of each saved take (an ASan build turns a use-after-free here into
+// a hard failure — the buffer must outlive its SAVE). No OGG/file I/O, so it links with
+// nothing extra.
+struct MockSink : LooperSink {
+	std::mutex m;
+	int saves = 0, clears = 0, flushes = 0, bad = 0;
+	void save(int, int, const float* pcm, const TakeMeta& meta) override {
+		std::lock_guard<std::mutex> lk(m);
+		saves++;
+		if (!pcm || meta.frames <= 0) { bad++; return; }
+		volatile double sum = 0;
+		for (int i = 0; i < meta.frames * 2; i++) sum += pcm[i]; // reads the whole take
+		(void) sum;
+	}
+	void clear(int, int) override { std::lock_guard<std::mutex> lk(m); clears++; }
+	void flush() override { std::lock_guard<std::mutex> lk(m); flushes++; }
+	int nSaves() { std::lock_guard<std::mutex> lk(m); return saves; }
+	int nClears() { std::lock_guard<std::mutex> lk(m); return clears; }
+	int nBad() { std::lock_guard<std::mutex> lk(m); return bad; }
+};
 
 static const int N = 4800;       // 0.1 s @ 48k
 static const float SR = 48000.f;
@@ -97,6 +120,8 @@ struct Sim {
 
 int main() {
 	Sim sim;
+	MockSink sink;
+	sim.eng.setSink(&sink); // M4: observe the disk jobs (SAVE / CLEAR_FILE) the commits emit
 	sim.eng.start();
 	Slot& s0 = sim.slot(0);
 
@@ -244,6 +269,11 @@ int main() {
 		CHECK(cueHas, "private track's live input IS in CUE");
 	}
 	sim.tx_ = true;
+
+	// ---- M4: commits reached the disk sink with valid, fully-readable take buffers ----
+	CHECK(sink.nSaves() >= 5, "captures + overdub were handed to the sink (got %d)", sink.nSaves());
+	CHECK(sink.nBad() == 0, "every SAVE carried a non-null take buffer of its full length");
+	CHECK(sink.nClears() >= 1, "cleared slots were retired via the sink (got %d)", sink.nClears());
 
 	CHECK(sim.eng.tracks[0].bufs.load() <= 3, "at most 3 rolling buffers per track (got %d)", sim.eng.tracks[0].bufs.load());
 	std::printf("worker allocations: %ld\n", sim.eng.allocations.load());

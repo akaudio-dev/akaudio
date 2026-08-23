@@ -64,6 +64,37 @@ void LooperEngine::requestRec(int t) {
 		tr.recPending = true;
 }
 
+// Hand a freshly committed take to the sink for encoding + indexing (M4). Runs on the
+// audio thread but only enqueues a POD — the encode happens on the worker. The take's
+// buffer stays alive for the save because its RELEASE (if it is ever overwritten) is
+// pushed to the SAME queue afterwards and the worker serves the queue in order.
+void LooperEngine::saveTake(int t, int s) {
+	if (!sink) return;
+	Slot& sl = tracks[t].slots[s];
+	if (!sl.take.buf || sl.take.frames != N) return;
+	Cmd c;
+	c.kind = Cmd::SAVE; c.track = t; c.slot = s; c.frames = N; c.upto = 0;
+	c.seq = seqCounter++; c.a = sl.take.buf; c.b = nullptr;
+	c.meta.frames = sl.take.frames;
+	c.meta.sampleRate = sl.take.sampleRate;
+	c.meta.bpm = sl.take.bpm; c.meta.bpi = sl.take.bpi;
+	c.meta.startFrame = sl.take.startFrame;
+	c.meta.peak = sl.take.peak;
+	c.meta.repeats = sl.repeats.load(std::memory_order_relaxed);
+	c.meta.decayDb = sl.decayDb.load(std::memory_order_relaxed);
+	cmds.push(c); // a dropped save just misses the disk copy; never blocks the audio thread
+}
+
+// Enqueue "retire this slot's live file into history/" (M4). The buffer is released
+// separately; this only touches the on-disk file + manifest, on the worker.
+void LooperEngine::clearFile(int t, int s) {
+	if (!sink) return;
+	Cmd c;
+	c.kind = Cmd::CLEAR_FILE; c.track = t; c.slot = s; c.frames = 0; c.upto = 0;
+	c.seq = 0; c.a = c.b = nullptr;
+	cmds.push(c);
+}
+
 void LooperEngine::dropOverdub(Slot& sl) {
 	if (sl.staging) {
 		release(sl.staging);
@@ -125,16 +156,19 @@ void LooperEngine::drainIntents() {
 		Track& tr = tracks[i.track];
 		Slot& sl = tr.slots[i.slot];
 		switch (i.kind) {
-			case Intent::CLEAR:
+			case Intent::CLEAR: {
 				sl.pending.store(NONE, std::memory_order_relaxed);
 				dropOverdub(sl);
 				if (tr.playingSlot.load(std::memory_order_relaxed) == i.slot)
 					tr.playingSlot.store(-1, std::memory_order_relaxed);
+				const bool hadTake = sl.take.buf != nullptr;
 				if (sl.take.buf) { release(sl.take.buf); sl.take = Take(); }
+				if (hadTake) clearFile(i.track, i.slot); // retire the live file into history/ (M4)
 				sl.state.store(EMPTY, std::memory_order_relaxed);
 				sl.playable.store(true, std::memory_order_relaxed);
 				for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = 0.f;
 				break;
+			}
 		}
 	}
 }
@@ -233,6 +267,7 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 			sl.decayDb.store(defDecayDb.load(std::memory_order_relaxed), std::memory_order_relaxed);
 			sl.playable.store(true, std::memory_order_relaxed);
 			setPlaying(tr, s);
+			saveTake(t, s); // encode + index the captured interval (M4)
 		}
 
 		// 2b. Commit pending actions.
@@ -280,6 +315,7 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 					sl.repCount.store(0, std::memory_order_relaxed);
 					sl.gain.store(1.f, std::memory_order_relaxed);
 					sl.startedThisBoundary = true;
+					saveTake(t, s); // the overdubbed take replaces the file (old → history), M4
 					break;
 				}
 				default:

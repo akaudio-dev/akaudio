@@ -59,11 +59,16 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
   `RecorderLink` (`src/RecorderLink.hpp`, dynamic_cast on the neighbour); Ninjam gates
   the archive on Recorder-adjacent + armed + joined (privacy). Offline test:
   `make unittest` (or `test/archive_test.cpp`).
-- **Looper** (built through M1: `src/Looper.cpp` is the Rack glue over
+- **Looper** (built through M4: `src/Looper.cpp` is the Rack glue over
   the Rack-free engine in `src/looper/` — `LooperEngine` (audio thread: always-record,
   boundary-quantized capture/launch/stop/overdub, scenes, repeats/decay, gate, TX latch,
-  submix + limiter) and `LooperWorker` (the only thread that allocates/frees buffers;
-  SPSC `Spsc.hpp` both ways). No session files yet (M4). It takes the **real interval grid** from an adjacent Ninjam
+  submix + limiter), `LooperWorker` (the only thread that allocates/frees buffers;
+  SPSC `Spsc.hpp` both ways — and the thread that runs the M4 disk jobs), and `Session`
+  (Rack-free `LooperSink`: encodes each committed take to raw OGG under
+  `<base>/<stamp>_<room>/looper/` — `t<t>_s<s>.ogg` + `session.json`, overwritten/cleared
+  takes retired into `history/`; base defaults to `~/Music/jams`, shares a Recorder's jam
+  folder via `RecorderLink` when one is armed. Reload comes up empty — the clip loader is
+  v2). It takes the **real interval grid** from an adjacent Ninjam
   via expander messages — `src/JamClock.hpp` holds `JamClockMessage` + the
   integer-frame `JamClock` that Ninjam's beat clock now runs on and publishes to every
   chained Looper on both sides (`Ninjam::publishClock`); a Looper falls back to a

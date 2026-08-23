@@ -7,7 +7,9 @@
 // order: ALLOC (a fresh N-frame buffer), OVERDUB_COPY (staging = take + the rolling
 // buffer's completed part), RELEASE (recycle). Keeps a small free-list of
 // same-size buffers so arming never waits on malloc; flushes it when N changes.
-// (Encoding / session files arrive at milestone M4.)
+// It also runs the M4 disk jobs (SAVE / CLEAR_FILE) and the manifest flush by calling the
+// engine's LooperSink — the encode + file I/O sit here, off the audio thread, where the
+// take buffer's lifetime is guaranteed (its RELEASE is ordered after its SAVE).
 #include <atomic>
 #include <thread>
 #include <vector>

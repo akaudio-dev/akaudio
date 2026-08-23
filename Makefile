@@ -124,14 +124,29 @@ RACK_ABS := $(realpath $(RACK_DIR))
 OGGVORBIS_OBJ := $(filter build/src/dep/libogg/% build/src/dep/libvorbis/%,$(OBJECTS))
 LEAK_INC := -I src -I src/dep/libogg/include -I src/dep/libvorbis/include -I src/dep/libvorbis/lib
 
-# Rack-free unit tests (no Rack link, no OpenSSL): the interval clock, the looper
-# engine, and the wire archive. `make unittest` builds + runs all three.
+# Vendored OGG-Vorbis encoder sources (C) — the session test needs them for the OGG
+# writes. Compiled here with $(CC) into build/ut_ogg (libvorbis uses C-only void* casts,
+# so it can't go through $(CXX)); no config.h, matching the plugin build (§ Makefile note).
+UT_OGG_INC := -I src/dep/libogg/include -I src/dep/libvorbis/include -I src/dep/libvorbis/lib
+UT_OGG_SRCS := src/dep/libogg/src/bitwise.c src/dep/libogg/src/framing.c \
+  $(filter-out %barkmel.c %psytune.c %tone.c %vorbisfile.c,$(wildcard src/dep/libvorbis/lib/*.c))
+UT_OGG_OBJ := $(patsubst %.c,build/ut_ogg/%.o,$(UT_OGG_SRCS))
+build/ut_ogg/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) -O1 $(UT_OGG_INC) -c $< -o $@
+
+# Rack-free unit tests (no Rack link, no OpenSSL): the interval clock, the looper engine,
+# the looper session (disk), and the wire archive. `make unittest` builds + runs all.
 .PHONY: unittest
-unittest:
+unittest: $(UT_OGG_OBJ)
 	@mkdir -p build
 	$(CXX) -std=c++11 -O1 -I src test/jamclock_test.cpp -o build/jamclock_test && build/jamclock_test
 	$(CXX) -std=c++11 -O1 -I src test/looper_engine_test.cpp src/looper/LooperEngine.cpp \
 	  src/looper/LooperWorker.cpp -lpthread -o build/looper_engine_test && build/looper_engine_test
+	rm -rf build/session_test_out
+	$(CXX) -std=c++11 -O1 -I src $(UT_OGG_INC) test/session_test.cpp src/looper/Session.cpp \
+	  src/net/ninjam/NjEncoder.cpp $(UT_OGG_OBJ) -lpthread -o build/session_test \
+	  && build/session_test build/session_test_out
 	rm -rf build/archive_test_out
 	$(CXX) -std=c++11 -O1 -I src test/archive_test.cpp src/net/ninjam/NjArchive.cpp \
 	  src/net/Log.cpp -lpthread -o build/archive_test && build/archive_test build/archive_test_out
