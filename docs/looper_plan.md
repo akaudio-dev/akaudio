@@ -652,3 +652,27 @@ UI thread. A monotonic `sessionFrame` in the clock message is the **shared timel
 Looper takes and received/sent intervals are all stamped on it (RX via
 `mixFrameStart + pullOffset`, no wide-ring side channel needed), which is what lets
 the `.als` place the whole jam as heard. See `docs/LOOPER_DESIGN.md` §7.
+
+## Resume point — 2026-08-22 (end of session)
+
+On `main`, pushed through `1cbd281`. **Done + working on a real jam:** UX scaffold;
+M0 (`src/JamClock.hpp`, Ninjam publishes the integer interval clock to Looper
+expanders); M1 (`src/looper/` Rack-free engine — real looping, record-next-interval
+capture, overdub, repeats/decay, CUE bus, submix + safety limiter, TX-to-Ninjam over
+the expander so no MIX→IN cable); M3 (`src/net/ninjam/NjArchive.*` +
+`src/Recorder.cpp` + `src/RecorderLink.hpp` — the wire archive: raw per-player + TX
+OGG intervals to `~/Music/jams/<stamp>_<room>/` + `index.jsonl`). Tests: `make
+unittest` (jamclock / looper_engine / archive, all pass). Recorder folder is
+right-click-configurable; REC never persists armed.
+
+**Next: M4** — the Looper's *own* take files (≤64 raw OGG grid + `session.json` +
+`history/` on overwrite, §5.4/§10/§11), so the user's loops survive a reload and reach
+a DAW. Separate from the Recorder's wire archive.
+
+**Open question to decide (§9.3):** losing the Ninjam clock mid-jam falls back to the
+simulated clock (a regrid) → mismatched-length takes greyed → playing loops can stop.
+Intent was "losing the connection must not kill the music" — needs a fix or a
+deliberate call.
+
+Also deferred: DAW project generators (`.als`/`.rpp`), a clip loader (restore grid on
+patch reload), the exact §7.3 playout-start timestamp (M3 uses a coarse per-block one).
