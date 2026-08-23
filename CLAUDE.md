@@ -68,13 +68,9 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
   `<base>/<stamp>_<room>/looper/` — `t<t>_s<s>.ogg` + `session.json`, overwritten/cleared
   takes retired into `history/`; base defaults to `~/Music/jams`, shares a Recorder's jam
   folder via `RecorderLink` when one is armed. Reload comes up empty — the clip loader is
-  v2), and `AlsExport` (`src/looper/AlsExport.{hpp,cpp}`, Rack-free) — right-click **Export
-  Ableton Live set (.als)** reads `session.json` + the Recorder's `index.jsonl` and writes
-  a Live 11 set reconstructing the jam: Session-View loops + an Arrangement of every
-  player's + our TX intervals at their `sessionFrame`, referencing the raw OGGs (no
-  re-encode). Self-contained gzip (stored DEFLATE + CRC32, no zlib); schema is
-  reverse-engineered and needs testing in a real Live. It takes the **real interval grid**
-  from an adjacent Ninjam
+  v2). DAW project export (`.als`/`.rpp`) is deferred (an `.als` attempt was removed —
+  no official SDK, reverse-engineering only; see `docs/LOOPER_DESIGN.md` §12). It takes
+  the **real interval grid** from an adjacent Ninjam
   via expander messages — `src/JamClock.hpp` holds `JamClockMessage` + the
   integer-frame `JamClock` that Ninjam's beat clock now runs on and publishes to every
   chained Looper on both sides (`Ninjam::publishClock`); a Looper falls back to a

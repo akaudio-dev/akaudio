@@ -15,7 +15,6 @@
 #include "RecorderLink.hpp"
 #include "looper/LooperEngine.hpp"
 #include "looper/Session.hpp"
-#include "looper/AlsExport.hpp"
 
 #include <osdialog.h>
 
@@ -23,10 +22,6 @@
 #include <cmath>
 #include <cstdint>
 #include <ctime>
-#include <fstream>
-#include <map>
-#include <sstream>
-#include <sys/stat.h>
 
 namespace {
 
@@ -114,21 +109,6 @@ int decayIndex(float db) {
 	for (int i = 1; i < N_DECAY_CHOICES; i++)
 		if (std::fabs(DECAY_CHOICES[i] - db) < std::fabs(DECAY_CHOICES[best] - db)) best = i;
 	return best;
-}
-
-// ---- .als export helpers (UI thread) ----
-std::string readFile(const std::string& p) {
-	std::ifstream f(p, std::ios::binary);
-	if (!f) return "";
-	return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-}
-long fileSizeOf(const std::string& p) {
-	struct stat st;
-	return stat(p.c_str(), &st) == 0 ? (long) st.st_size : 0;
-}
-std::string baseNameOf(const std::string& p) {
-	size_t sl = p.find_last_of('/');
-	return sl == std::string::npos ? p : p.substr(sl + 1);
 }
 
 } // namespace
@@ -377,131 +357,6 @@ struct Looper : Module {
 	// ---- UI-thread helpers ----
 	void clearSlot(int t, int s) { engine.requestClear(t, s); }
 	int pendingCount() const { return engine.pendingCount(); }
-
-	// Reconstruct a jam as an Ableton Live Set. Reads `<jamRoot>/looper/session.json` (our
-	// takes → Session-View clips) and, if present, `<jamRoot>/index.jsonl` (the Recorder's
-	// wire archive → one Arrangement track per player + our TX, each interval at its
-	// sessionFrame). Writes `<jamRoot>/<name>.als`. Returns the path, "" if nothing to
-	// export or the write failed. UI thread (jansson + file I/O). docs/LOOPER_DESIGN.md §12.
-	std::string exportAls(const std::string& jamRoot) {
-		akaudio::looper::AlsProject proj;
-		proj.title = baseNameOf(jamRoot);
-		double tempo = 0.0;
-
-		// Looper session → Session-View clips.
-		std::string looperDir = jamRoot + "/looper";
-		std::string sjson = readFile(looperDir + "/session.json");
-		if (!sjson.empty()) {
-			json_error_t err;
-			if (json_t* root = json_loads(sjson.c_str(), 0, &err)) {
-				if (json_t* b = json_object_get(root, "bpm"))
-					if (json_number_value(b) > 0) tempo = json_number_value(b);
-				json_t* tracks = json_object_get(root, "tracks");
-				if (json_is_array(tracks)) {
-					size_t i; json_t* v;
-					json_array_foreach(tracks, i, v) {
-						int idx = (int) json_integer_value(json_object_get(v, "index"));
-						const char* nm = json_string_value(json_object_get(v, "name"));
-						if (idx >= 0 && idx < TRACKS && nm) proj.looperTrackNames[idx] = nm;
-					}
-				}
-				json_t* slots = json_object_get(root, "slots");
-				if (json_is_array(slots)) {
-					size_t i; json_t* v;
-					json_array_foreach(slots, i, v) {
-						const char* file = json_string_value(json_object_get(v, "file"));
-						if (!file || !*file) continue;
-						akaudio::looper::AlsSessionClip c;
-						c.track = (int) json_integer_value(json_object_get(v, "track"));
-						c.scene = (int) json_integer_value(json_object_get(v, "slot"));
-						c.relPath = std::string("looper/") + file;
-						c.absPath = looperDir + "/" + file;
-						c.frames = (long) json_integer_value(json_object_get(v, "frames"));
-						c.sampleRate = json_number_value(json_object_get(v, "sampleRate"));
-						c.bpm = json_number_value(json_object_get(v, "bpm"));
-						if (c.bpm <= 0) c.bpm = tempo > 0 ? tempo : 120;
-						if (c.sampleRate <= 0) c.sampleRate = 48000;
-						c.fileSize = fileSizeOf(c.absPath);
-						c.name = (c.track >= 0 && c.track < TRACKS && !proj.looperTrackNames[c.track].empty())
-						         ? proj.looperTrackNames[c.track] : ("clip " + std::to_string(c.scene + 1));
-						proj.sessionClips.push_back(c);
-					}
-				}
-				json_decref(root);
-			}
-		}
-
-		// Recorder wire archive → Arrangement tracks (one per player + TX).
-		std::string idxAll = readFile(jamRoot + "/index.jsonl");
-		if (!idxAll.empty()) {
-			std::map<std::string, size_t> byKey;
-			std::istringstream ss(idxAll);
-			std::string line;
-			while (std::getline(ss, line)) {
-				if (line.empty()) continue;
-				json_error_t err;
-				json_t* o = json_loads(line.c_str(), 0, &err);
-				if (!o) continue;
-				bool tx = json_is_true(json_object_get(o, "tx"));
-				const char* user = json_string_value(json_object_get(o, "user"));
-				int chidx = (int) json_integer_value(json_object_get(o, "chidx"));
-				const char* file = json_string_value(json_object_get(o, "file"));
-				long frames = (long) json_integer_value(json_object_get(o, "frames"));
-				double sr = json_number_value(json_object_get(o, "sampleRate"));
-				double bpm = json_number_value(json_object_get(o, "bpm"));
-				long seq = (long) json_integer_value(json_object_get(o, "seq"));
-				json_t* sf = json_object_get(o, "sessionFrame");
-				if (file && *file && frames > 0) {
-					if (tempo <= 0 && bpm > 0) tempo = bpm;
-					std::string u = user ? user : "player";
-					std::string key = tx ? "tx" : (u + "#" + std::to_string(chidx));
-					size_t ti;
-					auto it = byKey.find(key);
-					if (it == byKey.end()) {
-						akaudio::looper::AlsArrangementTrack tr;
-						tr.isTx = tx;
-						tr.name = tx ? "you (tx)" : (u + (chidx > 0 ? " ch" + std::to_string(chidx) : ""));
-						ti = proj.arrangementTracks.size();
-						proj.arrangementTracks.push_back(tr);
-						byKey[key] = ti;
-					} else {
-						ti = it->second;
-					}
-					akaudio::looper::AlsArrangementClip c;
-					c.name = (tx ? "tx " : (u + " ")) + std::to_string(seq);
-					c.relPath = file;
-					c.absPath = jamRoot + "/" + file;
-					c.sessionFrame = sf ? (uint64_t) json_integer_value(sf) : 0;
-					c.frames = frames;
-					c.sampleRate = sr > 0 ? sr : 48000;
-					c.fileSize = fileSizeOf(c.absPath);
-					proj.arrangementTracks[ti].clips.push_back(c);
-				}
-				json_decref(o);
-			}
-		}
-
-		if (proj.sessionClips.empty() && proj.arrangementTracks.empty())
-			return "";
-		proj.tempo = tempo > 0 ? tempo : 120;
-		proj.meterNum = 4;
-
-		std::vector<uint8_t> bytes = akaudio::looper::buildAls(proj);
-		std::string out = jamRoot + "/" + baseNameOf(jamRoot) + ".als";
-		std::ofstream f(out, std::ios::binary | std::ios::trunc);
-		if (!f) return "";
-		f.write((const char*) bytes.data(), (std::streamsize) bytes.size());
-		return f ? out : std::string();
-	}
-
-	// The current jam's root folder (parent of the `looper/` session dir), or "" if unset.
-	std::string currentJamRoot() const {
-		const std::string suffix = "/looper";
-		if (resolvedSessionDir.size() > suffix.size()
-		        && resolvedSessionDir.compare(resolvedSessionDir.size() - suffix.size(), suffix.size(), suffix) == 0)
-			return resolvedSessionDir.substr(0, resolvedSessionDir.size() - suffix.size());
-		return "";
-	}
 
 	// An adjacent Ninjam, as a RecorderLink — used only to borrow the exact jam folder it
 	// archives to (so the looper's takes land beside the Recorder's players/ + tx/).
@@ -1159,22 +1014,6 @@ struct LooperWidget : ModuleWidget {
 		menu->addChild(createMenuItem("Open this session's folder", "", [cur]() {
 			if (!cur.empty()) system::openDirectory(cur);
 		}, cur.empty()));
-
-		// Export the whole jam (our loops + every player's intervals) as an Ableton Live
-		// Set. Pick the jam folder (defaults to the current one); writes <folder>/<name>.als.
-		menu->addChild(createMenuItem("Export Ableton Live set (.als)\xe2\x80\xa6", "", [m]() {
-			std::string def = m->currentJamRoot();
-			char* pick = osdialog_file(OSDIALOG_OPEN_DIR, def.empty() ? NULL : def.c_str(), NULL, NULL);
-			if (!pick) return;
-			std::string root = pick;
-			std::free(pick);
-			std::string out = m->exportAls(root);
-			if (!out.empty())
-				system::openDirectory(root);
-			else
-				osdialog_message(OSDIALOG_INFO, OSDIALOG_OK,
-					"No jam found in that folder.\nPick a jam folder that contains looper/session.json or index.jsonl.");
-		}));
 	}
 };
 

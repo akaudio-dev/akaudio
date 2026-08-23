@@ -18,11 +18,10 @@ clock from Ninjam (M0), the Rack-free engine looping real audio (M1), the MIX + 
 buses, transmit-to-Ninjam over the expander, and **session files on disk** (M4): each
 committed take is encoded to OGG + indexed under `<base>/<stamp>_<room>/looper/`,
 overwritten/cleared takes retired into `history/`. The **Recorder** module and its wire
-archive (§4 items 3-4, §7, M3) are also built, and **Ableton `.als` export** (§12)
-reconstructs the whole jam (Session-View loops + an Arrangement of every player's
-intervals). Still on paper, marked *(planned)*: the timeline refinements in §7.3, the
-**clip loader** (restoring the grid on patch reload — v1 saves the files but reloads
-empty), and the REAPER `.rpp` generator (§12). §13 tracks per-milestone status.
+archive (§4 items 3-4, §7, M3) are also built. Still on paper, marked *(planned)*: the
+timeline refinements in §7.3, the **clip loader** (restoring the grid on patch reload — v1
+saves the files but reloads empty), and the **DAW project generators** (§12) — a first
+`.als` exporter was attempted and removed (see §12). §13 tracks per-milestone status.
 
 ---
 
@@ -580,21 +579,22 @@ otherwise).
 
 ## 12. DAW export + deferred (v2+)
 
-**Ableton Live `.als` export — built** (`src/looper/AlsExport.{hpp,cpp}` +
-`test/als_export_test.cpp`). The payoff of the shared timeline: the Looper's right-click
-**Export Ableton Live set (.als)** reads `<jam>/looper/session.json` and the Recorder's
-`<jam>/index.jsonl` and writes `<jam>/<name>.als` reconstructing the whole jam — the 8
-Looper tracks with each take as a **looping clip in its Session-View slot**, plus one
-**Arrangement** audio track per remote player and our TX with every interval clip placed
-at its `sessionFrame` (the session as heard here). Clips reference the raw take/interval
-OGGs directly (Live imports Ogg Vorbis — no re-encode); positions are computed in beats
-at the set tempo, clips unwarped so they play at true duration. `AlsExport` is Rack-free
-(pure structs → bytes; the Rack module parses the JSON with jansson) and needs no zlib —
-gzip is emitted with stored DEFLATE blocks + CRC32, validated against system `gunzip` +
-`xmllint` and an in-test inflater. **Caveat:** the `.als` schema is Ableton's,
-reverse-engineered; this targets **Live 11** and can't be validated without a Live
-install — expect to test in Live and iterate; absolute sample paths are primary (a local
-artifact), relative backup. Still deferred: the REAPER **`.rpp`** generator (plain text).
+**DAW project generators — deferred.** The payoff of the shared timeline is a DAW project
+(`.rpp` / `.als`) that reassembles the jam: the 8 Looper tracks with their takes, plus one
+track per remote player and our TX with every interval at its `sessionFrame`, all
+referencing the raw OGGs. The data on disk (`session.json` + `index.jsonl` + the OGGs) is
+everything a generator needs.
+
+An **Ableton `.als`** exporter was attempted (2026-08-23) and **removed** (commit history):
+`.als` is gzipped XML with **no official SDK** — pure reverse-engineering. Header/scene/clip
+schema was matched to a real Live 12.4 set, but a Live-openable file needs each track to
+reproduce Live's full ~1000-line device serialization (`Mixer`, four routings, `Devices`,
+`TakeLanes`, `FreezeSequencer`, `AudioSequencer`) with a consistent 700+-ID graph;
+short of that, Live's loader crashes building the tracks. That's either embedding a real
+Live project's XML (proprietary, version-pinned) or hand-coding ~1000 fragile lines — not
+worth it. **REAPER `.rpp` is the recommended target** if/when this is revisited: plain
+text, ~100 lines, stable, imports Ogg Vorbis, and the arrangement timeline maps directly;
+REAPER can then render stems for any DAW.
 
 **Deferred (v2+).** Clip loader (restore grid on patch load; load from
 files). Standalone clocking with per-track/per-take interval lengths. Duplicate /
@@ -636,10 +636,6 @@ Tests (`test/`, no Rack link):
   bpm/`startFrame`), a late settings edit reflected, overwrite → the old take in `history/`,
   clear → the file retired + dropped from the manifest, no leftover `.tmp` (atomicity),
   and an untouched session that writes nothing. Folded into `make unittest`.
-- `als_export_test.cpp` *(built, passes)* — build an `.als` from synthetic jam data and
-  check the XML (10 tracks, session + arrangement clips, name escaping, beat positions at
-  tempo) and the gzip framing (a stored-block inflater reconstructs the XML byte-for-byte).
-  Folded into `make unittest`. Externally cross-checked with `gunzip` + `xmllint`.
 - `archive_test.cpp` *(built, passes)* — feed `NjArchive` synthetic RX/TX intervals
   (incl. a silence interval that writes no file) with changing session frames; assert
   the per-player/tx files, verbatim bytes, JSONL index entries, and stats. `make unittest`
