@@ -10,8 +10,15 @@ of **Ninjam**:
   OGG bytes, on a shared sample-accurate timeline — so a DAW project (`.als`/`.rpp`)
   can later reassemble the whole jam: our loops and everyone else's playing.
 
-Decisions were reached in `docs/looper_plan.md` (the decision log, 2026-08-22);
-this document is the consolidated, implementable statement. Nothing is built yet.
+Decisions were reached in `docs/looper_plan.md` (the decision log). This document is
+the consolidated statement, kept in sync with the code.
+
+**Status (2026-08-22):** the **Looper is built and working through M1** — real interval
+clock from Ninjam (M0), the Rack-free engine looping real audio (M1), the MIX + CUE
+buses, and transmit-to-Ninjam over the expander. Still on paper, marked *(planned)*
+where they appear below: the **Recorder** module and its wire archive (§4 items 3-4,
+§7, milestone M3), and the Looper's **session files / disk persistence** (§5.4 encode
+steps, §10, §11 — milestone M4). §13 tracks per-milestone status.
 
 ---
 
@@ -63,17 +70,20 @@ Recorder that decodes/mixes anything.
 ## 2. Topology
 
 ```
- instruments (8 stereo) ──► LOOPER ──MIX──► NINJAM IN ─── TX ───► room
-                              ▲ clock (expander msg)  │
-                              └──────────── NINJAM ◄── RX ◄──── players
-                                              │ raw interval bytes (both directions)
-                                              ▼
-                                          RECORDER (panel) ──► session dir on disk
+ instruments (8 stereo) ─► LOOPER ══ clock (expander) ══ NINJAM ── TX ─► room
+                             │  MIX ══ audio (expander, no cable) ═► NINJAM transmit
+                             ├─ MIX OUT jack ─► your monitor (on-air tracks + loops)
+                             └─ CUE OUT jack ─► your monitor (private / TX-off tracks)
+                                              NINJAM ◄── RX ◄── players
+                                                │ raw interval bytes  (planned: Recorder)
+                                                ▼
+                                            RECORDER (planned) ─► session dir on disk
 ```
 
-- **Looper** is an expander receiving the interval grid through Rack's expander
-  message buffers; Ninjam walks the chain on both sides, so more than one Looper may
-  flank it (§3.3).
+- **Looper** is an expander of Ninjam: it receives the interval grid through Rack's
+  expander message buffers (Ninjam walks the chain on both sides, so more than one
+  Looper may flank it, §3.3) and, in the other direction, writes its MIX into Ninjam's
+  buffer so Ninjam transmits it with no cable (§6).
 - **Recorder** needs no audio and no clock in `process()`: the byte archive
   (`NjArchive`) lives **inside Ninjam**, fed by `NjClient` on its network/TX threads;
   the Recorder module is its control panel + status, reached over the expander pointer
@@ -96,9 +106,9 @@ Ninjam has three interval clocks; the Looper follows the first:
 3. `NjAudio::mixLoop` playout — **arrival-locked per remote channel**, no global
    boundary. Not a clock to follow; it is what the Recorder timestamps (§7.3).
 
-Clocks 1 and 2 currently drift by a sub-sample fraction per interval (fractional
-`spb` accumulation vs integer N). §4.1 makes clock 1 count integer frames so
-RESET/PHASE, TX arming and the Looper agree exactly.
+Clocks 1 and 2 drifted by a sub-sample fraction per interval (fractional `spb`
+accumulation vs integer N); **`JamClock` (§4 item 1, built) makes clock 1 count integer
+frames**, so RESET/PHASE, TX arming and the Looper now agree exactly.
 
 ### 3.2 `JamClockMessage` (`src/JamClock.hpp`, shared)
 
@@ -177,8 +187,8 @@ No protocol, socket, or codec changes.
    `gridGeneration++` on the existing `resyncBeat` branch and on sample-rate change.
    Behaviour change for existing users: sub-sample.
 2. **Expander chain walk** on both sides (§3.3).
-3. **`NjArchive`** (`src/net/ninjam/NjArchive.{hpp,cpp}`, Rack-free) — the wire
-   archive, owned by Ninjam, with its own writer thread and a bounded job queue:
+3. *(planned, M3)* **`NjArchive`** (`src/net/ninjam/NjArchive.{hpp,cpp}`, Rack-free) —
+   the wire archive, owned by Ninjam, with its own writer thread and a bounded job queue:
    - **RX:** `NjClient` gets an optional callback `onIntervalReceived(user, chidx,
      guid, bytes, mixFrameStart)` fired by `NjAudio` when the mix thread *starts
      playing* an interval (so the timestamp is the local playout start, §7.3); a
@@ -194,7 +204,7 @@ No protocol, socket, or codec changes.
    - Writes are atomic (tmp + rename); the index is appended per interval.
    - `start(dir, opts)` / `stop()` / `status()` (mutex-guarded snapshot: per player
      name, intervals, bytes, last activity) are UI-thread API used by the Recorder.
-4. **Archive gating:** Ninjam's widget `step()` checks whether a Recorder is adjacent
+4. *(planned, M3)* **Archive gating:** Ninjam's widget `step()` checks whether a Recorder is adjacent
    on either side and starts/stops the archive accordingly (UI thread — module
    removal also happens there, so no stale pointers).
 
@@ -213,21 +223,22 @@ Code layout: `src/looper/` is **Rack-free** (testable from `test/`): `LooperEngi
 ### 5.1 Data
 
 ```
-Take      { float* pcm (N×2 interleaved, immutable once committed); int frames;
-            int bpm, bpi; float sampleRate; uint64_t startFrame /*session timeline*/;
-            float peak; Thumb thumb; }
-Slot      { Take* take; int repeats /*0 = ∞*/; float decay /*(0,1]*/;
-            State state; Pending pending; int repCount; float gain; }
-Track     { float* rec[2] (rolling: recording / last completed); int n /*N*/;
-            bool present; bool tx /*on air*/; std::string name;
-            Slot slots[8]; int playingSlot; float liveThumb[THUMB_BINS] /* drawn by an armed slot */; }
+Take      { Buf* buf (N×2 interleaved, immutable once committed); int frames;
+            int bpm, bpi; float sampleRate; uint64_t startFrame /*session timeline*/; float peak; }
+Slot      { Take take; int repeats /*0 = ∞*/; float decayDb /*0…−6 dB per repetition*/;
+            State state; Pending pending; int repCount; float gain; bool playable;
+            float thumb[THUMB_BINS]; Buf* staging /*overdub*/; }
+Track     { Buf* rec, *last, *spare (rolling: recording / just-completed / pre-fetched);
+            bool present; float txGain, gateEnv;
+            Slot slots[8]; int playingSlot; float live[THUMB_BINS] /*armed slot draws it*/; }
 ```
 
 - **Buffers are N-frame stereo 32f.** 16 s (120 BPM·32 BPI) – 32 s (60 BPM·32 BPI)
   @48 kHz = 6–12 MB each. We jam at 32 BPI.
-- **Accounting:** 2 rolling per track (always) + 1 per filled slot (on demand) + 1
-  transient per operation in flight. Fully populated 8×8 at 32 BPI ≈ 0.4–0.8 GB; fixed
-  cost ≈ 100–200 MB. The context menu shows the total.
+- **Accounting:** up to 3 rolling per track (`rec` + `last`/`spare`) + 1 per filled
+  slot (on demand) + 1 staging per in-flight overdub. Rolling buffers **follow cable
+  presence** — an unpatched track holds none. Fully populated 8×8 at 32 BPI ≈ 0.4–0.8 GB.
+  Track names/labels live in the Rack module (`src/Looper.cpp`), not the engine.
 - **A committed take is immutable.** Playback and the worker's encode/thumbnail read
   it concurrently; every mutation (overdub) produces a new buffer and swaps it in.
 - **Free-list** on the worker: same-size buffers within a grid generation; flushed when
@@ -243,22 +254,20 @@ pending: None | Capture | Launch | Stop | Overdub     (committed at the boundary
 Button semantics (edges detected in `process()`; "armed" = pending set, light blinks;
 pressing again cancels):
 
-| gesture | Empty | Filled | Playing |
-|---|---|---|---|
-| slot press | arm **Capture** (→ RECORDING at the boundary → PLAYING at the next) | arm **Launch** | arm **Stop** (or **Overdub** if the OVERDUB latch is on) |
-| press while RECORDING | cancel (back to Empty) | | |
-| scene press (row) | track **stops** (empty slot in the row) | arm Launch | no-op if already the playing slot |
-| track STOP | — | — | arm Stop |
-| STOP ALL | — | — | arm Stop on every track |
-| shift-click / long-press | select slot for REPEATS/DECAY (no arm) | | |
+| gesture | Empty | Filled | Playing | Recording |
+|---|---|---|---|---|
+| slot press | arm **Capture** (→ Recording at the boundary → Playing at the next) | arm **Launch** | arm **Stop** (or **Overdub** if the OVERDUB latch is on) | **cancel** (→ Empty) |
+| scene press (row) | track **stops** (empty slot in the row) | arm Launch | no-op if already the playing slot | leave it |
+| track STOP / STOP ALL | — | — | arm Stop | — |
 
-One playing slot per track: arming Launch elsewhere replaces it at the boundary.
-Scenes use Ableton's default semantics (a scene is a complete state of the band).
+**Any** slot press also **selects** that slot for the REPEATS/DECAY knobs (a ring shows
+it); there is no separate select gesture. One playing slot per track: arming Launch
+elsewhere replaces it at the boundary. Scenes use Ableton's default semantics (a scene
+is a complete state of the band).
 
 **Per-clip settings (`repeats`, `decay`) — how they are changed:**
-- **Selection = the last slot you pressed.** Pressing a slot arms it *and* selects it
-  (a capture selects the new take), shown as a ring. No modifier gesture; MIDI pads
-  select as a side effect of launching.
+- **Selection = the last slot you pressed** (arm + select together), shown as a ring.
+  MIDI pads select as a side effect of launching.
 - The **REPEATS** and **DECAY** knobs (bottom strip; real params ⇒ MIDI-mappable)
   show and edit the selected slot's settings: turning a knob writes to the selected
   slot; changing the selection reloads the knobs (a `ParamStateSync`-style reconcile
@@ -276,33 +285,37 @@ Scenes use Ableton's default semantics (a scene is a complete state of the band)
    live thumb; note its `startFrame` (= `sessionFrame` at the boundary that began it).
 2. Commit pending ops whose worker preparation has arrived (§5.4); others wait one
    more interval.
-   - **Capture** into slot s: if the completed interval's peak < gate ⇒ refuse (flash),
-     stay Empty. Else the completed rolling buffer *becomes* `slot.take` and the slot's
-     old buffer (or the worker-prepared fresh one) becomes the rolling spare — pointer
-     rotation, no copy. Slot → Playing, `repCount = 0`, `gain = 1`. Old take (if any)
-     → worker `Overwritten`; new take → worker `Committed`.
+   - **Capture** (Ableton clip semantics, two boundaries): a slot armed Capture enters
+     **Recording** at this boundary and records the interval that now begins (refused →
+     Empty only if the track has no input/buffer). At the **next** boundary the
+     just-completed rolling buffer *becomes* `slot.take` (pointer rotation, no copy) and
+     the slot → Playing, replacing the previously playing slot; a **silent** recording
+     (peak < gate) is refused → Empty. Only one Recording slot per track (arming another
+     cancels it).
    - **Launch**: Playing; the previously playing slot → Filled.
    - **Stop**: Filled.
-   - **Overdub**: staging (take + this interval's input, accumulated by `process()`)
-     swaps in as the new take; old → `Overwritten`; new → `Committed`.
+   - **Overdub**: staging (take + this interval's input, folded in progressively by
+     `process()`) swaps in as the new take.
+   *(The `Committed`/`Overwritten` encode-and-write steps are M4; the M1 engine keeps
+   takes in RAM only.)*
 3. Playing slots wrap: `repCount++`; `gain = decay^repCount`; stop if `repeats &&
    repCount == repeats` or `gain < 1e-3` (−60 dB). Repeat/decay edits apply at the wrap.
 
 ### 5.3 Per-frame `process()` (audio thread)
 
 ```
-msg = source.tick()                                   // IntervalSource (v1: expander)
+msg = clock.tick()                                    // live Ninjam message, else simulated (§9.3)
 if msg.gridGeneration changed → onRegrid()            // §9.1
 for each track t:
-    in  = input(t)  (R := L if R unconnected; poly fan-out from track 1, §8.2)
+    in  = input(t)   (own jack pair, else its MULTI pair; R := L if R unconnected; §8.2)
     if msg.downbeat → §5.2 commit sequence
-    rec[0][frame] = in; liveThumb[frame·BINS/N] = max(…, |in|)   // always-record (armed slot draws it)
+    rec[frame] = in; live[frame·BINS/N] = max(…, |in|)          // always-record (armed slot draws it)
     if slot overdubbing → staging[frame] += in
-    loop = playingSlot ? take[pos]·gain : 0
-    thru = tx ? gate(in) : 0                          // TX latch (smoothed); gate −70 dBFS, 100 ms hold → exact 0
-    trackOut = thru + loop
-    mix += trackOut                                   // plain sum: no per-track level/pan
-MIX OUT = limiter(mix)                                // soft knee, fast attack, ~100 ms release
+    loop  = playingSlot ? take[pos]·gain : 0
+    thru  = gate(in)                                  // −70 dBFS, 100 ms hold → exact 0
+    mix  += thru·txGain + loop                        // on-air share + loops (loops always to MIX)
+    cue  += thru·(1 − txGain)                         // private share (TX-off), crossfaded on txGain
+MIX OUT = limiter(mix) ;  CUE OUT = limiter(cue)      // safety limiter (transparent to full scale)
 ```
 
 The repo's realtime contract applies in full: no allocation, no locks, no I/O, no
@@ -310,28 +323,26 @@ logging. Cross-thread traffic = two SPSC queues (§5.4) + atomics for the UI.
 
 ### 5.4 Worker thread (one per Looper; started in the Module ctor, joined in the dtor)
 
-Commands from `process()` (SPSC, fixed-size POD):
-- `Prepare{slot, op, seq}` at arm time → allocate (Capture into an empty slot: a fresh
-  rolling spare) or copy (Overdub: take → staging) → reply `Ready{slot, op, seq,
-  buffer}`. **Commit requires readiness**; with 20 s intervals the worker has ages,
-  and even 2 s intervals are fine.
-- `Committed{slot, take}` → thumbnail (64 × min/max of the mono sum), encode
-  (`encodeOggInterval`, archive quality), atomic write, update `session.json`.
-- `Overwritten{slot, take}` → `rename(t_s.ogg → history/<ts>_t_s.ogg)`, then free/
-  recycle the buffer *after* any pending encode of it.
-- `Cleared{slot, take}` → as Overwritten; slot becomes Empty.
-- `Release{buffer}` → recycle (cancelled ops).
+Commands from `process()` (SPSC, fixed-size POD; the worker is the **only** thread that
+allocates/frees):
+- `ALLOC{track, frames, seq}` → allocate a zeroed N-frame buffer (Capture into an empty
+  track's rolling spare; keeping the rolling pair stocked) → reply `ALLOC{buffer}`.
+- `OVERDUB_COPY{track, slot, seq, take, rec, upto}` → staging = take + `rec[0..upto)`
+  (the part already recorded when the press landed); the audio thread folds in the rest
+  as it records → reply `OVERDUB_COPY{buffer}`.
+- `RELEASE{buffer}` → recycle onto a small same-N free-list (flushed when N changes), so
+  arming never waits on `malloc`.
 
-Jobs are **serialized per slot** (encode old → rename → encode new), covering a
-re-capture that lands before the previous ~75 ms encode finished. UI-thread → worker
-state (track names, session dir, quality) sits behind the Looper's own mutex; the
-worker snapshots it per job.
+*(planned, M4)* the take's OGG encode + `session.json`/`history/` writes become worker
+jobs (`Committed`/`Overwritten`/`Cleared`), serialized per slot. The M1 worker does
+buffers only — no encoding or file I/O yet.
 
 ### 5.5 UI thread
 
-Reads atomics only: per-slot state/pending/gain, per-track `playPos` (0..1),
-`present`, the live thumb (unsynchronized float-array read — benign display race),
-slot thumbnails (copied under the UI mutex when the worker publishes them).
+Reads atomics only: per-slot state/pending/repeats/decay/gain/repCount/playable, the
+module's interval `phase` (0..1) for the playhead, per-track `present`, and the `live` /
+`thumb` float arrays (unsynchronized reads — benign display races; written only by the
+audio thread at frame or boundary granularity).
 
 ---
 
@@ -365,8 +376,10 @@ slot thumbnails (copied under the UI mutex when the worker publishes them).
 
 ## 7. Recorder
 
+*(All of §7 is **planned** — milestone M3. Nothing here is built yet.)*
+
 ### 7.1 What it is
-A control panel for Ninjam's `NjArchive` (§4.3). No audio path, no clock reading, no
+A control panel for Ninjam's `NjArchive` (§4 item 3). No audio path, no clock reading, no
 decoding. Its value over any existing recorder: **exact per-player, per-interval
 files** (the bytes each player actually sent, lossless w.r.t. the wire), **names**
 (from the transfer's username), **our own TX** intervals as the room heard them, and
@@ -409,20 +422,21 @@ Ableton Session layout, **44 HP** (68 px columns; I/O in a narrow controls colum
 Radio/Ninjam (`ebebeb→e1e1e1`, `#1f1f1f` Nunito-Bold title).
 
 ```
- ┌─────────────────────────────────────────────────────────────┬───────┐
- │ LOOPER                       ● synced · 120 BPM · 32 BPI   12s │       │  header: sync LED, tempo, boundary countdown
- ├──────┬──────┬──────┬──────┬──────┬──────┬──────┬──────┬───────┤
- │ (L)  │ (L)  │ (L)  │ (L)  │ (L)  │ (L)  │ (L)  │ (L)  │       │  stereo jack pair per track
- │ (R)  │ (R)  │ (R)  │ (R)  │ (R)  │ (R)  │ (R)  │ (R)  │       │
- │[-01-]│[bass]│[drum]│[-04-]│[-05-]│[-06-]│[-07-]│[-08-]│       │  editable labels (MindMeld-style)
- ├──────┼──────┼──────┼──────┼──────┼──────┼──────┼──────┼───────┤
- │[▁▃▇▅]│[▂▂▃▂]│[    ]│[▅▇▅▃]│[    ]│[    ]│[    ]│[    ]│ [ ▶ ] │  scene 1 … 8 (rows)
- │  …   │  …   │  …   │  …   │  …   │  …   │  …   │  …   │  …    │
- ├──────┼──────┼──────┼──────┼──────┼──────┼──────┼──────┼───────┤
- │[■ ●] │[■ ●] │[■ ●] │[■ ●] │[■ ●] │[■ ●] │[■ ●] │[■ ●] │ [■■]  │  track STOP + TX LED / STOP ALL
- ├──────┴──────┴──────┴──────┴──────┴──────┴──────┴──────┴───────┤
- │ (I/O in the controls column right of the scenes: ◎ OVERDUB · REPEATS · DECAY · MIX L/R) │
- └─────────────────────────────────────────────────────────────┘
+ ┌──────────────────────────────────────────────────────┬────────┐
+ │ LOOPER            NINJAM · 120 BPM · 32 BPI · next 12s ●│        │  header: source line + sync LED
+ ├──────┬──────┬─ … ─┬──────┼────────┤  L,R jacks SIDE BY SIDE per track
+ │(L)(R)│(L)(R)│     │(L)(R)│ [MULTI]│  poly MULTI jack sits in the controls column
+ │[-01J]│[bassP]│    │[-08-]│  ◎ DUB │  editable label + source tag (J / P3-4, green=live)
+ ├──────┼──────┼─ … ─┼──────┤ REPEATS│
+ │clip  │ clip │     │ clip │  ◯     │  8×8 clip grid            scene ▶ column
+ │ grid │ grid │ …8× │ grid │ DECAY  │  (right edge, not shown)
+ │  …   │  …   │     │  …   │  ◯     │
+ ├──────┼──────┼─ … ─┼──────┤ ┌────┐ │
+ │[■ ◉] │[■ ◉] │     │[■ ◉] │ │CUE │ │  track STOP + bi-color TX LED (green=MIX, cyan=CUE)
+ ├──────┴──────┴─ … ─┴──────┤ │L  R│ │  STOP ALL under the grid
+ │  scene ▶ column at right  │ ├────┤ │  ┌────┐
+ │                          │ │MIX │ │  │ AK │  output plates: CUE over MIX
+ └──────────────────────────┴─┴L  R┘─┴──┴────┘
 ```
 
 ### 8.1 Components
@@ -437,22 +451,23 @@ Radio/Ninjam (`ebebeb→e1e1e1`, `#1f1f1f` Nunito-Bold title).
 - **Track labels**: MindMeld-style dark boxes with amber monospace text, default
   `-01-`…`-08-`; click opens an inline editor; persisted in the patch and written to
   `session.json`.
-- **Scene** ×8, **track STOP** ×8 (with a **TX** LED latch beside each — the same
-  LED as Ninjam's transmit toggle, `akDrawTxLed` in Theme.hpp), **STOP ALL**,
-  **OVERDUB** latch: all params (MIDI-mappable). No per-track mute: mute at the mixer, or don't play. REPEATS (∞,1…64) and DECAY (0…−6 dB/rep) knobs act on the
-  selected slot. No level/pan controls.
-- Controls column right of the scenes, top → bottom: **OVERDUB** (the component-library
-  bezel button with a red light, as Fundamental's PUSH), REPEATS, DECAY, and MIX on an
-  output **plate** (L over R, labels to the left; Theme `AK_PLATE_*` style — dark, light
-  in the dark theme, like Radio/Ninjam). No per-track POLY out: Ninjam's poly players
-  out covers that need. The **AK** mark at the shared `AK_MARK_Y_MM`. Archive LED
-  in the header. No "SCENES" label.
-- Header: sync LED (green: Ninjam clock; off: idle), bpm/bpi,
-  seconds to the next boundary.
+- **Scene** ×8 (▶ glyph, no number), **track STOP** ×8 (full-column-height raised
+  buttons, visually distinct from the sunken clip cells) each with a **bi-color TX LED**
+  beside it (`akDrawTxLedC` in Theme.hpp: green = on air → MIX, cyan = private → CUE),
+  **STOP ALL**, **OVERDUB** latch: all params (MIDI-mappable). No per-track
+  mute/level/pan — mute at the mixer, levels arrive set.
+- Controls column right of the scenes, top → bottom: **OVERDUB** (component-library
+  bezel button + red light, as Fundamental's PUSH), REPEATS, DECAY, the poly **MULTI**
+  input, then **CUE** and **MIX** on output **plates** (L over R; Theme `AK_PLATE_*`
+  style; MIX aligned to Ninjam's two output rows). No per-track POLY out — Ninjam's
+  poly players out covers that. The **AK** mark at the shared `AK_MARK_Y_MM`. No
+  "SCENES" label; no RESET jack.
+- Header: source line ("NINJAM · bpm · bpi · next in Ns" or "SIMULATED CLOCK …") + a
+  sync LED (green: locked to a Ninjam clock; dim: simulated/idle) and a progress bar.
 
 ### 8.2 Inputs
 Two ways in, per track: its own **stereo jack pair**, or the single poly **MULTI**
-jack (in the scene column, where one cable from a mixer replaces 16): MULTI channels
+jack (in the controls column, where one cable from a mixer replaces 16): MULTI channels
 are **fixed stereo pairs** — 1-2 → track 1, 3-4 → track 2, … (an odd trailing channel
 is mono). **A track's own L jack takes precedence** over its MULTI pair; R unconnected
 ⇒ R = L. The mapping never moves: adding a jack to a track doesn't shift any other
@@ -476,15 +491,19 @@ Free-list flushed.
 resampling on load is v2.
 
 ### 9.3 Clock source lost (Ninjam removed, left the room, LISTEN mode)
-Playing loops **keep looping at the last N** (self-clocked from the last boundary) —
-losing the connection must not kill the music. Recording continues. Header LED off;
-the next `gridGeneration` from a source re-syncs.
+The Looper falls back to its **simulated clock** (the context-menu interval), so it
+keeps running and the UX still works with no Ninjam in the rack. Because that is a
+source switch, it counts as a grid change (§9.1): pending ops cancel and takes whose
+length ≠ the simulated N are greyed — so playing loops of a different length stop.
+**Known gap vs. the intent** ("losing the connection must not kill the music"): keeping
+loops running at the *last Ninjam N* across the drop (instead of jumping to the
+simulated grid) is a v2 refinement.
 
 ### 9.4 Silent capture — refused (red flash, slot stays Empty); no empty files.
 
 ---
 
-## 10. Session files
+## 10. Session files  *(planned, M4 — not built; the M1 engine keeps takes in RAM only)*
 
 ```
 <asset::user("akaudio-sessions")>/<YYYY-MM-DD_HHMM>_<room>/      one jam
@@ -516,6 +535,10 @@ current session name is Ninjam's (room + join time), exposed in the clock messag
 ---
 
 ## 11. Patch persistence (`dataToJson`)
+
+*(Built today: `simSecondsIdx`, `defRepeats`, `defDecayDb`, `trackNames`, and the Rack
+params — no audio, so a reload gives an empty grid. The session-directory / loader part
+below is **planned, M4**.)*
 
 Looper: session directory (relative to `asset::user("akaudio-sessions")` — never an
 absolute path that embeds the home directory), archive quality, track names,
@@ -549,17 +572,21 @@ Resample takes on sample-rate change. Recorder: decode-on-demand preview per pla
 | M1 | `LooperEngine` (Rack-free): rolling record, Capture, Launch, Stop, playback with repeats/decay; single track; worker with Prepare/Ready and the free-list | the state machine + buffer rotation, under test |
 |    | *Status 2026-08-22: implemented* — `src/looper/{Spsc,LooperEngine,LooperWorker}` + `test/looper_engine_test.cpp` (passes, sample-exact). Beyond the M1 scope it already covers all 8 tracks, scenes, overdub (progressive staging: worker copies take + the recorded part, audio thread folds the rest in ≤256 frames/tick), the TX latch, the −70 dBFS gate and a tanh soft limiter; rolling buffers follow cable presence (an unpatched track holds none). The module is wired to it: the Looper **loops real audio** in Rack from an adjacent Ninjam's clock or the simulated one. Capture rotates `last` into the slot with no copy and never waits on the worker; a second capture of the same interval on one track is refused. | |
 | M2 | 8×8 grid, scenes, track STOP / STOP ALL, submix + gate + limiter, OVERDUB | the full Looper |
+|    | *Status 2026-08-22: done, folded into M1* — plus CUE bus + bi-color TX LED, MULTI input with source tags, and transmit-to-Ninjam over the expander (§6). | |
 | M3 | `NjArchive` + `NjClient` RX/TX callbacks + `pullOffset`; Recorder module (panel, arm, status) | the wire archive and the shared timeline |
 | M4 | Looper `Session`: OGG writes, `session.json`, `history/`, patch persistence; one session dir shared with the Recorder | nothing kept is lost |
 | M5 | Looper panel: thumbnail slot widget with live fill, header, context menu (quality, memory) | the UI |
 | M6 | Docs (MANUAL.md, CHANGELOG), Library release | ship |
 
-Tests (`test/`, no Rack link, following the existing harness pattern):
-- `looper_engine_test.cpp` — drives `LooperEngine` with a synthetic
-  `JamClockMessage` stream: capture reproduces input sample-exactly from the
-  boundary; launch/stop land on the boundary; decay gain and repeats; scene stops
-  empty-slot tracks; grid change greys mismatched takes; overdub = take + input;
-  refused silent capture; **no allocation in `tick()`** (instrumented worker counter).
+Tests (`test/`, no Rack link):
+- `jamclock_test.cpp` *(built, passes)* — the integer `JamClock`: N vs NjAudio's
+  formula, one downbeat + `bpi` beats per interval, timeline across a tempo change,
+  fresh session on rejoin.
+- `looper_engine_test.cpp` *(built, passes)* — drives `LooperEngine` with a synthetic
+  clock + deterministic input: record-next-interval capture and launch/stop/overdub
+  play back sample-exactly; a new recording plays the old loop until it commits; repeats;
+  −6 dB decay; refused silent recording; scene stop; clear; regrid greys + refuses a
+  mismatched take; CUE carries a private track's thru (not MIX); allocation count bounded.
 - `session_test.cpp` — write a Looper session, parse it back, overwrite a slot and
   find the old file in `history/`, atomicity (no partial files after a simulated abort).
 - `archive_test.cpp` — feed `NjArchive` synthetic RX/TX intervals (incl. silence
