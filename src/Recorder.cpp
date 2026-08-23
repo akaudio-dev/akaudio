@@ -31,13 +31,15 @@ struct Recorder : Module {
 	enum ParamId { REC_PARAM, TX_PARAM, PARAMS_LEN };
 	enum InputId { INPUTS_LEN };
 	enum OutputId { OUTPUTS_LEN };
-	enum LightId { LIGHTS_LEN };
+	enum LightId { REC_LIGHT, LIGHTS_LEN };
 
-	dsp::BooleanTrigger recTrig, txTrig;
+	// Reconcile state (UI thread): the arm/recordTx truth lives in the adjacent Ninjam
+	// (RecorderLink); these latch params mirror it so the buttons are MIDI-mappable.
+	bool prevRec = false, prevTx = true;
 
 	Recorder() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
-		configButton(REC_PARAM, "Record (arm the wire archive)");
+		configSwitch(REC_PARAM, 0.f, 1.f, 0.f, "Record (arm the wire archive)", {"Idle", "Armed"});
 		configSwitch(TX_PARAM, 0.f, 1.f, 1.f, "Also record your transmitted mix", {"No", "Yes"});
 	}
 
@@ -57,36 +59,6 @@ struct Recorder : Module {
 };
 
 // ------------------------------------------------------------------------------------
-
-struct RecArmButton : app::Switch {
-	Recorder* rec = nullptr;
-	bool hovered = false;
-	RecArmButton() { momentary = true; }
-	void onEnter(const EnterEvent& e) override { hovered = true; app::Switch::onEnter(e); }
-	void onLeave(const LeaveEvent& e) override { hovered = false; app::Switch::onLeave(e); }
-	void draw(const DrawArgs& args) override {
-		NVGcontext* vg = args.vg;
-		akaudio::RecorderLink* lk = rec ? rec->link() : nullptr;
-		bool armed = lk && lk->recArmed();
-		bool active = lk && lk->recActive();
-		const float cx = box.size.x / 2, cy = box.size.y / 2, r = std::min(cx, cy) - 2.f;
-		// Filled red disc = armed; a soft pulse when actually writing.
-		if (armed && active) {
-			nvgBeginPath(vg);
-			nvgCircle(vg, cx, cy, r + 3.f);
-			float a = 0.25f + 0.2f * (float) (0.5 + 0.5 * std::sin(system::getTime() * 2.0 * M_PI));
-			nvgFillColor(vg, nvgTransRGBAf(rcRed(), a));
-			nvgFill(vg);
-		}
-		nvgBeginPath(vg);
-		nvgCircle(vg, cx, cy, r);
-		nvgFillColor(vg, armed ? rcRed() : (hovered ? akShade(0x22) : rcWell()));
-		nvgFill(vg);
-		nvgStrokeColor(vg, rcBorder());
-		nvgStrokeWidth(vg, 1.f);
-		nvgStroke(vg);
-	}
-};
 
 struct TxToggleButton : app::Switch {
 	Recorder* rec = nullptr;
@@ -153,6 +125,17 @@ struct RecStatusView : Widget {
 	}
 };
 
+// Code-drawn panel decoration: title, the RECORD label above the button, and the AK mark.
+struct Decor : Widget {
+	void draw(const DrawArgs& args) override {
+		NVGcontext* vg = args.vg;
+		drawTxt(vg, FONT_BOLD, box.size.x / 2, mm2px(6.5f), 11.f, rcText(), "REC", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, box.size.x / 2, mm2px(9.5f), 8.f, rcTextDim(), "RECORD", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, box.size.x / 2, mm2px(AK_MARK_Y_MM), 16.f, rcText(), "AK", NVG_ALIGN_CENTER);
+		Widget::draw(args);
+	}
+};
+
 struct RecorderWidget : ModuleWidget {
 	Recorder* rec = nullptr;
 
@@ -166,35 +149,45 @@ struct RecorderWidget : ModuleWidget {
 		addChild(createWidget<ThemedScrew>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 		addChild(createWidget<ThemedScrew>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
+		Decor* decor = new Decor;
+		decor->box.size = box.size;
+		addChild(decor);
+
 		const float W = box.size.x;
+		// REC: the component-library bezel button + red light — identical to the Looper's
+		// OVERDUB — latching. The light is driven from the archive state in step().
+		addParam(createLightParamCentered<VCVLightBezelLatch<RedLight>>(
+			Vec(W / 2, mm2px(15.f)), module, Recorder::REC_PARAM, Recorder::REC_LIGHT));
 
-		RecArmButton* recBtn = createParam<RecArmButton>(Vec(W / 2 - 13, 26), module, Recorder::REC_PARAM);
-		recBtn->box.size = Vec(26, 26);
-		recBtn->rec = module;
-		addParam(recBtn);
-
-		TxToggleButton* txBtn = createParam<TxToggleButton>(Vec(W / 2 - 15, 58), module, Recorder::TX_PARAM);
+		TxToggleButton* txBtn = createParam<TxToggleButton>(Vec(W / 2 - 15, mm2px(24.f)), module, Recorder::TX_PARAM);
 		txBtn->box.size = Vec(30, 14);
 		txBtn->rec = module;
 		addParam(txBtn);
 
 		RecStatusView* sv = new RecStatusView;
 		sv->rec = module;
-		sv->box.pos = Vec(6, 80);
-		sv->box.size = Vec(W - 12, RACK_GRID_HEIGHT - 80 - 22);
+		sv->box.pos = Vec(4, mm2px(31.f));
+		sv->box.size = Vec(W - 8, mm2px(AK_MARK_Y_MM - 4.f) - mm2px(31.f));
 		addChild(sv);
 	}
 
-	// REC / +TX buttons act on the RecorderLink (thread ops) — handle their edges here,
-	// on the UI thread. The params stay two-state so they are MIDI-mappable.
+	// The latch params mirror Ninjam's arm/recordTx state: a user toggle pushes to the
+	// link; an external change (e.g. Ninjam clearing it) pulls back into the param — the
+	// same param<->state reconcile Ninjam's metronome uses. Also drives the REC light.
 	void step() override {
 		ModuleWidget::step();
 		if (!rec) return;
 		akaudio::RecorderLink* lk = rec->link();
-		if (rec->recTrig.process(rec->params[Recorder::REC_PARAM].getValue() > 0.5f) && lk)
-			lk->setRecArmed(!lk->recArmed());
-		if (rec->txTrig.process(rec->params[Recorder::TX_PARAM].getValue() > 0.5f) && lk)
-			lk->setRecordOwnTx(!lk->recordOwnTx());
+		auto reconcile = [&](int pid, bool& prev, bool state, void (akaudio::RecorderLink::*setter)(bool)) {
+			bool pOn = rec->params[pid].getValue() > 0.5f;
+			if (pOn != prev) { prev = pOn; if (lk) (lk->*setter)(pOn); }
+			else if (lk && state != pOn) { rec->params[pid].setValue(state ? 1.f : 0.f); prev = state; }
+			else if (!lk && pOn) { rec->params[pid].setValue(0.f); prev = false; }
+		};
+		reconcile(Recorder::REC_PARAM, rec->prevRec, lk && lk->recArmed(), &akaudio::RecorderLink::setRecArmed);
+		reconcile(Recorder::TX_PARAM, rec->prevTx, lk ? lk->recordOwnTx() : true, &akaudio::RecorderLink::setRecordOwnTx);
+		float b = (lk && lk->recActive()) ? 1.f : ((lk && lk->recArmed()) ? 0.35f : 0.f);
+		rec->lights[Recorder::REC_LIGHT].setBrightness(b);
 	}
 
 	void appendContextMenu(Menu* menu) override {

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="40.64mm" height="128.5mm" viewBox="0 0 40.64 128.5">
-  <defs><linearGradient id="bg" x1="20.32" y1="0" x2="20.32" y2="128.5" gradientUnits="userSpaceOnUse">
+<svg xmlns="http://www.w3.org/2000/svg" width="30.48mm" height="128.5mm" viewBox="0 0 30.48 128.5">
+  <defs><linearGradient id="bg" x1="15.24" y1="0" x2="15.24" y2="128.5" gradientUnits="userSpaceOnUse">
     <stop offset="0" stop-color="#2a2b2c"/><stop offset="1" stop-color="#171818"/></linearGradient></defs>
-  <rect width="40.64" height="128.5" fill="url(#bg)"/><rect width="40.64" height="14" fill="#333639"/>
+  <rect width="30.48" height="128.5" fill="url(#bg)"/><rect width="30.48" height="14" fill="#333639"/>
 </svg>
