@@ -132,6 +132,7 @@ unittest:
 	$(CXX) -std=c++11 -O1 -I src test/jamclock_test.cpp -o build/jamclock_test && build/jamclock_test
 	$(CXX) -std=c++11 -O1 -I src test/looper_engine_test.cpp src/looper/LooperEngine.cpp \
 	  src/looper/LooperWorker.cpp -lpthread -o build/looper_engine_test && build/looper_engine_test
+	rm -rf build/archive_test_out
 	$(CXX) -std=c++11 -O1 -I src test/archive_test.cpp src/net/ninjam/NjArchive.cpp \
 	  src/net/Log.cpp -lpthread -o build/archive_test && build/archive_test build/archive_test_out
 

@@ -153,7 +153,7 @@ void NjArchive::bumpStat(const std::string& key, const std::string& label, bool 
 void NjArchive::run() {
 	// The index is a JSON-lines file (one object per interval): append-only, robust to a
 	// crash mid-session, and trivially parsed by an importer. See docs §7.2.
-	std::ofstream index(dir_ + "/index.jsonl", std::ios::out | std::ios::app | std::ios::binary);
+	std::ofstream index(dir_ + "/index.jsonl", std::ios::out | std::ios::trunc | std::ios::binary);
 	while (!abort_.load(std::memory_order_acquire)) {
 		Job j;
 		bool have = false;
