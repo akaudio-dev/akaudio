@@ -57,18 +57,20 @@ const float STOP_Y = GRID_Y + 7 * ROW_H + BTN_H + STOP_GAP; // bottoms align wit
 const float RX = 623.f;
 const float Y_DUB = 70.f;                      // overdub bezel button (label above, like Fundamental's PUSH)
 const float Y_REPEATS = 116.f, Y_DECAY = 162.f; // knob centers (labels 17 px above)
-// MIX plate: L over R on Ninjam's two output rows (MAIN row = AK_ROW_CV_MM, CV row =
-// AK_ROW_OUT_MM), so the plate spans exactly Ninjam's output block and the jacks line
-// up across the two modules. Labels left of the jacks.
-inline float mixPlateTop() { return mm2px(AK_PLATE_TOP_MM - (AK_ROW_OUT_MM - AK_ROW_CV_MM)); }
-inline float mixPlateBottom() { return mm2px(AK_PLATE_TOP_MM + AK_PLATE_H_MM); }
-inline float mixJackY(int ch) { return mm2px(ch == 0 ? AK_ROW_CV_MM : AK_ROW_OUT_MM); }
-const float MIX_JACK_X = RX + 7.f, MIX_LAB_X = RX - 13.f;
-const float MIX_PLATE_W = 46.f;
-// CUE output plate (private / non-transmitting tracks): its own plate above MIX.
-const float Y_CUE_TOP = 180.f, CUE_PLATE_H = 66.f;
-const float CUE_JACK_X = RX + 7.f, CUE_LAB_X = RX - 13.f;
-inline float stopH() { return mixPlateBottom() - STOP_Y; }
+// CUE and MIX: two IDENTICAL vertical stereo output plates (L over R) in the controls
+// column. One geometry for both — same jack spacing + margins as Ninjam's output jacks
+// — and the MIX plate's L jack sits on Ninjam's MAIN output row so the two line up.
+const float PLATE_W = 42.f;                    // plate width (jack + L/R label to its left)
+const float PLATE_JDY = 40.f;                  // L→R jack spacing (~Ninjam's pair spacing)
+const float PLATE_TOPGAP = 24.f;               // plate top → L jack (title sits above)
+const float PLATE_BOTGAP = 14.f;               // R jack → plate bottom
+const float PLATE_H = PLATE_TOPGAP + PLATE_JDY + PLATE_BOTGAP;
+const float PLATE_JACK_X = RX + 6.f, PLATE_LAB_X = RX - 12.f;
+const float MIX_TOP = mm2px(AK_ROW_CV_MM) - PLATE_TOPGAP; // L jack on Ninjam's MAIN row
+const float CUE_TOP = MIX_TOP - 6.f - PLATE_H;            // stacked above MIX, 6 px gap
+inline float plateLY(float top) { return top + PLATE_TOPGAP; }
+inline float plateRY(float top) { return top + PLATE_TOPGAP + PLATE_JDY; }
+inline float stopH() { return (MIX_TOP + PLATE_H) - STOP_Y; }
 
 // Track label: MindMeld's amber-on-black on the dark panel; black on grey on the light one.
 inline NVGcolor lpLabelBg()   { return akTheme(nvgRGB(0xc4, 0xc7, 0xcb), nvgRGB(0x1a, 0x1a, 0x1a)); }
@@ -371,30 +373,21 @@ struct LooperDecor : Widget {
 		drawTxt(vg, FONT_BOLD, RX, Y_DUB - 20.f, 11.f, lpText(), "OVERDUB", NVG_ALIGN_CENTER);
 		drawTxt(vg, FONT_BOLD, RX, Y_REPEATS - 17.f, 11.f, lpText(), "REPEATS", NVG_ALIGN_CENTER);
 		drawTxt(vg, FONT_BOLD, RX, Y_DECAY - 17.f, 11.f, lpText(), "DECAY", NVG_ALIGN_CENTER);
-		// CUE output plate: private / non-transmitting tracks' monitor. L over R, cyan label.
-		nvgBeginPath(vg);
-		nvgRoundedRect(vg, RX - MIX_PLATE_W / 2, Y_CUE_TOP, MIX_PLATE_W, CUE_PLATE_H, mm2px(AK_PLATE_R_MM));
-		nvgFillColor(vg, akPlate());
-		nvgFill(vg);
-		nvgStrokeColor(vg, bd);
-		nvgStrokeWidth(vg, 1.f);
-		nvgStroke(vg);
-		drawTxt(vg, FONT_BOLD, RX, Y_CUE_TOP + labDy, 10.f, akCueCyan(), "CUE", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, CUE_LAB_X, Y_CUE_TOP + 25.f, 11.f, akPlateText(), "L", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, CUE_LAB_X, Y_CUE_TOP + 51.f, 11.f, akPlateText(), "R", NVG_ALIGN_CENTER);
-
-		// MIX output plate (dark; light in the dark theme): L over R, "MIX" on top, L/R
-		// labels left of the jacks.
-		nvgBeginPath(vg);
-		nvgRoundedRect(vg, RX - MIX_PLATE_W / 2, mixPlateTop(), MIX_PLATE_W, mixPlateBottom() - mixPlateTop(), mm2px(AK_PLATE_R_MM));
-		nvgFillColor(vg, akPlate());
-		nvgFill(vg);
-		nvgStrokeColor(vg, bd);
-		nvgStrokeWidth(vg, 1.f);
-		nvgStroke(vg);
-		drawTxt(vg, FONT_BOLD, RX, mixPlateTop() + labDy, 11.f, akPlateText(), "MIX", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, MIX_LAB_X, mixJackY(0), 11.f, akPlateText(), "L", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, MIX_LAB_X, mixJackY(1), 11.f, akPlateText(), "R", NVG_ALIGN_CENTER);
+		// Two identical vertical stereo plates: CUE (cyan title) above, MIX below.
+		auto plate = [&](float top, const char* title, NVGcolor titleCol) {
+			nvgBeginPath(vg);
+			nvgRoundedRect(vg, RX - PLATE_W / 2, top, PLATE_W, PLATE_H, mm2px(AK_PLATE_R_MM));
+			nvgFillColor(vg, akPlate());
+			nvgFill(vg);
+			nvgStrokeColor(vg, bd);
+			nvgStrokeWidth(vg, 1.f);
+			nvgStroke(vg);
+			drawTxt(vg, FONT_BOLD, RX, top + labDy, 11.f, titleCol, title, NVG_ALIGN_CENTER);
+			drawTxt(vg, FONT_BOLD, PLATE_LAB_X, plateLY(top), 11.f, akPlateText(), "L", NVG_ALIGN_CENTER);
+			drawTxt(vg, FONT_BOLD, PLATE_LAB_X, plateRY(top), 11.f, akPlateText(), "R", NVG_ALIGN_CENTER);
+		};
+		plate(CUE_TOP, "CUE", akCueCyan());
+		plate(MIX_TOP, "MIX", akPlateText());
 		// "AK" maker mark at the bottom, where Radio/Ninjam put it.
 		drawTxt(vg, FONT_BOLD, box.size.x / 2.f, mm2px(AK_MARK_Y_MM), 16.f, lpText(), "AK", NVG_ALIGN_CENTER);
 		Widget::draw(args);
@@ -815,10 +808,10 @@ struct LooperWidget : ModuleWidget {
 		// Bottom I/O strip.
 		addParam(createParamCentered<RoundSmallBlackKnob>(Vec(RX, Y_REPEATS), module, Looper::REPEATS_PARAM));
 		addParam(createParamCentered<RoundSmallBlackKnob>(Vec(RX, Y_DECAY), module, Looper::DECAY_PARAM));
-		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(CUE_JACK_X, Y_CUE_TOP + 25.f), module, Looper::CUE_L_OUTPUT));
-		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(CUE_JACK_X, Y_CUE_TOP + 51.f), module, Looper::CUE_R_OUTPUT));
-		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(MIX_JACK_X, mixJackY(0)), module, Looper::MIX_L_OUTPUT));
-		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(MIX_JACK_X, mixJackY(1)), module, Looper::MIX_R_OUTPUT));
+		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(PLATE_JACK_X, plateLY(CUE_TOP)), module, Looper::CUE_L_OUTPUT));
+		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(PLATE_JACK_X, plateRY(CUE_TOP)), module, Looper::CUE_R_OUTPUT));
+		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(PLATE_JACK_X, plateLY(MIX_TOP)), module, Looper::MIX_L_OUTPUT));
+		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(PLATE_JACK_X, plateRY(MIX_TOP)), module, Looper::MIX_R_OUTPUT));
 		// Overdub: the component-library bezel button with a light (what Fundamental's
 		// PUSH uses), latching; red = overdub armed.
 		addParam(createLightParamCentered<VCVLightBezelLatch<RedLight>>(Vec(RX, Y_DUB), module,

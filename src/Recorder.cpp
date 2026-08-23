@@ -74,6 +74,7 @@ struct Recorder : Module {
 
 // ------------------------------------------------------------------------------------
 
+// A raised pill toggle: "REC TX" with an LED dot (red when your TX is also archived).
 struct TxToggleButton : app::Switch {
 	Recorder* rec = nullptr;
 	bool hovered = false;
@@ -83,14 +84,24 @@ struct TxToggleButton : app::Switch {
 		NVGcontext* vg = args.vg;
 		akaudio::RecorderLink* lk = rec ? rec->link() : nullptr;
 		bool on = lk && lk->recordOwnTx();
+		const float w = box.size.x, h = box.size.y, r = h / 2.f;
+		NVGcolor body = akTheme(nvgRGB(0xb9, 0xbd, 0xc2), nvgRGB(0x44, 0x48, 0x4c));
 		nvgBeginPath(vg);
-		nvgRoundedRect(vg, 0, 0, box.size.x, box.size.y, 3.f);
-		nvgFillColor(vg, on ? nvgTransRGBAf(rcRed(), 0.3f) : rcCard());
+		nvgRoundedRect(vg, 0, 0, w, h, r);
+		nvgFillColor(vg, hovered ? akTheme(nvgRGB(0xa8,0xac,0xb2), nvgRGB(0x52,0x56,0x5b)) : body);
 		nvgFill(vg);
-		nvgStrokeColor(vg, rcBorder());
-		nvgStroke(vg);
-		drawTxt(vg, FONT_BOLD, box.size.x / 2, box.size.y / 2, 8.f,
-			on ? rcText() : rcTextDim(), "+TX", NVG_ALIGN_CENTER);
+		// Soft top highlight (raised look, like the Looper's scene/stop buttons).
+		nvgBeginPath(vg);
+		nvgRoundedRect(vg, 1.f, 1.f, w - 2.f, h / 2.f, r);
+		nvgFillColor(vg, akDark() ? nvgRGBA(0xff,0xff,0xff,0x10) : nvgRGBA(0xff,0xff,0xff,0x55));
+		nvgFill(vg);
+		// LED dot (left) + label.
+		float cy = h / 2.f;
+		nvgBeginPath(vg);
+		nvgCircle(vg, 8.f, cy, 3.f);
+		nvgFillColor(vg, on ? rcRed() : akShade(0x40));
+		nvgFill(vg);
+		drawTxt(vg, FONT_BOLD, 15.f, cy, 8.f, rcText(), "REC TX", NVG_ALIGN_LEFT);
 	}
 };
 
@@ -167,10 +178,11 @@ struct RecStatusView : Widget {
 struct Decor : Widget {
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
-		drawTxt(vg, FONT_BOLD, box.size.x / 2, 9.f, 12.f, rcText(), "REC", NVG_ALIGN_CENTER);
+		// Header title: same font + size as the Looper's "LOOPER" (FONT_BOLD 15).
+		drawTxt(vg, FONT_BOLD, box.size.x / 2, 21.f, 15.f, rcText(), "REC", NVG_ALIGN_CENTER);
 		// "RECORD" label above the bezel button, whose centre sits at y=70 (aligned with
 		// the Looper's OVERDUB so the two line up when placed around Ninjam).
-		drawTxt(vg, FONT_BOLD, box.size.x / 2, 50.f, 9.f, rcTextDim(), "RECORD", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, box.size.x / 2, 52.f, 8.5f, rcTextDim(), "RECORD", NVG_ALIGN_CENTER);
 		drawTxt(vg, FONT_BOLD, box.size.x / 2, mm2px(AK_MARK_Y_MM), 16.f, rcText(), "AK", NVG_ALIGN_CENTER);
 		Widget::draw(args);
 	}
@@ -199,8 +211,8 @@ struct RecorderWidget : ModuleWidget {
 		addParam(createLightParamCentered<VCVLightBezelLatch<RedLight>>(
 			Vec(W / 2, 70.f), module, Recorder::REC_PARAM, Recorder::REC_LIGHT));
 
-		TxToggleButton* txBtn = createParam<TxToggleButton>(Vec(W / 2 - 16, 92.f), module, Recorder::TX_PARAM);
-		txBtn->box.size = Vec(32, 15);
+		TxToggleButton* txBtn = createParam<TxToggleButton>(Vec(W / 2 - 27, 92.f), module, Recorder::TX_PARAM);
+		txBtn->box.size = Vec(54, 16);
 		txBtn->rec = module;
 		addParam(txBtn);
 
