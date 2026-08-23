@@ -51,8 +51,11 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
     `net/RoomDirectory` (background fetch of ninbot's directory). UI never blocks on the
     network. Open polish items in `TODO.md`.
 
-- **Looper + Recorder** (designed; Looper UX scaffold built in `src/Looper.cpp`, no
-  audio stored yet; it already takes the **real interval grid** from an adjacent Ninjam
+- **Looper + Recorder** (Looper built through M1: `src/Looper.cpp` is the Rack glue over
+  the Rack-free engine in `src/looper/` — `LooperEngine` (audio thread: always-record,
+  boundary-quantized capture/launch/stop/overdub, scenes, repeats/decay, gate, TX latch,
+  submix + limiter) and `LooperWorker` (the only thread that allocates/frees buffers;
+  SPSC `Spsc.hpp` both ways). No session files yet (M4). It takes the **real interval grid** from an adjacent Ninjam
   via expander messages — `src/JamClock.hpp` holds `JamClockMessage` + the
   integer-frame `JamClock` that Ninjam's beat clock now runs on and publishes to every
   chained Looper on both sides (`Ninjam::publishClock`); a Looper falls back to a
@@ -382,6 +385,11 @@ with undo).
   # capture a few seconds of any AAC/AAC+ stream, then:
   build/aac_decode_test sample.aac   # exit 0 = real audio; HE-AAC verifies SBR (22050→44100)
   ```
+- `looper_engine_test.cpp` — drives `LooperEngine` with a synthetic clock and deterministic
+  input: capture/launch/stop/overdub commit on the boundary and play back sample-exactly,
+  repeats, −6 dB decay, silent-capture refusal, scene stop, clear, regrid (mismatched
+  take greyed + refused), bounded allocations. Build:
+  `c++ -std=c++11 -I src test/looper_engine_test.cpp src/looper/LooperEngine.cpp src/looper/LooperWorker.cpp -lpthread -o build/looper_engine_test && build/looper_engine_test`
 - `jamclock_test.cpp` — offline check of `JamClock` (integer interval length vs NjAudio's
   formula, one downbeat + `bpi` beats per interval, session timeline across a tempo
   change, new session on rejoin). Header-only, no deps:

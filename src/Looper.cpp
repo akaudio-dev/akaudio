@@ -2,18 +2,17 @@
 // Copyright (C) 2026 Andrei Kozlov
 
 // Looper — 8 tracks × 8 slots Ableton-Session-style interval looper for NINJAM jams.
-// Design: docs/LOOPER_DESIGN.md. This is the **UX scaffold** (milestone "UX"): the
-// complete panel and the real slot state machine (arm → commit at the boundary,
-// scenes, stops, repeats/decay, selection, menus) driven by a SIMULATED interval
-// clock when no Ninjam is adjacent (M0 added the real clock: an adjacent, joined
-// Ninjam's JamClockMessage drives the boundary, countdown and grid generation).
-// What is real: the armed slot's live fill and capture thumbnails come from the inputs,
-// and the inputs pass through to MIX. What is not: no audio
-// is stored or played back, and there is no Ninjam clock yet (JamClock, milestone M0).
+// Design: docs/LOOPER_DESIGN.md. This file is the Rack glue: the Module (params,
+// jacks, clock source, persistence) and the panel widgets. The looper itself —
+// always-record, boundary-quantized capture/launch/stop/overdub, scenes, repeats and
+// decay, the submix — is the Rack-free LooperEngine in src/looper/ (M1), driven by an
+// adjacent Ninjam's JamClockMessage (M0) or, without one, a simulated clock.
+// Not yet: session files (M4). Panel polish: M5.
 
 #include "plugin.hpp"
 #include "Theme.hpp"
 #include "JamClock.hpp"
+#include "looper/LooperEngine.hpp"
 
 #include <atomic>
 #include <cmath>
@@ -21,10 +20,9 @@
 
 namespace {
 
-const int TRACKS = 8;
-const int SLOTS = 8;
-const int THUMB_BINS = 64;        // thumbnail / LIVE strip resolution
-const float GATE = 0.000316f;     // −70 dBFS on the ±1 scale: a silent capture is refused
+const int TRACKS = akaudio::looper::MAX_TRACKS;
+const int SLOTS = akaudio::looper::MAX_SLOTS;
+const int THUMB_BINS = akaudio::looper::THUMB_BINS;
 
 const int REPEAT_CHOICES[] = {0, 1, 2, 4, 8, 16, 32, 64}; // 0 = ∞ (REPEATS knob positions)
 const int N_REPEAT_CHOICES = 8;
@@ -67,6 +65,9 @@ inline float mixPlateBottom() { return mm2px(AK_PLATE_TOP_MM + AK_PLATE_H_MM); }
 inline float mixJackY(int ch) { return mm2px(ch == 0 ? AK_ROW_CV_MM : AK_ROW_OUT_MM); }
 const float MIX_JACK_X = RX + 7.f, MIX_LAB_X = RX - 13.f;
 const float MIX_PLATE_W = 46.f;
+// CUE output plate (private / non-transmitting tracks): its own plate above MIX.
+const float Y_CUE_TOP = 180.f, CUE_PLATE_H = 66.f;
+const float CUE_JACK_X = RX + 7.f, CUE_LAB_X = RX - 13.f;
 inline float stopH() { return mixPlateBottom() - STOP_Y; }
 
 // Track label: MindMeld's amber-on-black on the dark panel; black on grey on the light one.
@@ -114,63 +115,39 @@ struct Looper : Module {
 	};
 	enum OutputId {
 		MIX_L_OUTPUT, MIX_R_OUTPUT,
+		CUE_L_OUTPUT, CUE_R_OUTPUT,
 		OUTPUTS_LEN
 	};
 	enum LightId { OVERDUB_LIGHT, LIGHTS_LEN };
 
-	enum SlotState { EMPTY = 0, FILLED = 1, PLAYING = 2 };
-	enum Pending { NONE = 0, CAPTURE = 1, LAUNCH = 2, STOP = 3, OVERDUB = 4 };
-
-	// Per-slot state. The state machine lives on the audio thread (where the button
-	// edges are); the widget reads atomics. `thumb` is a plain array (display-only,
-	// benign race; written only at a boundary).
-	struct Slot {
-		std::atomic<int> state{EMPTY};
-		std::atomic<int> pending{NONE};
-		std::atomic<int> repeats{0};       // 0 = ∞ (UI writes, process reads)
-		std::atomic<float> decayDb{0.f};   // dB per repetition, 0…−6
-		std::atomic<int> repCount{0};
-		std::atomic<float> gain{1.f};
-		std::atomic<double> flashAt{-1.0}; // wall time of a refused capture (red flash)
-		bool startedThisBoundary = false;  // audio thread: skip the wrap on the commit boundary
-		float thumb[THUMB_BINS] = {};
-	};
-	struct Track {
-		Slot slots[SLOTS];
-		std::atomic<int> playingSlot{-1};
-		std::atomic<bool> present{false};
-		float live[THUMB_BINS] = {};     // interval in progress (process writes; an armed slot draws it)
-		float lastLive[THUMB_BINS] = {}; // the interval just completed (capture source)
-		float peak = 0.f;                // peak of the interval in progress
-		float lastPeak = 0.f;
-		float txGain = 1.f;              // smoothed TX latch (process only): no click on toggle
-	};
-	Track tracks[TRACKS];
+	// The looper proper (Rack-free, src/looper/): tracks × slots, rolling record,
+	// boundary commits, playback, submix. Its worker thread owns all buffers.
+	akaudio::looper::LooperEngine engine;
 
 	// Editable track labels (UI thread only; persisted). Default "-01-" … "-08-".
 	std::string trackNames[TRACKS];
 
 	// Selection = the last pressed slot (or a menu "Select"). Index track*SLOTS+slot, −1 none.
 	std::atomic<int> selected{-1};
-	// Module-level defaults for new captures (context menu).
-	std::atomic<int> defRepeats{0};
-	std::atomic<float> defDecayDb{0.f};
 
 	// ---- Clock source ----
 	// A live Ninjam clock (expander message, either side, chained) wins; otherwise the
-	// simulated clock runs so the UX works with nothing else in the rack.
+	// simulated clock runs so the looper works with nothing else in the rack.
 	std::atomic<int> simSecondsIdx{1};      // index into SIM_SECONDS (4 s)
 	std::atomic<bool> ninjamClock{false};   // UI: source LED / header
 	std::atomic<int> clockBpm{0}, clockBpi{0};
+	// Where each track's signal comes from (UI tag): 0 none, 1 own jack, 2 MULTI pair.
+	std::atomic<int> trackSource[TRACKS];
+	std::atomic<int> trackMultiCh[TRACKS]; // first MULTI channel (0-based) feeding this track, −1 none
+	std::atomic<float> trackLevel[TRACKS]; // live input peak (UI: is signal actually arriving?)
+	std::atomic<int> multiChannels{0};     // MULTI poly channel count (UI diagnostic)
 	std::atomic<float> phase{0.f};          // 0..1 interval progress (UI)
 	std::atomic<float> secsLeft{0.f};       // seconds to the next boundary (UI)
-	int64_t frameInInterval = 0;            // process() only: position within the interval
-	int64_t intervalFrames = 1;             // process() only: N of the active source
 	int64_t simFrame = -1;                  // simulated clock position (−1 = first frame)
+	uint64_t simSession = 0;                // simulated clock timeline
+	uint32_t simGen = 1000;                 // simulated clock generation (bumped on source switch)
 	uint64_t lastSession[2] = {0, 0};       // liveness: Ninjam advances sessionFrame every frame
-	uint32_t lastGen = 0;                   // gridGeneration last seen (regrid detection)
 	bool lastNinjam = false;
-	uint32_t lcg = 0x9e3779b9u;             // synthetic thumbnails for unpatched tracks
 
 	dsp::BooleanTrigger slotTrig[TRACKS * SLOTS];
 	dsp::BooleanTrigger sceneTrig[SLOTS];
@@ -179,6 +156,12 @@ struct Looper : Module {
 
 	Looper() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
+		for (int t = 0; t < TRACKS; t++) {
+			trackNames[t] = defaultTrackName(t);
+			trackSource[t].store(0, std::memory_order_relaxed);
+			trackMultiCh[t].store(-1, std::memory_order_relaxed);
+			trackLevel[t].store(0.f, std::memory_order_relaxed);
+		}
 		// Expander message buffers (both sides — Ninjam may be left or right). Ninjam
 		// writes the producer side, Rack flips at the end of the timestep, we read the
 		// consumer side. Freed in the destructor.
@@ -186,8 +169,6 @@ struct Looper : Module {
 		leftExpander.consumerMessage = new akaudio::JamClockMessage();
 		rightExpander.producerMessage = new akaudio::JamClockMessage();
 		rightExpander.consumerMessage = new akaudio::JamClockMessage();
-		for (int t = 0; t < TRACKS; t++)
-			trackNames[t] = defaultTrackName(t);
 		for (int t = 0; t < TRACKS; t++) {
 			for (int s = 0; s < SLOTS; s++)
 				configButton(SLOT_PARAM + t * SLOTS + s, string::f("Track %d slot %d", t + 1, s + 1));
@@ -197,7 +178,7 @@ struct Looper : Module {
 			configInput(IN_L_INPUT + t, string::f("Track %d L", t + 1));
 			configInput(IN_R_INPUT + t, string::f("Track %d R (unpatched = mono)", t + 1));
 		}
-		configInput(MULTI_INPUT, "Multi (poly: ch 1-2 = track 1 L/R, 3-4 = track 2 â¦; a track's own jack wins)");
+		configInput(MULTI_INPUT, "Multi (poly): channels 1-2 = track 1, 3-4 = track 2, â¦; a track's own jack wins its pair");
 		for (int s = 0; s < SLOTS; s++)
 			configButton(SCENE_PARAM + s, string::f("Scene %d", s + 1));
 		configButton(STOP_ALL_PARAM, "Stop all tracks");
@@ -207,9 +188,13 @@ struct Looper : Module {
 		configSwitch(OVERDUB_PARAM, 0.f, 1.f, 0.f, "Overdub mode", {"Off", "On"});
 		configOutput(MIX_L_OUTPUT, "Mix L (to Ninjam IN)");
 		configOutput(MIX_R_OUTPUT, "Mix R (to Ninjam IN)");
+		configOutput(CUE_L_OUTPUT, "Cue L (private / non-transmitting tracks â your monitor)");
+		configOutput(CUE_R_OUTPUT, "Cue R (private / non-transmitting tracks â your monitor)");
+		engine.start();
 	}
 
 	~Looper() override {
+		engine.stop();
 		delete (akaudio::JamClockMessage*) leftExpander.producerMessage;
 		delete (akaudio::JamClockMessage*) leftExpander.consumerMessage;
 		delete (akaudio::JamClockMessage*) rightExpander.producerMessage;
@@ -218,147 +203,17 @@ struct Looper : Module {
 
 	static std::string defaultTrackName(int t) { return string::f("-%02d-", t + 1); }
 
-	Slot& slotAt(int idx) { return tracks[idx / SLOTS].slots[idx % SLOTS]; }
+	akaudio::looper::Slot& slotAt(int idx) { return engine.slotAt(idx); }
 
 	// ---- Button intents (audio thread) ----
 	void pressSlot(int t, int s) {
-		Slot& sl = tracks[t].slots[s];
 		selected.store(t * SLOTS + s, std::memory_order_relaxed);
-		if (sl.pending.load(std::memory_order_relaxed) != NONE) {
-			sl.pending.store(NONE, std::memory_order_relaxed); // press again = cancel
-			return;
-		}
-		switch (sl.state.load(std::memory_order_relaxed)) {
-			case EMPTY:   sl.pending.store(CAPTURE, std::memory_order_relaxed); break;
-			case FILLED:  sl.pending.store(LAUNCH, std::memory_order_relaxed); break;
-			case PLAYING:
-				sl.pending.store(params[OVERDUB_PARAM].getValue() > 0.5f ? OVERDUB : STOP,
-					std::memory_order_relaxed);
-				break;
-		}
-	}
-	void armStopTrack(int t) {
-		int p = tracks[t].playingSlot.load(std::memory_order_relaxed);
-		if (p >= 0)
-			tracks[t].slots[p].pending.store(STOP, std::memory_order_relaxed);
-	}
-	void pressScene(int row) {
-		for (int t = 0; t < TRACKS; t++) {
-			Slot& sl = tracks[t].slots[row];
-			switch (sl.state.load(std::memory_order_relaxed)) {
-				case EMPTY:   armStopTrack(t); break;          // Ableton default: empty slot stops the track
-				case FILLED:  sl.pending.store(LAUNCH, std::memory_order_relaxed); break;
-				case PLAYING: break;                           // already the playing slot
-			}
-		}
-	}
-
-	// ---- Boundary commit (audio thread) ----
-	void synthThumb(float* out) {
-		// A plausible fake waveform so the UX can be exercised with nothing patched.
-		float env = 0.f;
-		for (int i = 0; i < THUMB_BINS; i++) {
-			lcg = lcg * 1664525u + 1013904223u;
-			float r = (float) (lcg >> 8) / 16777216.f;
-			if (r > 0.93f) env = 0.5f + 0.5f * r;
-			env *= 0.86f;
-			out[i] = std::min(1.f, env + 0.06f * r);
-		}
-	}
-	void setPlaying(int t, int s) {
-		Track& tr = tracks[t];
-		int prev = tr.playingSlot.load(std::memory_order_relaxed);
-		if (prev >= 0 && prev != s)
-			tr.slots[prev].state.store(FILLED, std::memory_order_relaxed);
-		Slot& sl = tr.slots[s];
-		sl.state.store(PLAYING, std::memory_order_relaxed);
-		sl.repCount.store(0, std::memory_order_relaxed);
-		sl.gain.store(1.f, std::memory_order_relaxed);
-		sl.startedThisBoundary = true;
-		tr.playingSlot.store(s, std::memory_order_relaxed);
-	}
-	void boundary() {
-		for (int t = 0; t < TRACKS; t++) {
-			Track& tr = tracks[t];
-			// 1. Finish the rolling interval.
-			for (int i = 0; i < THUMB_BINS; i++) { tr.lastLive[i] = tr.live[i]; tr.live[i] = 0.f; }
-			tr.lastPeak = tr.peak;
-			tr.peak = 0.f;
-			const bool present = tr.present.load(std::memory_order_relaxed);
-			// 2. Commit pending operations.
-			for (int s = 0; s < SLOTS; s++) {
-				Slot& sl = tr.slots[s];
-				int p = sl.pending.exchange(NONE, std::memory_order_relaxed);
-				switch (p) {
-					case CAPTURE:
-						if (present && tr.lastPeak < GATE) {
-							sl.flashAt.store(system::getTime(), std::memory_order_relaxed); // refused
-							break;
-						}
-						if (present) { for (int i = 0; i < THUMB_BINS; i++) sl.thumb[i] = tr.lastLive[i]; }
-						else synthThumb(sl.thumb);
-						sl.repeats.store(defRepeats.load(std::memory_order_relaxed), std::memory_order_relaxed);
-						sl.decayDb.store(defDecayDb.load(std::memory_order_relaxed), std::memory_order_relaxed);
-						setPlaying(t, s);
-						break;
-					case LAUNCH:
-						setPlaying(t, s);
-						break;
-					case STOP:
-						if (sl.state.load(std::memory_order_relaxed) == PLAYING) {
-							sl.state.store(FILLED, std::memory_order_relaxed);
-							if (tr.playingSlot.load(std::memory_order_relaxed) == s)
-								tr.playingSlot.store(-1, std::memory_order_relaxed);
-						}
-						break;
-					case OVERDUB:
-						// Scaffold: the overdubbed take "looks" like old + new.
-						for (int i = 0; i < THUMB_BINS; i++)
-							sl.thumb[i] = std::min(1.f, std::max(sl.thumb[i],
-								present ? tr.lastLive[i] : sl.thumb[i] * 0.7f + 0.2f));
-						sl.repCount.store(0, std::memory_order_relaxed);
-						sl.gain.store(1.f, std::memory_order_relaxed);
-						sl.startedThisBoundary = true;
-						break;
-					default: break;
-				}
-			}
-			// 3. The playing slot wraps: repeats + decay (not on the boundary it started on).
-			int ps = tr.playingSlot.load(std::memory_order_relaxed);
-			if (ps >= 0) {
-				Slot& sl = tr.slots[ps];
-				if (sl.startedThisBoundary) {
-					sl.startedThisBoundary = false;
-				} else {
-					int rc = sl.repCount.load(std::memory_order_relaxed) + 1;
-					sl.repCount.store(rc, std::memory_order_relaxed);
-					float g = std::pow(10.f, sl.decayDb.load(std::memory_order_relaxed) * (float) rc / 20.f);
-					sl.gain.store(g, std::memory_order_relaxed);
-					int reps = sl.repeats.load(std::memory_order_relaxed);
-					if ((reps > 0 && rc >= reps) || g < 1e-3f) {
-						sl.state.store(FILLED, std::memory_order_relaxed);
-						tr.playingSlot.store(-1, std::memory_order_relaxed);
-					}
-				}
-			}
-		}
-	}
-
-	// The grid moved (join, tempo change, sample rate, clock source switch): queued
-	// actions were aimed at the old grid — cancel them; the rolling recorders restart.
-	void onRegrid() {
-		for (int t = 0; t < TRACKS; t++) {
-			Track& tr = tracks[t];
-			for (int s = 0; s < SLOTS; s++)
-				tr.slots[s].pending.store(NONE, std::memory_order_relaxed);
-			for (int i = 0; i < THUMB_BINS; i++) tr.live[i] = 0.f;
-			tr.peak = 0.f;
-		}
+		engine.pressSlot(t, s, params[OVERDUB_PARAM].getValue() > 0.5f);
 	}
 
 	// Pick the clock for this frame: a live Ninjam message from either side, else the
-	// simulated clock. Returns true on an interval boundary (this frame is frame 0).
-	bool tickClock(const ProcessArgs& args) {
+	// simulated clock. Fills the engine's ClockFrame.
+	akaudio::looper::ClockFrame tickClock(const ProcessArgs& args) {
 		const akaudio::JamClockMessage* src = nullptr;
 		for (int side = 0; side < 2; side++) {
 			const akaudio::JamClockMessage* m = (const akaudio::JamClockMessage*)
@@ -369,113 +224,114 @@ struct Looper : Module {
 			lastSession[side] = m->sessionFrame;
 			if (live && !src) src = m;
 		}
-		bool downbeat;
+		akaudio::looper::ClockFrame c;
+		c.running = true;
+		c.sampleRate = args.sampleRate;
 		if (src) {
-			if (!lastNinjam || src->gridGeneration != lastGen) onRegrid();
-			lastGen = src->gridGeneration;
-			intervalFrames = std::max(1, src->intervalFrames);
-			frameInInterval = src->frameInInterval;
-			downbeat = src->downbeat;
-			clockBpm.store(src->bpm, std::memory_order_relaxed);
-			clockBpi.store(src->bpi, std::memory_order_relaxed);
+			c.intervalFrames = std::max(1, src->intervalFrames);
+			c.frameInInterval = src->frameInInterval;
+			c.downbeat = src->downbeat;
+			c.gridGeneration = src->gridGeneration;
+			c.sessionFrame = src->sessionFrame;
+			c.bpm = src->bpm; c.bpi = src->bpi;
 			simFrame = -1;
 		} else {
-			if (lastNinjam) onRegrid();
-			intervalFrames = std::max<int64_t>(1,
+			if (lastNinjam) simGen++; // back to the simulated grid: a new generation
+			int64_t n = std::max<int64_t>(1,
 				(int64_t) (SIM_SECONDS[simSecondsIdx.load(std::memory_order_relaxed)] * args.sampleRate));
-			if (++simFrame >= intervalFrames) simFrame = 0;
-			frameInInterval = simFrame;
-			downbeat = simFrame == 0;
-			clockBpm.store(0, std::memory_order_relaxed);
-			clockBpi.store(0, std::memory_order_relaxed);
+			if (++simFrame >= n) simFrame = 0;
+			c.intervalFrames = (int) n;
+			c.frameInInterval = (int) simFrame;
+			c.downbeat = simFrame == 0;
+			c.gridGeneration = simGen;
+			c.sessionFrame = simSession++;
+			c.bpm = 0; c.bpi = 0;
 		}
 		lastNinjam = src != nullptr;
 		ninjamClock.store(lastNinjam, std::memory_order_relaxed);
-		phase.store((float) frameInInterval / (float) intervalFrames, std::memory_order_relaxed);
-		secsLeft.store((float) (intervalFrames - frameInInterval) / args.sampleRate, std::memory_order_relaxed);
-		return downbeat;
+		clockBpm.store(c.bpm, std::memory_order_relaxed);
+		clockBpi.store(c.bpi, std::memory_order_relaxed);
+		phase.store((float) c.frameInInterval / (float) c.intervalFrames, std::memory_order_relaxed);
+		secsLeft.store((float) (c.intervalFrames - c.frameInInterval) / args.sampleRate, std::memory_order_relaxed);
+		return c;
 	}
 
 	void process(const ProcessArgs& args) override {
-		// Clock first: a boundary finishes the previous interval before this frame is
-		// recorded into the new one.
-		if (tickClock(args))
-			boundary();
-		const int bin = (int) std::min<int64_t>(THUMB_BINS - 1, frameInInterval * THUMB_BINS / intervalFrames);
-
-		// Buttons (edges on the audio thread — where the real engine will read them).
+		// Buttons (edges on the audio thread, where the engine's state machine is).
 		for (int i = 0; i < TRACKS * SLOTS; i++)
 			if (slotTrig[i].process(params[SLOT_PARAM + i].getValue() > 0.5f))
 				pressSlot(i / SLOTS, i % SLOTS);
 		for (int s = 0; s < SLOTS; s++)
 			if (sceneTrig[s].process(params[SCENE_PARAM + s].getValue() > 0.5f))
-				pressScene(s);
+				engine.pressScene(s);
 		for (int t = 0; t < TRACKS; t++)
 			if (stopTrig[t].process(params[STOP_PARAM + t].getValue() > 0.5f))
-				armStopTrack(t);
+				engine.stopTrack(t);
 		if (stopAllTrig.process(params[STOP_ALL_PARAM].getValue() > 0.5f))
-			for (int t = 0; t < TRACKS; t++) armStopTrack(t);
+			engine.stopAll();
 
-		// Inputs: LIVE strip + pass-through to MIX (the submix is real; loop playback is not).
-		float mixL = 0.f, mixR = 0.f;
+		// Inputs: a track's own jack pair, else its MULTI pair (sequential stereo pairs).
+		akaudio::looper::TrackIn in[TRACKS];
 		const int nMulti = inputs[MULTI_INPUT].getChannels(); // 0 when unpatched
+		multiChannels.store(nMulti, std::memory_order_relaxed);
 		for (int t = 0; t < TRACKS; t++) {
-			Track& tr = tracks[t];
-			float l = 0.f, r = 0.f;
-			bool present;
+			akaudio::looper::TrackIn& x = in[t];
+			x.tx = params[TX_PARAM + t].getValue() > 0.5f;
+			int src = 0, mch = -1;
 			if (inputs[IN_L_INPUT + t].isConnected()) {
-				// The track's own stereo jacks take precedence over the MULTI pair.
-				present = true;
-				l = inputs[IN_L_INPUT + t].getVoltage() * 0.2f;
-				r = inputs[IN_R_INPUT + t].isConnected() ? inputs[IN_R_INPUT + t].getVoltage() * 0.2f : l;
+				x.present = true;
+				x.l = inputs[IN_L_INPUT + t].getVoltage() * 0.2f;
+				x.r = inputs[IN_R_INPUT + t].isConnected() ? inputs[IN_R_INPUT + t].getVoltage() * 0.2f : x.l;
+				src = 1;
 			} else if (2 * t < nMulti) {
-				// MULTI: sequential stereo pairs; an odd trailing channel is mono.
-				present = true;
-				l = inputs[MULTI_INPUT].getVoltage(2 * t) * 0.2f;
-				r = (2 * t + 1 < nMulti) ? inputs[MULTI_INPUT].getVoltage(2 * t + 1) * 0.2f : l;
+				mch = 2 * t;
+				x.present = true;
+				x.l = inputs[MULTI_INPUT].getVoltage(2 * t) * 0.2f;
+				x.r = (2 * t + 1 < nMulti) ? inputs[MULTI_INPUT].getVoltage(2 * t + 1) * 0.2f : x.l;
+				src = 2;
 			} else {
-				present = false;
+				x.present = false;
+				x.l = x.r = 0.f;
 			}
-			tr.present.store(present, std::memory_order_relaxed);
-			float a = std::max(std::fabs(l), std::fabs(r));
-			if (a > tr.live[bin]) tr.live[bin] = std::min(1.f, a);
-			if (a > tr.peak) tr.peak = a;
-			// TX latch: a private track's live input leaves MIX (loops would still play —
-			// the loop is the band's state; STOP it if you want it gone). ~10 ms fade.
-			float txT = params[TX_PARAM + t].getValue() > 0.5f ? 1.f : 0.f;
-			tr.txGain += (txT - tr.txGain) * 0.002f;
-			mixL += l * tr.txGain; // instruments arrive already leveled + panned: a plain sum
-			mixR += r * tr.txGain;
+			trackSource[t].store(src, std::memory_order_relaxed);
+			trackMultiCh[t].store(mch, std::memory_order_relaxed);
+			float lvl = std::max(std::fabs(x.present ? x.l : 0.f), std::fabs(x.present ? x.r : 0.f));
+			float prev = trackLevel[t].load(std::memory_order_relaxed);
+			trackLevel[t].store(lvl > prev ? lvl : prev * 0.999f, std::memory_order_relaxed); // peak-hold
 		}
-		outputs[MIX_L_OUTPUT].setVoltage(clamp(mixL, -1.f, 1.f) * 5.f);
-		outputs[MIX_R_OUTPUT].setVoltage(clamp(mixR, -1.f, 1.f) * 5.f);
 
+		float outL = 0.f, outR = 0.f, cueL = 0.f, cueR = 0.f;
+		engine.tick(tickClock(args), in, TRACKS, system::getTime(), outL, outR, cueL, cueR);
+		outputs[MIX_L_OUTPUT].setVoltage(outL * 5.f);
+		outputs[MIX_R_OUTPUT].setVoltage(outR * 5.f);
+		outputs[CUE_L_OUTPUT].setVoltage(cueL * 5.f);
+		outputs[CUE_R_OUTPUT].setVoltage(cueR * 5.f);
+
+		// Transmit companion: if an adjacent module is Ninjam, hand it our MIX over the
+		// expander (into its buffer facing us, flipped for it to read next frame), so a
+		// Looper next to Ninjam transmits with no MIX→IN cable. We write into Ninjam's
+		// expander; Ninjam writes the clock into ours — the two flows don't collide.
+		for (int side = 0; side < 2; side++) {
+			Module* x = side ? rightExpander.module : leftExpander.module;
+			if (!x || x->model != modelNinjam) continue;
+			Expander& nx = side ? x->leftExpander : x->rightExpander; // Ninjam's buffer facing us
+			auto* buf = (akaudio::LooperAudioMessage*) nx.producerMessage;
+			if (!buf) continue;
+			buf->active = true; buf->mixL = outL; buf->mixR = outR;
+			nx.requestMessageFlip();
+		}
 		lights[OVERDUB_LIGHT].setBrightness(params[OVERDUB_PARAM].getValue() > 0.5f ? 1.f : 0.f);
 	}
 
 	// ---- UI-thread helpers ----
-	void clearSlot(int t, int s) {
-		Track& tr = tracks[t];
-		Slot& sl = tr.slots[s];
-		sl.pending.store(NONE, std::memory_order_relaxed);
-		if (tr.playingSlot.load(std::memory_order_relaxed) == s)
-			tr.playingSlot.store(-1, std::memory_order_relaxed);
-		sl.state.store(EMPTY, std::memory_order_relaxed);
-		for (int i = 0; i < THUMB_BINS; i++) sl.thumb[i] = 0.f;
-	}
-	int pendingCount() const {
-		int n = 0;
-		for (int t = 0; t < TRACKS; t++)
-			for (int s = 0; s < SLOTS; s++)
-				if (tracks[t].slots[s].pending.load(std::memory_order_relaxed) != NONE) n++;
-		return n;
-	}
+	void clearSlot(int t, int s) { engine.requestClear(t, s); }
+	int pendingCount() const { return engine.pendingCount(); }
 
 	json_t* dataToJson() override {
 		json_t* root = json_object();
 		json_object_set_new(root, "simSecondsIdx", json_integer(simSecondsIdx.load()));
-		json_object_set_new(root, "defRepeats", json_integer(defRepeats.load()));
-		json_object_set_new(root, "defDecayDb", json_real(defDecayDb.load()));
+		json_object_set_new(root, "defRepeats", json_integer(engine.defRepeats.load()));
+		json_object_set_new(root, "defDecayDb", json_real(engine.defDecayDb.load()));
 		json_t* names = json_array();
 		for (int t = 0; t < TRACKS; t++)
 			json_array_append_new(names, json_string(trackNames[t].c_str()));
@@ -486,8 +342,8 @@ struct Looper : Module {
 		json_t* j;
 		if ((j = json_object_get(root, "simSecondsIdx")))
 			simSecondsIdx.store(clamp((int) json_integer_value(j), 0, N_SIM_SECONDS - 1));
-		if ((j = json_object_get(root, "defRepeats"))) defRepeats.store((int) json_integer_value(j));
-		if ((j = json_object_get(root, "defDecayDb"))) defDecayDb.store((float) json_number_value(j));
+		if ((j = json_object_get(root, "defRepeats"))) engine.defRepeats.store((int) json_integer_value(j));
+		if ((j = json_object_get(root, "defDecayDb"))) engine.defDecayDb.store((float) json_number_value(j));
 		if ((j = json_object_get(root, "trackNames")) && json_is_array(j)) {
 			for (int t = 0; t < TRACKS && t < (int) json_array_size(j); t++) {
 				const char* n = json_string_value(json_array_get(j, t));
@@ -515,6 +371,18 @@ struct LooperDecor : Widget {
 		drawTxt(vg, FONT_BOLD, RX, Y_DUB - 20.f, 11.f, lpText(), "OVERDUB", NVG_ALIGN_CENTER);
 		drawTxt(vg, FONT_BOLD, RX, Y_REPEATS - 17.f, 11.f, lpText(), "REPEATS", NVG_ALIGN_CENTER);
 		drawTxt(vg, FONT_BOLD, RX, Y_DECAY - 17.f, 11.f, lpText(), "DECAY", NVG_ALIGN_CENTER);
+		// CUE output plate: private / non-transmitting tracks' monitor. L over R, cyan label.
+		nvgBeginPath(vg);
+		nvgRoundedRect(vg, RX - MIX_PLATE_W / 2, Y_CUE_TOP, MIX_PLATE_W, CUE_PLATE_H, mm2px(AK_PLATE_R_MM));
+		nvgFillColor(vg, akPlate());
+		nvgFill(vg);
+		nvgStrokeColor(vg, bd);
+		nvgStrokeWidth(vg, 1.f);
+		nvgStroke(vg);
+		drawTxt(vg, FONT_BOLD, RX, Y_CUE_TOP + labDy, 10.f, akCueCyan(), "CUE", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, CUE_LAB_X, Y_CUE_TOP + 25.f, 11.f, akPlateText(), "L", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, CUE_LAB_X, Y_CUE_TOP + 51.f, 11.f, akPlateText(), "R", NVG_ALIGN_CENTER);
+
 		// MIX output plate (dark; light in the dark theme): L over R, "MIX" on top, L/R
 		// labels left of the jacks.
 		nvgBeginPath(vg);
@@ -631,6 +499,18 @@ struct TrackLabel : HoverButton {
 		}
 		std::string name = lp ? lp->trackNames[t] : Looper::defaultTrackName(t);
 		drawTxt(vg, FONT_MONO, w / 2, h / 2 + 0.5f, 11.f, lpLabelText(), name, NVG_ALIGN_CENTER, w - 6.f);
+		// Source tag (right edge): J = own jack, P3-4 = MULTI channels, nothing = no input.
+		if (lp) {
+			int src = lp->trackSource[t].load(std::memory_order_relaxed);
+			int mch = lp->trackMultiCh[t].load(std::memory_order_relaxed);
+			float lvl = lp->trackLevel[t].load(std::memory_order_relaxed);
+			std::string tag = src == 1 ? "J" : src == 2 ? string::f("P%d-%d", mch + 1, mch + 2) : "";
+			if (!tag.empty()) {
+				bool sig = lvl > 0.003f; // ~−50 dBFS: audio is actually arriving on this track
+				NVGcolor c = sig ? nvgRGB(0x3a, 0xd0, 0x6a) : nvgTransRGBAf(lpLabelText(), 0.55f);
+				drawTxt(vg, FONT_BOLD, w - 2.f, h / 2 + 0.5f, 6.5f, c, tag, NVG_ALIGN_RIGHT);
+			}
+		}
 	}
 };
 
@@ -650,13 +530,13 @@ struct SlotButton : HoverSwitch {
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
 		const float w = box.size.x, h = box.size.y;
-		int state = Looper::EMPTY, pending = Looper::NONE, reps = 0, repCount = 0;
+		int state = akaudio::looper::EMPTY, pending = akaudio::looper::NONE, reps = 0, repCount = 0;
 		float decay = 0.f, gain = 1.f;
-		bool sel = false;
+		bool sel = false, playable = true;
 		const float* thumb = nullptr;
 		float preview[THUMB_BINS];
 		if (lp) {
-			Looper::Slot& sl = lp->tracks[t].slots[s];
+			akaudio::looper::Slot& sl = lp->engine.tracks[t].slots[s];
 			state = sl.state.load(std::memory_order_relaxed);
 			pending = sl.pending.load(std::memory_order_relaxed);
 			reps = sl.repeats.load(std::memory_order_relaxed);
@@ -664,18 +544,20 @@ struct SlotButton : HoverSwitch {
 			decay = sl.decayDb.load(std::memory_order_relaxed);
 			gain = sl.gain.load(std::memory_order_relaxed);
 			sel = lp->selected.load(std::memory_order_relaxed) == t * SLOTS + s;
+			playable = sl.playable.load(std::memory_order_relaxed);
 			thumb = sl.thumb;
 		} else if ((t * 3 + s * 5) % 7 < 2) {
 			// Library/browser preview: a few fake clips so the panel reads as a looper.
-			state = (t + s) % 3 == 0 ? Looper::PLAYING : Looper::FILLED;
+			state = (t + s) % 3 == 0 ? akaudio::looper::PLAYING : akaudio::looper::FILLED;
 			for (int i = 0; i < THUMB_BINS; i++)
 				preview[i] = 0.15f + 0.8f * std::fabs(std::sin(0.37f * i + t + s)) * std::exp(-0.04f * (i % 16));
 			thumb = preview;
 		}
 
 		// Body.
-		NVGcolor bg = state == Looper::EMPTY ? lpWell()
-		            : state == Looper::PLAYING ? nvgTransRGBAf(lpGreen(), 0.22f)
+		NVGcolor bg = state == akaudio::looper::EMPTY ? lpWell()
+		            : state == akaudio::looper::PLAYING ? nvgTransRGBAf(lpGreen(), 0.22f)
+		            : state == akaudio::looper::RECORDING ? nvgTransRGBAf(lpRed(), 0.15f)
 		            : lpCard();
 		nvgBeginPath(vg);
 		nvgRoundedRect(vg, 0, 0, w, h, 3.f);
@@ -685,11 +567,12 @@ struct SlotButton : HoverSwitch {
 		nvgStrokeWidth(vg, 1.f);
 		nvgStroke(vg);
 
-		// Thumbnail.
-		if (state != Looper::EMPTY && thumb) {
+		// Thumbnail (a take whose length no longer matches the grid draws faint: not launchable).
+		if ((state == akaudio::looper::FILLED || state == akaudio::looper::PLAYING) && thumb) {
 			const float bw = (w - 4.f) / THUMB_BINS;
-			NVGcolor c = state == Looper::PLAYING ? lpGreen() : lpTextDim();
-			nvgFillColor(vg, state == Looper::PLAYING ? nvgTransRGBAf(c, 0.35f + 0.65f * gain) : c);
+			NVGcolor c = state == akaudio::looper::PLAYING ? lpGreen() : lpTextDim();
+			if (!playable) c = nvgTransRGBAf(c, 0.3f);
+			nvgFillColor(vg, state == akaudio::looper::PLAYING ? nvgTransRGBAf(c, 0.35f + 0.65f * gain) : c);
 			for (int i = 0; i < THUMB_BINS; i++) {
 				float bh = std::max(1.f, thumb[i] * (h - 6.f));
 				nvgBeginPath(vg);
@@ -697,16 +580,16 @@ struct SlotButton : HoverSwitch {
 				nvgFill(vg);
 			}
 		}
-		// Armed for capture (or overdub): the interval being recorded fills the slot
-		// left → right, like a recording clip — red for capture, amber over the take
-		// for overdub. The bins come from the track's rolling recorder.
-		if (lp && (pending == Looper::CAPTURE || pending == Looper::OVERDUB)) {
-			Looper::Track& tr = lp->tracks[t];
+		// Recording (or overdubbing): the interval being recorded fills the slot
+		// left → right, like a recording clip — red while recording, amber over the
+		// take for overdub. The bins come from the track's rolling recorder.
+		if (lp && (state == akaudio::looper::RECORDING || pending == akaudio::looper::OVERDUB)) {
+			akaudio::looper::Track& tr = lp->engine.tracks[t];
 			float ph = lp->phase.load(std::memory_order_relaxed);
 			const float bw = (w - 4.f) / THUMB_BINS;
 			int upto = (int) (ph * THUMB_BINS);
 			bool present = tr.present.load(std::memory_order_relaxed);
-			nvgFillColor(vg, pending == Looper::CAPTURE ? lpRed() : lpAmber());
+			nvgFillColor(vg, state == akaudio::looper::RECORDING ? lpRed() : lpAmber());
 			for (int i = 0; i <= upto && i < THUMB_BINS; i++) {
 				float a = present ? tr.live[i] : 0.08f;
 				float bh = std::max(1.f, a * (h - 6.f));
@@ -716,7 +599,7 @@ struct SlotButton : HoverSwitch {
 			}
 		}
 		// Playhead.
-		if (state == Looper::PLAYING) {
+		if (state == akaudio::looper::PLAYING) {
 			float ph = lp ? lp->phase.load(std::memory_order_relaxed) : 0.4f;
 			nvgBeginPath(vg);
 			nvgRect(vg, 2.f + ph * (w - 4.f) - 0.5f, 1.f, 1.f, h - 2.f);
@@ -724,21 +607,21 @@ struct SlotButton : HoverSwitch {
 			nvgFill(vg);
 		}
 		// Settings tag (top-right): ∞ / ×N / N left, plus ↘ when decaying.
-		if (state != Looper::EMPTY) {
+		if (state == akaudio::looper::FILLED || state == akaudio::looper::PLAYING) {
 			std::string tag;
 			if (reps == 0) tag = "\xe2\x88\x9e";
-			else if (state == Looper::PLAYING) tag = string::f("%d", std::max(0, reps - repCount));
+			else if (state == akaudio::looper::PLAYING) tag = string::f("%d", std::max(0, reps - repCount));
 			else tag = string::f("\xc3\x97%d", reps);
 			if (decay < -0.01f) tag += "\xe2\x86\x98";
 			drawTxt(vg, FONT_BOLD, w - 2.5f, 5.f, 7.f, lpText(), tag, NVG_ALIGN_RIGHT);
 		}
 		// Armed: blinking outline colored by the queued operation.
-		if (pending != Looper::NONE) {
+		if (pending != akaudio::looper::NONE) {
 			double tm = system::getTime();
 			float a = 0.45f + 0.55f * (float) (0.5 + 0.5 * std::sin(tm * 2.0 * M_PI * 2.5));
-			NVGcolor c = pending == Looper::CAPTURE ? lpRed()
-			           : pending == Looper::LAUNCH ? lpGreen()
-			           : pending == Looper::OVERDUB ? lpAmber()
+			NVGcolor c = pending == akaudio::looper::CAPTURE ? lpRed()
+			           : pending == akaudio::looper::LAUNCH ? lpGreen()
+			           : pending == akaudio::looper::OVERDUB ? lpAmber()
 			           : lpTextDim();
 			nvgBeginPath(vg);
 			nvgRoundedRect(vg, 1.f, 1.f, w - 2.f, h - 2.f, 2.5f);
@@ -748,7 +631,7 @@ struct SlotButton : HoverSwitch {
 		}
 		// Refused capture: red flash.
 		if (lp) {
-			double f = lp->tracks[t].slots[s].flashAt.load(std::memory_order_relaxed);
+			double f = lp->engine.tracks[t].slots[s].flashAt.load(std::memory_order_relaxed);
 			double dt = system::getTime() - f;
 			if (f > 0 && dt < 0.5) {
 				nvgBeginPath(vg);
@@ -777,13 +660,13 @@ struct SlotButton : HoverSwitch {
 		if (!lp) return;
 		Looper* m = lp;
 		const int tt = t, ss = s;
-		Looper::Slot& sl = lp->tracks[t].slots[s];
+		akaudio::looper::Slot& sl = lp->engine.tracks[t].slots[s];
 		menu->addChild(new MenuSeparator);
 		menu->addChild(createMenuLabel(string::f("Track %d \xc2\xb7 slot %d", t + 1, s + 1)));
 		menu->addChild(createMenuItem("Select (for REPEATS / DECAY)", "", [m, tt, ss]() {
 			m->selected.store(tt * SLOTS + ss, std::memory_order_relaxed);
 		}));
-		Looper::Slot* slp = &sl;
+		akaudio::looper::Slot* slp = &sl;
 		menu->addChild(createIndexSubmenuItem("Repeats",
 			{"\xe2\x88\x9e", "1", "2", "4", "8", "16", "32", "64"},
 			[slp]() { return (size_t) repeatsIndex(slp->repeats.load(std::memory_order_relaxed)); },
@@ -799,7 +682,7 @@ struct SlotButton : HoverSwitch {
 				m->selected.store(tt * SLOTS + ss, std::memory_order_relaxed);
 			}));
 		menu->addChild(createMenuItem("Clear slot", "", [m, tt, ss]() { m->clearSlot(tt, ss); },
-			sl.state.load(std::memory_order_relaxed) == Looper::EMPTY));
+			sl.state.load(std::memory_order_relaxed) == akaudio::looper::EMPTY));
 	}
 };
 
@@ -808,9 +691,11 @@ struct SlotButton : HoverSwitch {
 struct TxSwitch : HoverSwitch {
 	void draw(const DrawArgs& args) override {
 		ParamQuantity* pq = getParamQuantity();
-		bool on = pq ? pq->getValue() > 0.5f : true;
-		const float r = 5.5f;
-		akDrawTxLed(args.vg, box.size.x / 2, box.size.y / 2, r, on, hovered);
+		bool on = pq ? pq->getValue() > 0.5f : true; // on air (MIX) vs private (CUE)
+		const float cx = box.size.x / 2, cy = box.size.y / 2, r = 5.5f;
+		// Always lit: green = transmitting to MIX, cyan = routed to CUE (private).
+		if (on) akDrawTxLedC(args.vg, cx, cy, r, true, hovered, akTxGreen(), nvgRGB(0x4a, 0xe0, 0x82));
+		else    akDrawTxLedC(args.vg, cx, cy, r, true, hovered, akCueCyan(), nvgRGB(0x62, 0xdc, 0xf0));
 	}
 };
 
@@ -822,7 +707,7 @@ struct GlyphButton : HoverSwitch {
 	bool sceneHasPending() {
 		if (!lp || kind != SCENE) return false;
 		for (int t = 0; t < TRACKS; t++)
-			if (lp->tracks[t].slots[idx].pending.load(std::memory_order_relaxed) != Looper::NONE) return true;
+			if (lp->engine.tracks[t].slots[idx].pending.load(std::memory_order_relaxed) != akaudio::looper::NONE) return true;
 		return false;
 	}
 	void draw(const DrawArgs& args) override {
@@ -930,6 +815,8 @@ struct LooperWidget : ModuleWidget {
 		// Bottom I/O strip.
 		addParam(createParamCentered<RoundSmallBlackKnob>(Vec(RX, Y_REPEATS), module, Looper::REPEATS_PARAM));
 		addParam(createParamCentered<RoundSmallBlackKnob>(Vec(RX, Y_DECAY), module, Looper::DECAY_PARAM));
+		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(CUE_JACK_X, Y_CUE_TOP + 25.f), module, Looper::CUE_L_OUTPUT));
+		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(CUE_JACK_X, Y_CUE_TOP + 51.f), module, Looper::CUE_R_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(MIX_JACK_X, mixJackY(0)), module, Looper::MIX_L_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(MIX_JACK_X, mixJackY(1)), module, Looper::MIX_R_OUTPUT));
 		// Overdub: the component-library bezel button with a light (what Fundamental's
@@ -950,7 +837,7 @@ struct LooperWidget : ModuleWidget {
 		if (sel != lastSel) {
 			lastSel = sel;
 			if (sel >= 0) {
-				Looper::Slot& sl = lp->slotAt(sel);
+				akaudio::looper::Slot& sl = lp->slotAt(sel);
 				lastRep = (float) repeatsIndex(sl.repeats.load(std::memory_order_relaxed));
 				lastDec = sl.decayDb.load(std::memory_order_relaxed);
 				rq->setValue(lastRep);
@@ -959,7 +846,7 @@ struct LooperWidget : ModuleWidget {
 			return;
 		}
 		if (sel < 0) return;
-		Looper::Slot& sl = lp->slotAt(sel);
+		akaudio::looper::Slot& sl = lp->slotAt(sel);
 		float r = rq->getValue();
 		if (r != lastRep) {
 			lastRep = r;
@@ -987,12 +874,12 @@ struct LooperWidget : ModuleWidget {
 			[m](size_t i) { m->simSecondsIdx.store((int) i, std::memory_order_relaxed); }));
 		menu->addChild(createIndexSubmenuItem("New clips: repeats",
 			{"\xe2\x88\x9e", "1", "2", "4", "8", "16", "32", "64"},
-			[m]() { return (size_t) repeatsIndex(m->defRepeats.load(std::memory_order_relaxed)); },
-			[m](size_t i) { m->defRepeats.store(REPEAT_CHOICES[i], std::memory_order_relaxed); }));
+			[m]() { return (size_t) repeatsIndex(m->engine.defRepeats.load(std::memory_order_relaxed)); },
+			[m](size_t i) { m->engine.defRepeats.store(REPEAT_CHOICES[i], std::memory_order_relaxed); }));
 		menu->addChild(createIndexSubmenuItem("New clips: decay per repetition",
 			{"0 dB (none)", "\xe2\x88\x92" "1 dB", "\xe2\x88\x92" "2 dB", "\xe2\x88\x92" "3 dB", "\xe2\x88\x92" "6 dB"},
-			[m]() { return (size_t) decayIndex(m->defDecayDb.load(std::memory_order_relaxed)); },
-			[m](size_t i) { m->defDecayDb.store(DECAY_CHOICES[i], std::memory_order_relaxed); }));
+			[m]() { return (size_t) decayIndex(m->engine.defDecayDb.load(std::memory_order_relaxed)); },
+			[m](size_t i) { m->engine.defDecayDb.store(DECAY_CHOICES[i], std::memory_order_relaxed); }));
 		menu->addChild(createMenuItem("Clear all slots", "", [m]() {
 			for (int t = 0; t < TRACKS; t++)
 				for (int s = 0; s < SLOTS; s++)

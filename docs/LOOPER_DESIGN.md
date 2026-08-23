@@ -28,8 +28,10 @@ complete, DAW-importable record of the jam without any existing recorder.
 - **Queued actions on the interval boundary** (capture / launch / stop / overdub /
   scene), with a sample-exact grid taken from Ninjam's protocol state — no CV
   plumbing, correct across mid-session BPM/BPI changes.
-- **Always-record, no arm:** every plugged-in track is continuously recorded; pressing
-  an empty slot *captures the interval you just played*.
+- **Ableton clip semantics, no record arm:** pressing an empty slot starts recording at
+  the next boundary and the take starts playing at the boundary after that (replacing
+  the slot that was playing). Every plugged-in track is continuously recorded into a
+  rolling buffer, which is what makes the commit a pointer move.
 - Per-slot **play modes** as two settings: `repeats` (∞ or N) and `decay` (gain per
   repetition).
 - **Submix** of all tracks to one stereo MIX OUT → one NINJAM channel on the wire
@@ -39,9 +41,12 @@ complete, DAW-importable record of the jam without any existing recorder.
   are renamed into `history/`, never deleted.
 - Waveform **thumbnails** in the slot buttons; an armed slot shows the interval being
   recorded filling in (like a recording clip in Live).
-- Per-track **TX** latch (Ninjam's transmit LED): off = that instrument's live input is
-  private (leaves MIX instantly, with a ~10 ms fade); loops still play, recording
-  continues. For trying something without the room hearing it.
+- Per-track **TX** latch (a bi-color LED, reusing Ninjam's transmit LED: green = on air
+  → MIX, cyan = private → CUE). Off routes that instrument's live input to the **CUE**
+  stereo out (your monitor) instead of MIX, crossfaded ~10 ms; loops still play to MIX,
+  recording continues. For trying something without the room hearing it.
+- **CUE** stereo out: the live-thru of the non-transmitting (private) tracks — monitor
+  what you're working up before it goes on air.
 - Everything pressable is a Rack param → MIDI-mappable (Launchpad-style).
 - Recorder: per-player, per-interval `.ogg` files **as received** (+ our TX intervals
   as sent), an index with each interval's position on the **session timeline**,
@@ -159,6 +164,11 @@ one shared boundary. The engine keeps **N per track** from day one.
 
 No protocol, socket, or codec changes.
 
+0. **Expander TX audio** (`Ninjam.cpp`): Ninjam allocates `LooperAudioMessage` receive
+   buffers on both sides, reads an adjacent Looper's MIX from them each frame, and — when
+   a Looper is its neighbour — transmits that one stereo channel (via `captureFrame(0,…)`)
+   and declares one channel, instead of the poly IN jack. IN jack unchanged when no
+   Looper is adjacent. The Looper writes the buffer + requests the flip.
 1. **`JamClock` extraction** (`Ninjam.cpp`): the beat clock becomes a small struct
    counting **integer frames** (`frameInInterval++`, boundary at `N`, `beatIndex =
    frameInInterval·bpi / N`; `N` exactly as `NjAudio::recomputeIntervalLocked`), plus
@@ -226,7 +236,7 @@ Track     { float* rec[2] (rolling: recording / last completed); int n /*N*/;
 ### 5.2 Slot states and pending operations
 
 ```
-state:   Empty | Filled | Playing
+state:   Empty | Filled | Playing | Recording
 pending: None | Capture | Launch | Stop | Overdub     (committed at the boundary)
 ```
 
@@ -235,7 +245,8 @@ pressing again cancels):
 
 | gesture | Empty | Filled | Playing |
 |---|---|---|---|
-| slot press | arm **Capture** | arm **Launch** | arm **Stop** (or **Overdub** if the OVERDUB latch is on) |
+| slot press | arm **Capture** (→ RECORDING at the boundary → PLAYING at the next) | arm **Launch** | arm **Stop** (or **Overdub** if the OVERDUB latch is on) |
+| press while RECORDING | cancel (back to Empty) | | |
 | scene press (row) | track **stops** (empty slot in the row) | arm Launch | no-op if already the playing slot |
 | track STOP | — | — | arm Stop |
 | STOP ALL | — | — | arm Stop on every track |
@@ -326,14 +337,27 @@ slot thumbnails (copied under the UI mutex when the worker publishes them).
 
 ## 6. Submix and gating
 
-- MIX OUT = Σ (thru + loop) through a soft limiter, so a loop stack can't clip on the
-  wire. No per-track level/pan: instruments are assumed to arrive leveled and panned
-  (decided 2026-08-22). What you monitor = what the room hears.
+- MIX OUT = Σ (on-air thru + loop); **CUE OUT = Σ (private thru)**, the live input of
+  TX-off tracks (loops always stay in MIX). No per-track level/pan: instruments are assumed to arrive
+  already leveled and panned at line level (±5V), so the sum is unity — a single track
+  in = the same level out. A soft limiter is a **safety net only**: transparent up to
+  full scale (±5V), gently compressing a SUM that exceeds it (a loop stack) so it can't
+  hard-clip. It is not a level control. What you monitor = what the room hears.
 - Live-thru is **gated to exact zero** (−70 dBFS, 100 ms hold): measured with the
   vendored encoder, exact zeros cost ≈0.1 kbps but noise at −90 dBFS ≈130 kbps, so
   idle tracks must be true silence on the wire.
 - **One** stereo channel on the wire (`NjAudio::MAX_TX = 4` is not a constraint).
   Trade-off: collaborators get one fader for "you", not one per instrument.
+- **No MIX→IN cable needed.** A Looper adjacent to Ninjam hands its MIX to Ninjam over
+  the expander (a `LooperAudioMessage` in `JamClock.hpp`: the Looper writes its on-air
+  MIX into Ninjam's expander buffer each frame; Ninjam OWNS that buffer as receiver and
+  reads it, 1-sample latency like the clock). Ninjam then transmits that single stereo
+  channel instead of its poly IN jack. Precedence: an adjacent Looper wins; with no
+  Looper neighbour Ninjam's IN jack behaves exactly as before (standalone use intact).
+  Left neighbour preferred (the instruments looper sits on Ninjam's left). The MIX OUT
+  jack still exists — you cable it to your monitor; only the MIX→Ninjam-IN cable is gone.
+  (Decided 2026-08-22, reversing the earlier "audio stays on cables" non-goal — the two
+  are already an adjacent pair for the clock, so the cable was redundant.)
 - Optional Ninjam follow-up: emit a NINJAM **silence interval** (zero GUID) for an
   all-zero captured interval instead of encoding it.
 
@@ -429,11 +453,13 @@ Radio/Ninjam (`ebebeb→e1e1e1`, `#1f1f1f` Nunito-Bold title).
 ### 8.2 Inputs
 Two ways in, per track: its own **stereo jack pair**, or the single poly **MULTI**
 jack (in the scene column, where one cable from a mixer replaces 16): MULTI channels
-are **sequential stereo pairs** — 1-2 → track 1 L/R, 3-4 → track 2, … (an odd trailing
-channel is mono). **A track's own L jack takes precedence** over its MULTI pair; R
-unconnected ⇒ R = L. `present(t)` = own L connected, or MULTI carries channel 2t
-(all plain field reads). A track is recorded whenever present; a take is kept only if
-it clears the gate.
+are **fixed stereo pairs** — 1-2 → track 1, 3-4 → track 2, … (an odd trailing channel
+is mono). **A track's own L jack takes precedence** over its MULTI pair; R unconnected
+⇒ R = L. The mapping never moves: adding a jack to a track doesn't shift any other
+track's channels. `present(t)` = own L connected, or MULTI carries channel 2t. A track
+is recorded whenever present; a take is kept only if it clears the gate. Each track
+label carries a source tag (J = own jack, P3-4 = MULTI wires, green when audio is
+actually arriving).
 
 ---
 
@@ -521,6 +547,7 @@ Resample takes on sample-rate change. Recorder: decode-on-demand preview per pla
 | M0 | **Real clock.** `src/JamClock.hpp` (`JamClockMessage` + a `JamClock` that counts integer frames: `intervalFrames`, `frameInInterval`, `gridGeneration`, `sessionFrame`); Ninjam's beat clock extracted onto it (CLOCK/RESET/RUN/PHASE, metronome and TX arming unchanged in behaviour, sub-sample drift fixed) + the expander chain walk on both sides; the Looper allocates its message buffers, detects a live Ninjam clock and drives its boundary/countdown from it (the simulated clock stays as the no-Ninjam fallback for now). *(The scaffold part of the old M0 — slug, panel, `plugin.json` — was done in UX.)* | the sync path: a Looper next to a joined Ninjam commits on the room's downbeat |
 |    | *Status 2026-08-22: implemented* — `src/JamClock.hpp` + `test/jamclock_test.cpp` (passes); Ninjam's beat clock runs on `JamClock` and calls `publishClock()` every frame; the Looper reads both sides, takes a live message (running + `sessionFrame` advancing) over the simulated clock, cancels queued actions on a `gridGeneration` change, and shows "NINJAM · bpm · bpi" with a green sync LED. Behaviour change in Ninjam: the metronome click and TX arming now happen *on* the regrid downbeat (join / tempo change) instead of one beat later. `roomLabel` is still empty (needs an audio-thread-safe snapshot of the UI-owned label). | |
 | M1 | `LooperEngine` (Rack-free): rolling record, Capture, Launch, Stop, playback with repeats/decay; single track; worker with Prepare/Ready and the free-list | the state machine + buffer rotation, under test |
+|    | *Status 2026-08-22: implemented* — `src/looper/{Spsc,LooperEngine,LooperWorker}` + `test/looper_engine_test.cpp` (passes, sample-exact). Beyond the M1 scope it already covers all 8 tracks, scenes, overdub (progressive staging: worker copies take + the recorded part, audio thread folds the rest in ≤256 frames/tick), the TX latch, the −70 dBFS gate and a tanh soft limiter; rolling buffers follow cable presence (an unpatched track holds none). The module is wired to it: the Looper **loops real audio** in Rack from an adjacent Ninjam's clock or the simulated one. Capture rotates `last` into the slot with no copy and never waits on the worker; a second capture of the same interval on one track is refused. | |
 | M2 | 8×8 grid, scenes, track STOP / STOP ALL, submix + gate + limiter, OVERDUB | the full Looper |
 | M3 | `NjArchive` + `NjClient` RX/TX callbacks + `pullOffset`; Recorder module (panel, arm, status) | the wire archive and the shared timeline |
 | M4 | Looper `Session`: OGG writes, `session.json`, `history/`, patch persistence; one session dir shared with the Recorder | nothing kept is lost |
