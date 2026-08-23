@@ -67,8 +67,11 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
   (Rack-free `LooperSink`: encodes each committed take to raw OGG under
   `<base>/<stamp>_<room>/looper/` — `t<t>_s<s>.ogg` + `session.json`, overwritten/cleared
   takes retired into `history/`; base defaults to `~/Music/jams`, shares a Recorder's jam
-  folder via `RecorderLink` when one is armed. Reload comes up empty — the clip loader is
-  v2). DAW project export (`.als`/`.rpp`) is deferred (an `.als` attempt was removed —
+  folder via `RecorderLink` when one is armed. The **clip loader restores the grid on patch
+  reload**: the resolved session dir is persisted, and on load the Session decodes each
+  saved OGG (stb_vorbis, on the worker) back into its slot as a FILLED take — playable once
+  the live grid matches its length; continued captures land in the same folder/manifest).
+  DAW project export (`.als`/`.rpp`) is deferred (an `.als` attempt was removed —
   no official SDK, reverse-engineering only; see `docs/LOOPER_DESIGN.md` §12). It takes
   the **real interval grid** from an adjacent Ninjam
   via expander messages — `src/JamClock.hpp` holds `JamClockMessage` + the

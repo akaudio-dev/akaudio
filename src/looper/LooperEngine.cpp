@@ -31,6 +31,10 @@ LooperEngine::~LooperEngine() {
 	Reply r;
 	while (replies.pop(r))
 		freeBuf(r.buf);
+	// Loads never installed.
+	LoadInstall li;
+	while (loads.pop(li))
+		freeBuf(li.buf);
 	Cmd c;
 	while (cmds.pop(c))
 		if (c.kind == Cmd::RELEASE)
@@ -193,6 +197,38 @@ void LooperEngine::drainIntents() {
 				break;
 			}
 		}
+	}
+}
+
+// Install decoded takes handed over by the worker (clip loader, v2). Each becomes a
+// FILLED slot with its saved settings; playability is decided against the live grid (a
+// take whose length/rate matches the current N is launchable, else greyed until it does —
+// the regrid rule). Buffer ownership passes to the slot (freed on clear/overwrite).
+void LooperEngine::drainLoads() {
+	LoadInstall li;
+	while (loads.pop(li)) {
+		if (li.track < 0 || li.track >= MAX_TRACKS || li.slot < 0 || li.slot >= MAX_SLOTS) {
+			release(li.buf);
+			continue;
+		}
+		Slot& sl = tracks[li.track].slots[li.slot];
+		if (sl.take.buf) release(sl.take.buf); // replace whatever is there
+		sl.take.buf = li.buf;
+		sl.take.frames = li.buf->frames; // the buffer's real length (== declared N when set right)
+		sl.take.bpm = li.meta.bpm;
+		sl.take.bpi = li.meta.bpi;
+		sl.take.sampleRate = li.meta.sampleRate;
+		sl.take.startFrame = li.meta.startFrame;
+		sl.take.peak = li.meta.peak;
+		sl.repeats.store(li.meta.repeats, std::memory_order_relaxed);
+		sl.decayDb.store(li.meta.decayDb, std::memory_order_relaxed);
+		for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = li.thumb[b];
+		bool ok = haveGrid && li.buf && li.buf->frames == N && li.meta.sampleRate == sr;
+		sl.playable.store(!haveGrid || ok, std::memory_order_relaxed);
+		sl.repCount.store(0, std::memory_order_relaxed);
+		sl.gain.store(1.f, std::memory_order_relaxed);
+		sl.pending.store(NONE, std::memory_order_relaxed);
+		sl.state.store(FILLED, std::memory_order_relaxed);
 	}
 }
 
@@ -415,6 +451,7 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
                         bool wantMix) {
 	drainReplies();
 	drainIntents();
+	drainLoads();
 	if (c.running && c.intervalFrames > 0) {
 		if (!haveGrid || c.gridGeneration != gen || c.intervalFrames != N || c.sampleRate != sr)
 			regrid(c);

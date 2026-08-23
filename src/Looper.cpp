@@ -22,6 +22,8 @@
 #include <cmath>
 #include <cstdint>
 #include <ctime>
+#include <fstream>
+#include <iterator>
 
 namespace {
 
@@ -151,6 +153,9 @@ struct Looper : Module {
 	std::string ownSessionFolder;      // <stamp>_session when jamming without a Recorder (formed once)
 	std::string resolvedSessionDir;    // the looper/ dir last handed to the session
 	std::string appliedSessionBase;    // sessionBase at the last resolve (menu change ⇒ re-resolve)
+	std::string loadDir;               // session dir restored from the patch (clip loader)
+	bool loadPending = false;          // a restore is queued (run once on the UI thread)
+	bool sessionRestored = false;      // this session was restored — keep its folder, don't reform
 
 	// Editable track labels (UI thread only; persisted). Default "-01-" … "-08-".
 	std::string trackNames[TRACKS];
@@ -374,6 +379,16 @@ struct Looper : Module {
 	// once a take has been written, so arming a Recorder mid-jam never splits takes across
 	// two folders — but a menu change of the base folder re-resolves.
 	void syncSession() {
+		if (loadPending) loadSession();
+		// A restored session keeps its own folder (so continued captures land beside the
+		// loaded takes and their manifest) — until the user changes the base folder.
+		if (sessionRestored) {
+			if (sessionBase != appliedSessionBase) sessionRestored = false; // menu change ⇒ re-resolve
+			else {
+				for (int t = 0; t < TRACKS; t++) session.setTrackName(t, trackNames[t]);
+				return;
+			}
+		}
 		std::string base, folder;
 		akaudio::RecorderLink* rl = adjacentRecorderLink();
 		if (rl && !rl->recSessionName().empty()) {
@@ -403,12 +418,70 @@ struct Looper : Module {
 			session.setTrackName(t, trackNames[t]);
 	}
 
+	// Restore the grid from a persisted session folder (clip loader). UI thread, runs once
+	// on patch load: parse `<loadDir>/session.json`, restore track names, seed the session's
+	// manifest model, and queue each take's OGG for the worker to decode + install. The
+	// takes appear as FILLED slots (playable once the live grid matches their length).
+	void loadSession() {
+		loadPending = false;
+		if (loadDir.empty()) return;
+		std::ifstream f(loadDir + "/session.json", std::ios::binary);
+		if (!f) return;
+		std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+		if (s.empty()) return;
+		json_error_t err;
+		json_t* root = json_loads(s.c_str(), 0, &err);
+		if (!root) return;
+
+		if (json_t* trks = json_object_get(root, "tracks"); json_is_array(trks)) {
+			size_t i; json_t* v;
+			json_array_foreach(trks, i, v) {
+				int idx = (int) json_integer_value(json_object_get(v, "index"));
+				const char* nm = json_string_value(json_object_get(v, "name"));
+				if (idx >= 0 && idx < TRACKS && nm && *nm) trackNames[idx] = nm;
+			}
+		}
+
+		// Point the session at the restored folder (this clears its model), then re-seed it.
+		resolvedSessionDir = loadDir;
+		session.setDir(loadDir);
+		appliedSessionBase = sessionBase;
+		sessionRestored = true;
+
+		if (json_t* slots = json_object_get(root, "slots"); json_is_array(slots)) {
+			size_t i; json_t* v;
+			json_array_foreach(slots, i, v) {
+				const char* file = json_string_value(json_object_get(v, "file"));
+				if (!file || !*file) continue;
+				int track = (int) json_integer_value(json_object_get(v, "track"));
+				int slot = (int) json_integer_value(json_object_get(v, "slot"));
+				if (track < 0 || track >= TRACKS || slot < 0 || slot >= SLOTS) continue;
+				akaudio::looper::TakeMeta meta{};
+				meta.frames = (int) json_integer_value(json_object_get(v, "frames"));
+				meta.sampleRate = (float) json_number_value(json_object_get(v, "sampleRate"));
+				meta.bpm = (int) json_integer_value(json_object_get(v, "bpm"));
+				meta.bpi = (int) json_integer_value(json_object_get(v, "bpi"));
+				meta.startFrame = (uint64_t) json_integer_value(json_object_get(v, "startFrame"));
+				meta.peak = (float) json_number_value(json_object_get(v, "peak"));
+				meta.repeats = (int) json_integer_value(json_object_get(v, "repeats"));
+				meta.decayDb = (float) json_number_value(json_object_get(v, "decayDb"));
+				if (meta.frames <= 0) continue;
+				session.noteExistingTake(track, slot, file, meta);
+				session.enqueueLoad(track, slot, loadDir + "/" + file, meta);
+			}
+		}
+		json_decref(root);
+	}
+
 	json_t* dataToJson() override {
 		json_t* root = json_object();
 		json_object_set_new(root, "simSecondsIdx", json_integer(simSecondsIdx.load()));
-		// Session folder (templated with ~ so a shared patch carries no user name). No audio
-		// in the patch: on reload the grid is empty and the files stay on disk (loader is v2).
+		// Session folder (templated with ~ so a shared patch carries no user name). The audio
+		// isn't in the patch — but the resolved session dir is, so a reload restores the grid
+		// from the OGGs + session.json on disk (the clip loader).
 		json_object_set_new(root, "sessionBase", json_string(akaudio::collapseHome(sessionBase).c_str()));
+		if (!resolvedSessionDir.empty())
+			json_object_set_new(root, "sessionDir", json_string(akaudio::collapseHome(resolvedSessionDir).c_str()));
 		json_object_set_new(root, "defRepeats", json_integer(engine.defRepeats.load()));
 		json_object_set_new(root, "defDecayDb", json_real(engine.defDecayDb.load()));
 		json_t* names = json_array();
@@ -424,6 +497,11 @@ struct Looper : Module {
 		if ((j = json_object_get(root, "sessionBase")) && json_is_string(j)) {
 			const char* b = json_string_value(j);
 			if (b && *b) sessionBase = akaudio::expandHome(b);
+		}
+		// Restore the grid from the saved session folder on the first UI step (clip loader).
+		if ((j = json_object_get(root, "sessionDir")) && json_is_string(j)) {
+			const char* d = json_string_value(j);
+			if (d && *d) { loadDir = akaudio::expandHome(d); loadPending = true; }
 		}
 		if ((j = json_object_get(root, "defRepeats"))) engine.defRepeats.store((int) json_integer_value(j));
 		if ((j = json_object_get(root, "defDecayDb"))) engine.defDecayDb.store((float) json_number_value(j));

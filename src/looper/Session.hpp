@@ -15,6 +15,7 @@
 // the encode itself runs unlocked (it only reads the caller's PCM).
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "LooperEngine.hpp"
 
@@ -40,10 +41,18 @@ public:
 	std::string dir() const;
 	bool hasWritten() const; // true once at least one take reached disk this session
 
+	// ---- Clip loader ----
+	// UI thread: queue a saved take to restore (its OGG at `absPath`).
+	void enqueueLoad(int track, int slot, const std::string& absPath, const TakeMeta& meta);
+	// UI thread: seed the manifest model with a take already on disk (a restored slot), so a
+	// later save/clear rewrites session.json with the restored takes preserved, not dropped.
+	void noteExistingTake(int track, int slot, const std::string& file, const TakeMeta& meta);
+
 	// ---- Worker thread (LooperSink) ----
 	void save(int track, int slot, const float* pcm, const TakeMeta& meta) override;
 	void clear(int track, int slot) override;
 	void flush() override;
+	bool nextLoad(int& track, int& slot, std::vector<float>& pcm, int& frames, TakeMeta& meta) override;
 
 	// Encode quality (VBR), archive-grade by default (~250 kbps). UI thread.
 	void setQuality(float q) { quality_ = q; }
@@ -62,6 +71,10 @@ private:
 
 	void writeManifestLocked();
 	std::string liveName(int t, int s) const;   // "t<t>_s<s>.ogg"
+
+	struct LoadReq { int track, slot; std::string path; TakeMeta meta; };
+	std::mutex loadMu_;
+	std::vector<LoadReq> loadQueue_;
 
 	mutable std::mutex mu_;
 	std::string dir_;

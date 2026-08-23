@@ -24,6 +24,7 @@
 // filled slot one take; per in-flight overdub one staging buffer.
 #include <atomic>
 #include <cstdint>
+#include <vector>
 
 #include "Spsc.hpp"
 
@@ -86,6 +87,22 @@ struct LooperSink {
 	virtual void save(int track, int slot, const float* pcm, const TakeMeta& meta) = 0;
 	virtual void clear(int track, int slot) = 0; // retire the slot's live file into history/
 	virtual void flush() = 0;                    // write the manifest if metadata changed
+	// Restore (v2 clip loader): pop the next take to load and decode its OGG into `pcm`
+	// (interleaved stereo, `frames` frames). Returns false when the load queue is empty.
+	// Worker thread — decoding + file I/O live here, off the audio thread.
+	virtual bool nextLoad(int& track, int& slot, std::vector<float>& pcm, int& frames,
+	                      TakeMeta& meta) { return false; }
+};
+
+// A decoded take on its way from the worker into a slot (clip loader). The worker
+// allocates + fills `buf` (like a committed take) and computes the thumbnail; the audio
+// thread installs it as a FILLED take. Buffer lifetime follows the usual rule — freed by
+// the worker when the slot is later cleared/overwritten.
+struct LoadInstall {
+	int track, slot;
+	Buf* buf;
+	TakeMeta meta;
+	float thumb[THUMB_BINS];
 };
 
 // Audio → worker.
@@ -170,6 +187,11 @@ public:
 	// stay in RAM only (the M1 behaviour, and what the engine tests use).
 	void setSink(LooperSink* s) { sink = s; }
 
+	// Clip loader (worker + test): hand a decoded take to the audio thread to install as a
+	// FILLED slot. Buffer ownership passes to the engine. Returns false if the queue is
+	// full (the caller then recycles the buffer).
+	bool submitLoad(const LoadInstall& li) { return loads.push(li); }
+
 	// Worker thread lifecycle (UI/setup thread).
 	void start();
 	void stop();
@@ -218,6 +240,7 @@ private:
 	void drainReplies();
 	void drainIntents();
 	void requestRec(int t);
+	void drainLoads();             // install decoded takes from the worker (clip loader)
 	bool armOverdub(int t, int s); // request staging = copy(take) for the next interval's overdub
 	void saveTake(int t, int s);  // enqueue an OGG save of the slot's committed take (M4)
 	void clearFile(int t, int s); // enqueue a retire of the slot's live file into history/ (M4)
@@ -229,6 +252,7 @@ private:
 	SpscQueue<Cmd, 256> cmds;      // audio → worker
 	SpscQueue<Reply, 256> replies; // worker → audio
 	SpscQueue<Intent, 64> intents; // UI → audio
+	SpscQueue<LoadInstall, 128> loads; // worker → audio (clip loader)
 	LooperWorker* worker = nullptr;
 
 	int N = 0;

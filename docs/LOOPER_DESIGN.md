@@ -18,10 +18,10 @@ clock from Ninjam (M0), the Rack-free engine looping real audio (M1), the MIX + 
 buses, transmit-to-Ninjam over the expander, and **session files on disk** (M4): each
 committed take is encoded to OGG + indexed under `<base>/<stamp>_<room>/looper/`,
 overwritten/cleared takes retired into `history/`. The **Recorder** module and its wire
-archive (§4 items 3-4, §7, M3) are also built. Still on paper, marked *(planned)*: the
-timeline refinements in §7.3, the **clip loader** (restoring the grid on patch reload — v1
-saves the files but reloads empty), and the **DAW project generators** (§12) — a first
-`.als` exporter was attempted and removed (see §12). §13 tracks per-milestone status.
+archive (§4 items 3-4, §7, M3) are also built, and the **clip loader** restores the grid
+on patch reload (§11 — the saved OGGs decode back into their slots). Still on paper, marked
+*(planned)*: the timeline refinements in §7.3 and the **DAW project generators** (§12) — a
+first `.als` exporter was attempted and removed (see §12). §13 tracks per-milestone status.
 
 ---
 
@@ -545,8 +545,8 @@ land in the **same jam folder** when a Recorder is armed: the Looper (UI thread)
 Recorder it forms its own `<stamp>_session/looper/`. The folder is **frozen once the
 first take is written**, so arming a Recorder mid-jam never splits a session across two
 folders. Directories are created lazily on the first real write — an empty session leaves
-nothing on disk. **The whole grid persists as ≤64 raw OGG files; on patch reload v1 comes
-up with an empty grid (the clip loader that restores them is v2, §12).**
+nothing on disk. **The whole grid persists as ≤64 raw OGG files and is restored on patch
+reload — the clip loader (§11).**
 
 `looper/session.json`:
 ```json
@@ -565,15 +565,29 @@ up with an empty grid (the clip loader that restores them is v2, §12).**
 
 ---
 
-## 11. Patch persistence (`dataToJson`)
+## 11. Patch persistence + clip loader (`dataToJson`) *(built)*
 
 Looper persists `simSecondsIdx`, `defRepeats`, `defDecayDb`, `trackNames`, the base
-session folder (`sessionBase`, templated `~/…` so a shared patch carries no user name),
-and the Rack params (which persist themselves). **No audio in the patch:** on reload the
-grid comes up **empty**; the take files remain on disk under the session folder, and the
-persisted base lets the v2 clip loader restore them. Recorder: "record own TX" toggle and
-armed state (re-arms on patch load only if Ninjam auto-rejoins — it records nothing
-otherwise).
+session folder (`sessionBase`), the **resolved session dir** (`sessionDir`), and the Rack
+params (both folder paths templated `~/…` so a shared patch carries no user name). **No
+audio in the patch** — but the session dir is, so the **clip loader** restores the grid on
+reload:
+
+- `dataFromJson` records the persisted `sessionDir` and flags a load; the widget's first
+  `step()` runs `loadSession()` once (UI thread): parse `<dir>/session.json`, restore track
+  names, seed the `Session` manifest model (`noteExistingTake`, so continued captures don't
+  drop the restored takes), and `enqueueLoad` each take's OGG.
+- The **worker** decodes each queued OGG (`stb_vorbis`, off the audio thread), allocates the
+  buffer, computes the thumbnail, and hands it over via an SPSC `LoadInstall`.
+- The **audio thread** (`drainLoads` in `tick`) installs each as a **FILLED** slot with its
+  saved `repeats`/`decay` and thumbnail — playable once the live grid matches its length
+  (the regrid rule; greyed until a matching clock arrives). Buffer lifetime is the usual
+  rule — the worker frees it when the slot is later cleared/overwritten.
+- A restored session **keeps its folder** (`sessionRestored`), so new captures land beside
+  the loaded takes and share their manifest — until the user changes the base folder.
+
+Recorder: "record own TX" toggle and armed state (re-arms on patch load only if Ninjam
+auto-rejoins — it records nothing otherwise).
 
 ---
 
@@ -596,8 +610,9 @@ worth it. **REAPER `.rpp` is the recommended target** if/when this is revisited:
 text, ~100 lines, stable, imports Ogg Vorbis, and the arrangement timeline maps directly;
 REAPER can then render stems for any DAW.
 
-**Deferred (v2+).** Clip loader (restore grid on patch load; load from
-files). Standalone clocking with per-track/per-take interval lengths. Duplicate /
+**Deferred (v2+).** Loading clips from arbitrary files (the on-reload restore is built,
+§11; loading a chosen OGG into a slot is not). Standalone clocking with per-track/per-take
+interval lengths. Duplicate /
 extend-with-silence (multi-interval loops). Follow actions; per-slot "no stop"; tape-
 style degradation. History browse. FLAC slot files. NINJAM silence-interval TX.
 Resample takes on sample-rate change. Recorder: decode-on-demand preview per player.
@@ -618,7 +633,7 @@ Resample takes on sample-rate change. Recorder: decode-on-demand preview per pla
 | M3 | `NjArchive` + `NjClient` RX/TX callbacks; Recorder module (panel, arm, status) | the wire archive and the shared timeline |
 |    | *Status 2026-08-22: implemented* — `NjArchive` (Rack-free writer thread) + `test/archive_test.cpp` (passes); RX bytes via `NjAudio::onIntervalReceived`, TX accumulated in `NjClient::sendUploadData`; `src/Recorder.cpp` drives it through `RecorderLink` (dynamic_cast on the neighbour); Ninjam gates on adjacency+arm+join and publishes the session frame. Simplifications vs §7.3: coarse per-block RX timestamp; `index.jsonl` not `clipsort.log`. | |
 | M4 | Looper `Session`: OGG writes, `session.json`, `history/`, patch persistence; one session dir shared with the Recorder | nothing kept is lost |
-|    | *Status 2026-08-23: implemented* — `src/looper/Session.{hpp,cpp}` (Rack-free `LooperSink`) + `test/session_test.cpp` (passes). Commits enqueue `SAVE`/`CLEAR_FILE` on the worker's SPSC queue; the worker encodes each take with the vendored OGG-Vorbis encoder and writes `t<t>_s<s>.ogg` atomically (tmp+rename), retiring an overwritten/cleared file into `history/`, and rewrites `session.json`. Buffer lifetime proven under ASan (`looper_engine_test` MockSink). The Looper borrows Ninjam's exact jam folder via `RecorderLink` when a Recorder is armed (else its own `<stamp>_session`), frozen after the first write. `sessionBase` (default `~/Music/jams`) is menu-configurable + persisted templated. Deferred to v2: the clip **loader** (reload comes up empty). `make unittest` now also builds + runs `session_test`. | |
+|    | *Status 2026-08-23: implemented* — `src/looper/Session.{hpp,cpp}` (Rack-free `LooperSink`) + `test/session_test.cpp` (passes). Commits enqueue `SAVE`/`CLEAR_FILE` on the worker's SPSC queue; the worker encodes each take with the vendored OGG-Vorbis encoder and writes `t<t>_s<s>.ogg` atomically (tmp+rename), retiring an overwritten/cleared file into `history/`, and rewrites `session.json`. Buffer lifetime proven under ASan (`looper_engine_test` MockSink). The Looper borrows Ninjam's exact jam folder via `RecorderLink` when a Recorder is armed (else its own `<stamp>_session`), frozen after the first write. `sessionBase` (default `~/Music/jams`) is menu-configurable + persisted templated. The **clip loader** (§11) is also built: `Session::enqueueLoad`/`nextLoad` decode a saved OGG (stb_vorbis) on the worker, an SPSC `LoadInstall` hands it to the audio thread, and the persisted `sessionDir` triggers restore on patch load. `make unittest` builds + runs `session_test` (incl. the decode round-trip). | |
 | M5 | Looper panel: thumbnail slot widget with live fill, header, context menu (quality, memory) | the UI |
 | M6 | Docs (MANUAL.md, CHANGELOG), Library release | ship |
 
@@ -630,12 +645,16 @@ Tests (`test/`, no Rack link):
   clock + deterministic input: record-next-interval capture and launch/stop/overdub
   play back sample-exactly; a new recording plays the old loop until it commits; repeats;
   −6 dB decay; refused silent recording; scene stop; clear; regrid greys + refuses a
-  mismatched take; CUE carries a private track's thru (not MIX); allocation count bounded.
+  mismatched take; CUE carries a private track's thru (not MIX); continuous overdub;
+  loop declick; a submitted **`LoadInstall` installs as a FILLED slot and launches**;
+  allocation count bounded (ASan-clean, incl. the load buffer).
 - `session_test.cpp` *(built, passes)* — write a Looper session, check the OGG files
   (real `OggS` streams) + the `session.json` manifest (room, track name, per-slot repeats/
   bpm/`startFrame`), a late settings edit reflected, overwrite → the old take in `history/`,
   clear → the file retired + dropped from the manifest, no leftover `.tmp` (atomicity),
-  and an untouched session that writes nothing. Folded into `make unittest`.
+  an untouched session that writes nothing, and the **clip-loader decode round-trip**
+  (a saved OGG decodes back to real audio at the right level, metadata preserved).
+  Folded into `make unittest`.
 - `archive_test.cpp` *(built, passes)* — feed `NjArchive` synthetic RX/TX intervals
   (incl. a silence interval that writes no file) with changing session frames; assert
   the per-player/tx files, verbatim bytes, JSONL index entries, and stats. `make unittest`

@@ -14,6 +14,7 @@
 #endif
 
 #include "../net/ninjam/NjEncoder.hpp"
+#include "../dep/stb_vorbis_impl.hpp"
 
 namespace akaudio {
 namespace looper {
@@ -235,6 +236,85 @@ void Session::flush() {
 	if (!dirty_ || !everWrote_ || dir_.empty()) return;
 	writeManifestLocked();
 	dirty_ = false;
+}
+
+// ---- Clip loader ----------------------------------------------------------------
+
+void Session::enqueueLoad(int track, int slot, const std::string& absPath, const TakeMeta& meta) {
+	std::lock_guard<std::mutex> lk(loadMu_);
+	loadQueue_.push_back({track, slot, absPath, meta});
+}
+
+void Session::noteExistingTake(int track, int slot, const std::string& file, const TakeMeta& meta) {
+	if (track < 0 || track >= MAX_TRACKS || slot < 0 || slot >= MAX_SLOTS) return;
+	std::lock_guard<std::mutex> lk(mu_);
+	Rec& r = recs_[track][slot];
+	r.present = true;
+	r.file = file;
+	r.frames = meta.frames;
+	r.bpm = meta.bpm;
+	r.bpi = meta.bpi;
+	r.sampleRate = meta.sampleRate;
+	r.peak = meta.peak;
+	r.startFrame = meta.startFrame;
+	r.repeats = meta.repeats;
+	r.decayDb = meta.decayDb;
+	sBpm_ = meta.bpm; sBpi_ = meta.bpi; sFrames_ = meta.frames; sSampleRate_ = meta.sampleRate;
+	// The on-disk session.json is already correct — don't set everWrote_/dirty_ here; a
+	// later real save/clear rewrites the manifest with these entries preserved.
+}
+
+// Worker thread: pop one queued take, decode its OGG (stb_vorbis) into interleaved stereo
+// float. `frames` is set to the take's DECLARED length (meta.frames) so the buffer matches
+// the interval grid exactly — Vorbis padding makes the decoded count differ by a few
+// samples; the worker fits the decoded PCM into that and zero-pads any tail. Returns false
+// only when the queue is empty; a missing/undecodable file returns true with pcm empty
+// (the worker then skips it).
+bool Session::nextLoad(int& track, int& slot, std::vector<float>& pcm, int& frames, TakeMeta& meta) {
+	LoadReq req;
+	{
+		std::lock_guard<std::mutex> lk(loadMu_);
+		if (loadQueue_.empty()) return false;
+		req = loadQueue_.front();
+		loadQueue_.erase(loadQueue_.begin());
+	}
+	track = req.track;
+	slot = req.slot;
+	meta = req.meta;
+	frames = req.meta.frames;
+	pcm.clear();
+
+	std::ifstream f(req.path, std::ios::binary);
+	if (!f) return true;
+	std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+	if (bytes.empty()) return true;
+
+	int err = 0;
+	stb_vorbis* v = stb_vorbis_open_memory(bytes.data(), (int) bytes.size(), &err, nullptr);
+	if (!v) return true;
+	stb_vorbis_info info = stb_vorbis_get_info(v);
+	int nch = info.channels;
+	if (nch < 1 || nch > 2) { stb_vorbis_close(v); return true; }
+
+	std::vector<float> raw;
+	const int CHUNK = 4096;
+	std::vector<float> tmp((size_t) CHUNK * nch);
+	for (;;) {
+		int got = stb_vorbis_get_samples_float_interleaved(v, nch, tmp.data(), CHUNK * nch);
+		if (got <= 0) break;
+		raw.insert(raw.end(), tmp.begin(), tmp.begin() + (size_t) got * nch);
+	}
+	stb_vorbis_close(v);
+
+	long n = (long) (raw.size() / (size_t) nch);
+	pcm.resize((size_t) n * 2);
+	for (long i = 0; i < n; i++) {
+		float l = raw[(size_t) i * nch];
+		float r = nch >= 2 ? raw[(size_t) i * nch + 1] : l;
+		pcm[(size_t) i * 2] = l;
+		pcm[(size_t) i * 2 + 1] = r;
+	}
+	return true;
 }
 
 // Build session.json from the in-memory model and write it atomically. mu_ held.

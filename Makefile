@@ -145,8 +145,8 @@ unittest: $(UT_OGG_OBJ)
 	  src/looper/LooperWorker.cpp -lpthread -o build/looper_engine_test && build/looper_engine_test
 	rm -rf build/session_test_out
 	$(CXX) -std=c++11 -O1 -I src $(UT_OGG_INC) test/session_test.cpp src/looper/Session.cpp \
-	  src/net/ninjam/NjEncoder.cpp $(UT_OGG_OBJ) -lpthread -o build/session_test \
-	  && build/session_test build/session_test_out
+	  src/net/ninjam/NjEncoder.cpp src/dep/stb_vorbis_impl.cpp $(UT_OGG_OBJ) -lpthread \
+	  -o build/session_test && build/session_test build/session_test_out
 	rm -rf build/archive_test_out
 	$(CXX) -std=c++11 -O1 -I src test/archive_test.cpp src/net/ninjam/NjArchive.cpp \
 	  src/net/Log.cpp -lpthread -o build/archive_test && build/archive_test build/archive_test_out

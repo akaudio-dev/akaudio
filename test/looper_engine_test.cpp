@@ -286,6 +286,29 @@ int main() {
 	CHECK(sink.nBad() == 0, "every SAVE carried a non-null take buffer of its full length");
 	CHECK(sink.nClears() >= 1, "cleared slots were retired via the sink (got %d)", sink.nClears());
 
+	// ---- Clip loader: a decoded take (submitLoad) installs as a FILLED slot and launches ----
+	{
+		const int n = sim.n;                       // the current grid length
+		Buf* b = new Buf; b->frames = n; b->pcm = new float[(size_t) n * 2];
+		for (int f = 0; f < n; f++) { b->pcm[f * 2] = Sim::sig(5, f); b->pcm[f * 2 + 1] = -Sim::sig(5, f); }
+		LoadInstall li{};
+		li.track = 0; li.slot = 6; li.buf = b;
+		li.meta.frames = n; li.meta.sampleRate = SR; li.meta.bpm = 120; li.meta.bpi = 4;
+		li.meta.repeats = 0; li.meta.decayDb = 0.f; li.meta.startFrame = 0; li.meta.peak = 0.3f;
+		for (int k = 0; k < THUMB_BINS; k++) li.thumb[k] = 0.5f;
+		CHECK(sim.eng.submitLoad(li), "load submitted");
+		sim.interval(-1);                          // tick installs it
+		Slot& s6 = sim.slot(6);
+		CHECK(s6.state.load() == FILLED, "loaded take installs as FILLED (state %d)", s6.state.load());
+		CHECK(s6.take.buf != nullptr && s6.take.frames == n, "loaded take keeps its buffer + length");
+		CHECK(s6.playable.load(), "loaded take is playable (matches the live grid)");
+		CHECK(s6.thumb[0] > 0.4f, "loaded take carries a thumbnail");
+		sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressSlot(0, 6, false); });
+		sim.interval(-1);
+		CHECK(s6.state.load() == PLAYING, "loaded take launches");
+		CHECK(sim.outputIs(5), "loaded take plays the decoded signal sample-exactly");
+	}
+
 	CHECK(sim.eng.tracks[0].bufs.load() <= 3, "at most 3 rolling buffers per track (got %d)", sim.eng.tracks[0].bufs.load());
 	std::printf("worker allocations: %ld\n", sim.eng.allocations.load());
 	CHECK(sim.eng.allocations.load() <= 20, "allocation count bounded (got %ld)", sim.eng.allocations.load());

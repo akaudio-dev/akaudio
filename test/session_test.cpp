@@ -87,6 +87,30 @@ int main(int argc, char** argv) {
 	CHECK(contains(man, "\"bpm\": 120"), "manifest carries bpm");
 	CHECK(contains(man, "\"startFrame\": 9600"), "manifest carries the session-timeline start");
 
+	// --- Clip loader: the saved OGG decodes back to real audio (round-trip) ---
+	{
+		s.enqueueLoad(0, 0, live, meta(N, 9600, 0.71f, 2, -3.f));
+		int t = -1, sl = -1, frames = 0;
+		std::vector<float> back;
+		TakeMeta gm{};
+		CHECK(s.nextLoad(t, sl, back, frames, gm), "nextLoad returned the queued take");
+		CHECK(t == 0 && sl == 0, "load targets the right slot (%d,%d)", t, sl);
+		CHECK(frames == N, "declared take length preserved (%d)", frames);
+		CHECK(gm.repeats == 2 && gm.startFrame == 9600, "load carries the take metadata");
+		int dn = (int) (back.size() / 2);
+		CHECK(dn > N - 2048 && dn < N + 2048, "decoded ~N frames (%d vs %d)", dn, N);
+		double rms = 0;
+		int m = dn < N ? dn : N;
+		for (int f = 0; f < m; f++) rms += (double) back[(size_t) f * 2] * back[(size_t) f * 2];
+		rms = m ? std::sqrt(rms / m) : 0;
+		// input was a 0.4-amplitude sine (RMS ~0.283); Vorbis preserves it to within a hair.
+		CHECK(rms > 0.2 && rms < 0.35, "decoded take is real audio at the right level (rms %.3f)", rms);
+		int t2, s2, fr2;
+		std::vector<float> more;
+		TakeMeta m2{};
+		CHECK(!s.nextLoad(t2, s2, more, fr2, m2), "load queue empty after the one take");
+	}
+
 	// --- Late settings edit reflects into the manifest ---
 	s.setSlotSettings(0, 0, 4, -6.f);
 	s.flush();

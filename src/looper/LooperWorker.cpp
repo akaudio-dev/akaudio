@@ -3,11 +3,27 @@
 
 #include "LooperWorker.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
+#include <vector>
 
 namespace akaudio {
 namespace looper {
+
+// Peak-per-bin thumbnail of a decoded take (display only), same shape the capture path
+// fills so a restored clip draws its waveform.
+static void computeThumb(const float* pcm, int frames, float* thumb) {
+	for (int b = 0; b < THUMB_BINS; b++) thumb[b] = 0.f;
+	if (frames <= 0) return;
+	for (int f = 0; f < frames; f++) {
+		int bin = (int) ((long long) f * THUMB_BINS / frames);
+		if (bin >= THUMB_BINS) bin = THUMB_BINS - 1;
+		float a = std::max(std::fabs(pcm[(size_t) f * 2]), std::fabs(pcm[(size_t) f * 2 + 1]));
+		if (a > thumb[bin]) thumb[bin] = std::min(1.f, a);
+	}
+}
 
 LooperWorker::~LooperWorker() {
 	stop();
@@ -115,6 +131,29 @@ void LooperWorker::run() {
 		}
 		if (engine.sink)
 			engine.sink->flush(); // write the manifest if UI edits (names / settings) dirtied it
+
+		// Clip loader (v2): decode any pending takes off the audio thread and hand them to
+		// the engine to install. We allocate the buffer here (the buffer-owning thread).
+		if (engine.sink) {
+			int t, s, frames;
+			std::vector<float> pcm;
+			TakeMeta meta;
+			while (engine.sink->nextLoad(t, s, pcm, frames, meta)) {
+				did = true;
+				if (frames <= 0) continue;
+				Buf* b = alloc(frames);
+				const size_t need = (size_t) frames * 2;
+				const size_t have = std::min(pcm.size(), need);
+				std::memcpy(b->pcm, pcm.data(), have * sizeof(float));
+				if (have < need)
+					std::memset(b->pcm + have, 0, (need - have) * sizeof(float));
+				LoadInstall li;
+				li.track = t; li.slot = s; li.buf = b; li.meta = meta;
+				computeThumb(b->pcm, frames, li.thumb);
+				if (!engine.submitLoad(li))
+					recycle(b);
+			}
+		}
 		if (!did)
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
