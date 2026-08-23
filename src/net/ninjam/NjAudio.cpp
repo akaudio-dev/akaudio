@@ -3,6 +3,8 @@
 
 #include "NjAudio.hpp"
 
+#include <cstdlib>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -232,6 +234,16 @@ void NjAudio::writeInterval(const uint8_t guid[16], const uint8_t* data, size_t 
 		return;
 
 	int frames = intervalSamples.load(std::memory_order_relaxed);
+	// Wire archive: hand the raw interval bytes to a listener (the Recorder) before we
+	// decode. Verbatim — no decode, no re-encode. chanKey is "user\nchidx".
+	if (onIntervalReceived && t.ogg && !t.bytes.empty()) {
+		size_t nl = t.chanKey.find('\n');
+		std::string user = nl == std::string::npos ? t.chanKey : t.chanKey.substr(0, nl);
+		int cidx = nl == std::string::npos ? 0 : std::atoi(t.chanKey.c_str() + nl + 1);
+		int b, i;
+		{ std::lock_guard<std::mutex> lock(mu); b = bpm; i = bpi; }
+		onIntervalReceived(user, cidx, t.bytes.data(), t.bytes.size(), b, i, frames);
+	}
 	std::vector<float> pcm;
 	if (t.ogg && frames > 0 && !t.bytes.empty()) {
 		pcm = decodeOgg(t.bytes.data(), t.bytes.size(), frames);

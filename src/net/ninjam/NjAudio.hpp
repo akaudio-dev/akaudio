@@ -102,6 +102,12 @@ public:
 			return;
 		txCapture[ch]->push(l, r);
 	}
+	// Net-thread callback: a complete received interval's raw OGG bytes (non-voice,
+	// non-silence). The wire archive (Recorder) copies them to disk as-is; empty/absent
+	// when nobody is listening. Fired once per interval, on its final chunk.
+	std::function<void(const std::string& user, int chidx, const uint8_t* bytes, size_t len,
+	                   int bpm, int bpi, int frames)> onIntervalReceived;
+
 	// TX-thread upload callbacks: an interval starts (send UPLOAD_INTERVAL_BEGIN)…
 	std::function<void(int chidx)> onUploadBegin;
 	// …then its encoded bytes stream out as they're produced; `last` closes the
@@ -123,6 +129,13 @@ public:
 
 	// Number of poly channels currently in use (highest assigned slot + 1; 0 if none).
 	int polyChannels() const { return nPoly.load(std::memory_order_relaxed); }
+
+	// Current room tempo + interval length (UI/net thread) — for archive metadata.
+	void currentTempo(int& outBpm, int& outBpi, int& outFrames) {
+		std::lock_guard<std::mutex> lock(mu);
+		outBpm = bpm; outBpi = bpi;
+		outFrames = intervalSamples.load(std::memory_order_relaxed);
+	}
 
 	// Diagnostics.
 	long intervalsDecoded() const { return nDecoded.load(std::memory_order_relaxed); }

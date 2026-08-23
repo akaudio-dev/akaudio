@@ -15,10 +15,10 @@ the consolidated statement, kept in sync with the code.
 
 **Status (2026-08-22):** the **Looper is built and working through M1** — real interval
 clock from Ninjam (M0), the Rack-free engine looping real audio (M1), the MIX + CUE
-buses, and transmit-to-Ninjam over the expander. Still on paper, marked *(planned)*
-where they appear below: the **Recorder** module and its wire archive (§4 items 3-4,
-§7, milestone M3), and the Looper's **session files / disk persistence** (§5.4 encode
-steps, §10, §11 — milestone M4). §13 tracks per-milestone status.
+buses, and transmit-to-Ninjam over the expander. The **Recorder** module and its wire archive (§4 items 3-4, §7, M3) are also built.
+Still on paper, marked *(planned)*: the Looper's **session files / disk persistence**
+(§5.4 encode steps, §10, §11 — milestone M4), the timeline refinements in §7.3, and the
+DAW project generators (§12). §13 tracks per-milestone status.
 
 ---
 
@@ -187,7 +187,7 @@ No protocol, socket, or codec changes.
    `gridGeneration++` on the existing `resyncBeat` branch and on sample-rate change.
    Behaviour change for existing users: sub-sample.
 2. **Expander chain walk** on both sides (§3.3).
-3. *(planned, M3)* **`NjArchive`** (`src/net/ninjam/NjArchive.{hpp,cpp}`, Rack-free) —
+3. **`NjArchive`** *(built, `src/net/ninjam/NjArchive.{hpp,cpp}`)* (`src/net/ninjam/NjArchive.{hpp,cpp}`, Rack-free) —
    the wire archive, owned by Ninjam, with its own writer thread and a bounded job queue:
    - **RX:** `NjClient` gets an optional callback `onIntervalReceived(user, chidx,
      guid, bytes, mixFrameStart)` fired by `NjAudio` when the mix thread *starts
@@ -204,7 +204,7 @@ No protocol, socket, or codec changes.
    - Writes are atomic (tmp + rename); the index is appended per interval.
    - `start(dir, opts)` / `stop()` / `status()` (mutex-guarded snapshot: per player
      name, intervals, bytes, last activity) are UI-thread API used by the Recorder.
-4. *(planned, M3)* **Archive gating:** Ninjam's widget `step()` checks whether a Recorder is adjacent
+4. **Archive gating** *(built)***:** Ninjam's widget `step()` checks whether a Recorder is adjacent
    on either side and starts/stops the archive accordingly (UI thread — module
    removal also happens there, so no stale pointers).
 
@@ -376,27 +376,35 @@ audio thread at frame or boundary granularity).
 
 ## 7. Recorder
 
-*(All of §7 is **planned** — milestone M3. Nothing here is built yet.)*
+*(§7 is **built** — milestone M3 — with two simplifications from the sketch below,
+noted inline: the RX timestamp is a coarse session frame Ninjam publishes each block
+(not the exact playout-start mapping of §7.3, which is a v2 refinement), and the index
+is `index.jsonl` — one JSON object per line — rather than `index.json` + `clipsort.log`.)*
 
 ### 7.1 What it is
-A control panel for Ninjam's `NjArchive` (§4 item 3). No audio path, no clock reading, no
-decoding. Its value over any existing recorder: **exact per-player, per-interval
-files** (the bytes each player actually sent, lossless w.r.t. the wire), **names**
-(from the transfer's username), **our own TX** intervals as the room heard them, and
-a **sample-accurate shared timeline** with the Looper — at zero encoder CPU.
+A Ninjam expander with **no audio path and no clock reading** (`src/Recorder.cpp`, 8 HP):
+REC arm + "+TX" toggle + a live per-player status list. It reaches Ninjam through the
+`RecorderLink` interface (`src/RecorderLink.hpp`) by `dynamic_cast` on its adjacent
+module — no expander messages, no cables. The archive itself lives in Ninjam
+(`NjClient` owns `NjArchive`; RX bytes via `NjAudio::onIntervalReceived`, TX bytes
+accumulated in `sendUploadData`). Value over any existing recorder: **exact per-player,
+per-interval OGG files** (the bytes each player actually sent, lossless w.r.t. the
+wire), **names** from the username, **our own TX** intervals as sent, on a shared
+timeline with the Looper — at zero encoder CPU. Privacy: the archive only runs while a
+Recorder is physically adjacent AND armed AND Ninjam is joined.
 
 ### 7.2 Files
 ```
-<session>/players/
-    index.json                      (or clipsort.log-compatible, see below)
-    <seq>_<user>_<chidx>.ogg        one file per received interval (silence = no file, index gap)
-<session>/tx/
-    <seq>_mix.ogg                   our transmitted intervals, as sent
+<asset::user("akaudio-sessions")>/<YYYY-MM-DD_HHMM>_<room>/players_tx/
+    index.jsonl                     one JSON object per interval (append-only)
+    players/<seq>_<user>_ch<n>.ogg  one file per received interval (silence = no file)
+    tx/<seq>_mix.ogg                our transmitted intervals, as sent (if "+TX" on)
 ```
-`index.json` entries: `{ seq, user, chidx, file|null, sessionFrame, frames, bpm,
-bpi, sampleRate, received }`. Writing a NINJAM-compatible `clipsort.log` beside it is
-cheap and gives **REAPER's native session import** for free (verify on first export).
-Disk: at the senders' quality, ~1 MB/min per busy player, nothing for silence.
+Each `index.jsonl` line: `{seq, tx, user, chidx, file, sessionFrame, bytes, bpm, bpi,
+frames, sampleRate}`. `seq` is a global monotonic interval counter; files are written
+atomically (tmp + rename). Disk: at the senders' quality, ~1 MB/min per busy player,
+nothing for silence. *(v2: also emit a NINJAM `clipsort.log` for REAPER's native
+session import.)*
 
 ### 7.3 The shared timeline
 `sessionFrame` (monotonic frames since join, in the clock message) is the axis for
@@ -573,7 +581,8 @@ Resample takes on sample-rate change. Recorder: decode-on-demand preview per pla
 |    | *Status 2026-08-22: implemented* — `src/looper/{Spsc,LooperEngine,LooperWorker}` + `test/looper_engine_test.cpp` (passes, sample-exact). Beyond the M1 scope it already covers all 8 tracks, scenes, overdub (progressive staging: worker copies take + the recorded part, audio thread folds the rest in ≤256 frames/tick), the TX latch, the −70 dBFS gate and a tanh soft limiter; rolling buffers follow cable presence (an unpatched track holds none). The module is wired to it: the Looper **loops real audio** in Rack from an adjacent Ninjam's clock or the simulated one. Capture rotates `last` into the slot with no copy and never waits on the worker; a second capture of the same interval on one track is refused. | |
 | M2 | 8×8 grid, scenes, track STOP / STOP ALL, submix + gate + limiter, OVERDUB | the full Looper |
 |    | *Status 2026-08-22: done, folded into M1* — plus CUE bus + bi-color TX LED, MULTI input with source tags, and transmit-to-Ninjam over the expander (§6). | |
-| M3 | `NjArchive` + `NjClient` RX/TX callbacks + `pullOffset`; Recorder module (panel, arm, status) | the wire archive and the shared timeline |
+| M3 | `NjArchive` + `NjClient` RX/TX callbacks; Recorder module (panel, arm, status) | the wire archive and the shared timeline |
+|    | *Status 2026-08-22: implemented* — `NjArchive` (Rack-free writer thread) + `test/archive_test.cpp` (passes); RX bytes via `NjAudio::onIntervalReceived`, TX accumulated in `NjClient::sendUploadData`; `src/Recorder.cpp` drives it through `RecorderLink` (dynamic_cast on the neighbour); Ninjam gates on adjacency+arm+join and publishes the session frame. Simplifications vs §7.3: coarse per-block RX timestamp; `index.jsonl` not `clipsort.log`. | |
 | M4 | Looper `Session`: OGG writes, `session.json`, `history/`, patch persistence; one session dir shared with the Recorder | nothing kept is lost |
 | M5 | Looper panel: thumbnail slot widget with live fill, header, context menu (quality, memory) | the UI |
 | M6 | Docs (MANUAL.md, CHANGELOG), Library release | ship |
@@ -589,7 +598,9 @@ Tests (`test/`, no Rack link):
   mismatched take; CUE carries a private track's thru (not MIX); allocation count bounded.
 - `session_test.cpp` — write a Looper session, parse it back, overwrite a slot and
   find the old file in `history/`, atomicity (no partial files after a simulated abort).
-- `archive_test.cpp` — feed `NjArchive` synthetic RX/TX intervals (incl. silence
-  gaps) and a changing `pullOffset`; assert files, index entries and `sessionFrame`s.
+- `archive_test.cpp` *(built, passes)* — feed `NjArchive` synthetic RX/TX intervals
+  (incl. a silence interval that writes no file) with changing session frames; assert
+  the per-player/tx files, verbatim bytes, JSONL index entries, and stats. `make unittest`
+  builds + runs jamclock/looper_engine/archive together.
 - Existing `enc_test.cpp`: add the silence-size assertion (≲ 8 KB per 20 s).
 - Manual: Looper + Ninjam + Recorder on a real room; REAPER import of `clipsort.log`.

@@ -3,6 +3,9 @@
 
 #include "plugin.hpp"
 #include "JamClock.hpp"
+#include "RecorderLink.hpp"
+
+#include <ctime>
 #include "net/Stream.hpp"
 #include "net/RoomDirectory.hpp"
 #include "net/ninjam/NjClient.hpp"
@@ -47,7 +50,7 @@ static void parseHostPort(const std::string& s, std::string& host, int& port) {
 		port = 2049;
 }
 
-struct Ninjam : Module {
+struct Ninjam : Module, public akaudio::RecorderLink {
 	enum ParamId {
 		CLICK_PARAM,  // metronome on/off; MIDI-mappable (latch value, or momentary toggle)
 		PARAMS_LEN
@@ -279,6 +282,9 @@ struct Ninjam : Module {
 	// frame (see LooperAudioMessage). process()-thread values + a UI-visible flag.
 	float looperMixL = 0.f, looperMixR = 0.f;
 	std::atomic<bool> looperTx{false};     // a transmitting Looper is our neighbour (UI: declaration)
+	// ---- Wire archive (Recorder companion) ----
+	std::atomic<bool> recArmed_{false};    // the adjacent Recorder's REC latch
+	std::atomic<bool> recordOwnTx_{true};  // also archive our transmitted mix
 	std::atomic<bool> txArmed{false};      // capture armed at a beat boundary (aligns intervals)
 
 	// Declared last so it is destroyed FIRST: NjClient::~ joins its threads before the
@@ -480,6 +486,56 @@ struct Ninjam : Module {
 		if (rightExpander.module && rightExpander.module->model == modelLooper)
 			return (akaudio::LooperAudioMessage*) rightExpander.consumerMessage;
 		return nullptr;
+	}
+
+	// ---- RecorderLink (UI thread): a Recorder neighbour drives the wire archive ----
+	bool recArmed() const override { return recArmed_.load(std::memory_order_relaxed); }
+	void setRecArmed(bool v) override { recArmed_.store(v, std::memory_order_relaxed); }
+	bool recordOwnTx() const override { return recordOwnTx_.load(std::memory_order_relaxed); }
+	void setRecordOwnTx(bool v) override { recordOwnTx_.store(v, std::memory_order_relaxed); }
+	bool recActive() const override { return njclient.archiveRunning(); }
+	bool recJoined() const override { return joined.load(std::memory_order_relaxed); }
+	std::string recSessionName() const override {
+		std::string d = njclient.archiveDir();
+		size_t sl = d.find_last_of('/');
+		return sl == std::string::npos ? d : d.substr(sl + 1);
+	}
+	long recIntervals() const override { return njclient.archiveIntervals(); }
+	std::vector<akaudio::RecStatusRow> recStatus() const override {
+		std::vector<akaudio::RecStatusRow> out;
+		for (const auto& p : njclient.archiveStatus()) {
+			akaudio::RecStatusRow row;
+			row.label = p.label; row.intervals = p.intervals; row.bytes = p.bytes; row.tx = p.tx;
+			out.push_back(row);
+		}
+		return out;
+	}
+	bool recorderAdjacent() {
+		Module* l = leftExpander.module;
+		Module* r = rightExpander.module;
+		return (l && l->model == modelRecorder) || (r && r->model == modelRecorder);
+	}
+	// UI thread (widget step): start/stop the archive on the arm+join+adjacency state.
+	// Privacy: the archive only ever runs while a Recorder is physically adjacent AND
+	// the user has armed it AND we are in a JOIN session.
+	void updateArchive() {
+		bool want = recorderAdjacent() && recArmed_.load(std::memory_order_relaxed)
+		            && joined.load(std::memory_order_relaxed);
+		if (want && !njclient.archiveRunning()) {
+			std::time_t t = std::time(nullptr);
+			char stamp[32];
+			std::strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H%M", std::localtime(&t));
+			std::string room;
+			for (char c : roomLabel)
+				room += ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) ? c : '_';
+			if (room.size() > 32) room.resize(32);
+			std::string dir = asset::user("akaudio-sessions") + "/" + std::string(stamp)
+			                  + (room.empty() ? "" : "_" + room) + "/players_tx";
+			// asset::user(...) is the plugin's user dir; make its parents lazily in NjArchive.
+			njclient.startArchive(dir, recordOwnTx_.load(std::memory_order_relaxed));
+		} else if (!want && njclient.archiveRunning()) {
+			njclient.stopArchive();
+		}
 	}
 
 	// ---- Mode-agnostic helpers (dispatch on `mode`) ----
@@ -898,6 +954,7 @@ struct Ninjam : Module {
 			clickEnv = 0.f;
 		}
 		publishClock(jam);
+		njclient.setArchiveSessionFrame(jam.sessionFrame);
 
 		// Expander TX source: read a Looper neighbour's MIX (its buffer, flipped last
 		// frame). Gated on live adjacency so a removed Looper is ignored.
@@ -2314,7 +2371,7 @@ struct NinjamWidget : ModuleWidget {
 				&& nj->txNudge.load(std::memory_order_relaxed)
 				&& !nj->transmitting.load(std::memory_order_relaxed)
 				&& nj->inputs[Ninjam::LEFT_INPUT].isConnected();
-		if (nj) nj->syncTransmit();
+		if (nj) { nj->syncTransmit(); nj->updateArchive(); }
 		ModuleWidget::step();
 	}
 

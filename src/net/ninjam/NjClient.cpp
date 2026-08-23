@@ -52,6 +52,12 @@ void NjClient::start(const std::string& host, int port, const std::string& user,
 	audio.onUploadData = [this](int ch, const uint8_t* data, size_t len, bool last) {
 		sendUploadData(ch, data, len, last);
 	};
+	// Wire the raw-interval archive hooks (no-op unless startArchive() was called). RX:
+	// each received interval's bytes; TX is accumulated per channel in sendUploadData.
+	audio.onIntervalReceived = [this](const std::string& user, int chidx, const uint8_t* bytes,
+	                                  size_t len, int bpm, int bpi, int frames) {
+		archive.archiveRx(user, chidx, bytes, len, bpm, bpi, 48000.f, frames);
+	};
 	abort.store(false, std::memory_order_release);
 	running.store(true, std::memory_order_release);
 	thread = std::thread(&NjClient::run, this, host, port, user, pass);
@@ -124,6 +130,17 @@ void NjClient::sendUploadBegin(int chidx) {
 void NjClient::sendUploadData(int chidx, const uint8_t* data, size_t len, bool last) {
 	if (chidx < 0 || chidx >= NjAudio::MAX_TX)
 		return;
+	// Archive our own transmitted interval verbatim (TX thread; no-op unless recording).
+	if (archive.running()) {
+		if (data && len)
+			txAccum[chidx].insert(txAccum[chidx].end(), data, data + len);
+		if (last) {
+			int bpm, bpi, frames;
+			audio.currentTempo(bpm, bpi, frames);
+			archive.archiveTx(chidx, txAccum[chidx].data(), txAccum[chidx].size(), bpm, bpi, 48000.f, frames);
+			txAccum[chidx].clear();
+		}
+	}
 	if (len == 0 && !last)
 		return; // nothing to say
 	const size_t CHUNK = 8192;

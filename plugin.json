@@ -31,6 +31,15 @@
       ]
     },
     {
+      "slug": "Recorder",
+      "name": "Recorder",
+      "description": "Ninjam companion: saves the jam to disk as raw per-player OGG interval files + an index, for later DAW import. No re-encode.",
+      "tags": [
+        "Recording",
+        "External"
+      ]
+    },
+    {
       "slug": "Radio",
       "name": "Radio",
       "description": "Streaming internet radio source (Icecast/HTTP) feeding audio into a patch.",

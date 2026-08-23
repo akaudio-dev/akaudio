@@ -22,6 +22,7 @@
 
 #include "NjProtocol.hpp"
 #include "NjAudio.hpp"
+#include "NjArchive.hpp"
 #include "../Socket.hpp" // GuardedFd
 
 namespace akaudio {
@@ -92,6 +93,18 @@ public:
 	// True once any room audio has reached the mix this session (join-gap countdown).
 	bool audioStarted() const { return audio.audioStarted(); }
 
+	// ---- Wire archive (Recorder) ----
+	// Start/stop the raw-interval archive (received players + our TX). Off-thread I/O;
+	// the RX/TX byte hooks are always wired and no-op while stopped. UI thread.
+	void startArchive(const std::string& dir, bool recordTx) { archive.start(dir, recordTx); }
+	void stopArchive() { archive.stop(); }
+	bool archiveRunning() const { return archive.running(); }
+	std::string archiveDir() const { return archive.dir(); }
+	long archiveIntervals() const { return archive.totalIntervals(); }
+	std::vector<NjArchive::PlayerStat> archiveStatus() const { return archive.status(); }
+	// Audio thread: publish the session-timeline position the archive stamps intervals with.
+	void setArchiveSessionFrame(uint64_t sf) { archive.setSessionFrame(sf); }
+
 private:
 	void run(std::string host, int port, std::string user, std::string pass);
 	void setState(State s, const std::string& msg = "");
@@ -121,6 +134,10 @@ private:
 
 	Callbacks cb;
 	NjAudio audio;
+	NjArchive archive;                        // raw-interval wire archive (off-thread; no-op unless started)
+	// TX thread: accumulate each channel's uploaded bytes so a whole interval reaches
+	// the archive verbatim on its final chunk. TX thread only.
+	std::vector<uint8_t> txAccum[NjAudio::MAX_TX];
 	unsigned char txGuid[NjAudio::MAX_TX][16] = {}; // in-flight upload GUID per channel (TX thread only)
 	std::vector<std::string> txChannels;     // declared local broadcast channels (names)
 	bool txVoice = false;                     // declared channels are voice chat (guarded by txMutex)

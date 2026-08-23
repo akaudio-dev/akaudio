@@ -42,5 +42,6 @@ void init(Plugin* p) {
 
 	p->addModel(modelLooper);
 	p->addModel(modelNinjam);
+	p->addModel(modelRecorder);
 	p->addModel(modelRadio);
 }
