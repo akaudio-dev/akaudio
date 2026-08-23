@@ -54,7 +54,7 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
 - **Recorder** (`src/Recorder.cpp`, built M3) — a Ninjam expander that saves the jam:
   `NjClient` owns an `NjArchive` (`src/net/ninjam/NjArchive.{hpp,cpp}`, Rack-free writer
   thread) that writes every received per-player interval and our TX mix to disk as the
-  raw OGG bytes (`<user>/akaudio-sessions/<stamp>_<room>/players_tx/{players,tx}/*.ogg`
+  raw OGG bytes (`~/Music/jams/<stamp>_<room>/{players,tx}/*.ogg` (folder configurable via the Recorder menu)
   + `index.jsonl`), no re-encode. The module is a pure panel reaching Ninjam via
   `RecorderLink` (`src/RecorderLink.hpp`, dynamic_cast on the neighbour); Ninjam gates
   the archive on Recorder-adjacent + armed + joined (privacy). Offline test:

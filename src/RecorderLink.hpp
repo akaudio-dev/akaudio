@@ -7,10 +7,21 @@
 // dynamic_cast on its adjacent module (same plugin .dylib, so RTTI works). All calls
 // are UI-thread. This keeps the two modules decoupled — the Recorder is a pure panel,
 // Ninjam owns the archive and the NINJAM session.
+#include <cstdlib>
 #include <string>
 #include <vector>
 
 namespace akaudio {
+
+// Default place for recorded jams: ~/Music/jams (discoverable, unlike Rack's user dir).
+inline std::string defaultJamsDir() {
+#ifdef _WIN32
+	const char* h = std::getenv("USERPROFILE");
+#else
+	const char* h = std::getenv("HOME");
+#endif
+	return std::string(h && *h ? h : ".") + "/Music/jams";
+}
 
 struct RecStatusRow {
 	std::string label;   // "user / ch0" or "you (tx)"
@@ -30,6 +41,9 @@ struct RecorderLink {
 	virtual std::string recSessionName() const = 0; // folder name (or "" when idle)
 	virtual long recIntervals() const = 0;
 	virtual std::vector<RecStatusRow> recStatus() const = 0;
+	virtual std::string sessionBase() const = 0;         // where new session folders are created
+	virtual void setSessionBase(const std::string&) = 0;
+	virtual long recBytes() const = 0;                   // total bytes written this session
 };
 
 } // namespace akaudio

@@ -395,7 +395,7 @@ Recorder is physically adjacent AND armed AND Ninjam is joined.
 
 ### 7.2 Files
 ```
-<asset::user("akaudio-sessions")>/<YYYY-MM-DD_HHMM>_<room>/players_tx/
+~/Music/jams/<YYYY-MM-DD_HHMM>_<room>/       (folder configurable in the Recorder's menu)
     index.jsonl                     one JSON object per interval (append-only)
     players/<seq>_<user>_ch<n>.ogg  one file per received interval (silence = no file)
     tx/<seq>_mix.ogg                our transmitted intervals, as sent (if "+TX" on)
@@ -416,11 +416,14 @@ reproduces the jam *as heard here*. Tempo changes don't reset the axis; each ent
 carries its own `(bpm, bpi, frames)`.
 
 ### 7.4 Panel (≈8 HP)
-REC button (arm/disarm; LED), session folder name, "record own TX" toggle, and a
-list of players: name, activity LED, interval count, MB written, "(left)" for
-departed users. Context menu: open session folder, new session. Status comes from
-`NjArchive::status()` over the expander pointer on the UI thread; if no Ninjam is
-adjacent the panel says so.
+REC bezel button (arm; red light — same widget as the Looper's OVERDUB, aligned to it),
+a "+TX" toggle, and a status panel: a state badge (RECORDING / ARMED / WAITING / IDLE),
+the interval + size summary, and one row per source (green dot = a player, red = your
+TX; name + interval count). 6 HP, with the "AK" mark. The jams folder defaults to
+**~/Music/jams** and is changed from the right-click menu (Choose folder… / Reset /
+Open jams folder), persisted in the Recorder's patch data. Status comes from
+`RecorderLink` (dynamic_cast on the adjacent Ninjam); no Ninjam adjacent ⇒ the panel
+says so.
 
 ---
 

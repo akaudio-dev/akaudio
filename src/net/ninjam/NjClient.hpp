@@ -101,6 +101,7 @@ public:
 	bool archiveRunning() const { return archive.running(); }
 	std::string archiveDir() const { return archive.dir(); }
 	long archiveIntervals() const { return archive.totalIntervals(); }
+	long archiveBytes() const { return archive.totalBytes(); }
 	std::vector<NjArchive::PlayerStat> archiveStatus() const { return archive.status(); }
 	// Audio thread: publish the session-timeline position the archive stamps intervals with.
 	void setArchiveSessionFrame(uint64_t sf) { archive.setSessionFrame(sf); }

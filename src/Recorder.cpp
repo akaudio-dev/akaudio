@@ -14,7 +14,7 @@
 #include "Theme.hpp"
 #include "RecorderLink.hpp"
 
-#include <atomic>
+#include <osdialog.h>
 
 namespace {
 
@@ -36,6 +36,9 @@ struct Recorder : Module {
 	// Reconcile state (UI thread): the arm/recordTx truth lives in the adjacent Ninjam
 	// (RecorderLink); these latch params mirror it so the buttons are MIDI-mappable.
 	bool prevRec = false, prevTx = true;
+	// The folder new session dirs are created in. Owned + persisted here; pushed to the
+	// adjacent Ninjam (which builds the dated session path) every UI step.
+	std::string sessionBase = akaudio::defaultJamsDir();
 
 	Recorder() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -56,6 +59,17 @@ struct Recorder : Module {
 	// Buttons are handled in the widget step (UI thread), not process(), since they act
 	// on the RecorderLink (thread ops). process() does nothing — no audio path.
 	void process(const ProcessArgs& args) override {}
+
+	json_t* dataToJson() override {
+		json_t* root = json_object();
+		json_object_set_new(root, "sessionBase", json_string(sessionBase.c_str()));
+		return root;
+	}
+	void dataFromJson(json_t* root) override {
+		json_t* j = json_object_get(root, "sessionBase");
+		if (j && json_string_value(j) && *json_string_value(j))
+			sessionBase = json_string_value(j);
+	}
 };
 
 // ------------------------------------------------------------------------------------
@@ -80,9 +94,16 @@ struct TxToggleButton : app::Switch {
 	}
 };
 
-// The whole body below the header: status line + per-player list.
+// Status panel: a clear state badge, a session summary, and one row per source.
 struct RecStatusView : Widget {
 	Recorder* rec = nullptr;
+	static std::string humanSize(long b) {
+		char c[24];
+		if (b >= 1024L * 1024L) std::snprintf(c, sizeof(c), "%.1f MB", b / (1024.0 * 1024.0));
+		else if (b >= 1024L)    std::snprintf(c, sizeof(c), "%ld KB", b / 1024L);
+		else                    std::snprintf(c, sizeof(c), "%ld B", b);
+		return c;
+	}
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
 		const float w = box.size.x;
@@ -94,33 +115,50 @@ struct RecStatusView : Widget {
 		nvgStroke(vg);
 
 		akaudio::RecorderLink* lk = rec ? rec->link() : nullptr;
-		float y = 14.f;
+		float y = 13.f;
 		if (!lk) {
-			drawTxt(vg, FONT_BOLD, 8, y, 9.f, rcTextDim(), "Place next to Ninjam", NVG_ALIGN_LEFT, w - 16);
+			drawTxt(vg, FONT_BOLD, w / 2, box.size.y / 2 - 6, 8.5f, rcTextDim(), "Place next", NVG_ALIGN_CENTER, w - 8);
+			drawTxt(vg, FONT_BOLD, w / 2, box.size.y / 2 + 6, 8.5f, rcTextDim(), "to Ninjam", NVG_ALIGN_CENTER, w - 8);
 			return;
 		}
-		std::string head;
-		if (lk->recActive()) head = "\xe2\x97\x8f REC \xc2\xb7 " + lk->recSessionName();
-		else if (lk->recArmed() && !lk->recJoined()) head = "armed \xc2\xb7 waiting to join";
-		else if (lk->recArmed()) head = "armed";
-		else head = "idle";
-		drawTxt(vg, FONT_BOLD, 8, y, 9.f, lk->recActive() ? rcRed() : rcTextDim(), head, NVG_ALIGN_LEFT, w - 16);
+		bool active = lk->recActive();
+		bool armed = lk->recArmed();
+		// State badge: a filled dot + word (red while writing, amber armed, grey idle).
+		NVGcolor sc = active ? rcRed() : (armed ? akTheme(nvgRGB(0xd9,0x8b,0x1a), nvgRGB(0xf0,0xb0,0x40)) : rcTextDim());
+		const char* word = active ? "RECORDING" : (armed ? (lk->recJoined() ? "ARMED" : "WAITING") : "IDLE");
+		nvgBeginPath(vg); nvgCircle(vg, 9, y, 3.f); nvgFillColor(vg, sc); nvgFill(vg);
+		drawTxt(vg, FONT_BOLD, 16, y, 9.f, sc, word, NVG_ALIGN_LEFT, w - 20);
 		y += 15.f;
-		char n[32];
-		std::snprintf(n, sizeof(n), "%ld intervals", lk->recIntervals());
-		drawTxt(vg, FONT_REG, 8, y, 8.5f, rcTextDim(), n, NVG_ALIGN_LEFT, w - 16);
-		y += 16.f;
-		nvgBeginPath(vg);
-		nvgMoveTo(vg, 8, y - 6.f); nvgLineTo(vg, w - 8, y - 6.f);
-		nvgStrokeColor(vg, rcBorder()); nvgStroke(vg);
-		for (const auto& p : lk->recStatus()) {
-			if (y > box.size.y - 8.f) break;
-			drawTxt(vg, FONT_REG, 8, y, 8.5f, p.tx ? rcRed() : rcText(), p.label, NVG_ALIGN_LEFT, w - 70);
-			char c[48];
-			double mb = p.bytes / (1024.0 * 1024.0);
-			std::snprintf(c, sizeof(c), "%ld \xc2\xb7 %.1f MB", p.intervals, mb);
-			drawTxt(vg, FONT_REG, w - 8, y, 8.f, rcTextDim(), c, NVG_ALIGN_RIGHT);
+		// Summary: intervals + total size (or a "→ folder" hint when nothing yet).
+		long iv = lk->recIntervals();
+		if (iv > 0) {
+			char sum[48];
+			std::snprintf(sum, sizeof(sum), "%ld interval%s", iv, iv == 1 ? "" : "s");
+			drawTxt(vg, FONT_REG, 8, y, 8.5f, rcText(), sum, NVG_ALIGN_LEFT, w - 16);
+			y += 12.f;
+			drawTxt(vg, FONT_REG, 8, y, 8.5f, rcTextDim(), humanSize(lk->recBytes()), NVG_ALIGN_LEFT, w - 16);
 			y += 14.f;
+		} else {
+			std::string base = lk->sessionBase();
+			size_t sl = base.find_last_of('/');
+			drawTxt(vg, FONT_REG, 8, y, 8.f, rcTextDim(),
+				"â " + (sl == std::string::npos ? base : base.substr(sl + 1)), NVG_ALIGN_LEFT, w - 12);
+			y += 14.f;
+		}
+		auto rows = lk->recStatus();
+		if (rows.empty())
+			return;
+		nvgBeginPath(vg); nvgMoveTo(vg, 8, y - 5.f); nvgLineTo(vg, w - 8, y - 5.f);
+		nvgStrokeColor(vg, rcBorder()); nvgStroke(vg);
+		for (const auto& p : rows) {
+			if (y > box.size.y - 8.f) break;
+			NVGcolor dot = p.tx ? rcRed() : akTheme(nvgRGB(0x2a,0xa8,0x55), nvgRGB(0x3a,0xd0,0x6a));
+			nvgBeginPath(vg); nvgCircle(vg, 9, y, 2.6f); nvgFillColor(vg, dot); nvgFill(vg);
+			char cnt[16]; std::snprintf(cnt, sizeof(cnt), "%ld", p.intervals);
+			float cw = textWidth(vg, FONT_REG, 8.f, cnt);
+			drawTxt(vg, FONT_REG, w - 6, y, 8.f, rcTextDim(), cnt, NVG_ALIGN_RIGHT);
+			drawTxt(vg, FONT_BOLD, 16, y, 8.5f, rcText(), p.label, NVG_ALIGN_LEFT, w - 22 - cw - 4);
+			y += 13.f;
 		}
 	}
 };
@@ -129,8 +167,10 @@ struct RecStatusView : Widget {
 struct Decor : Widget {
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
-		drawTxt(vg, FONT_BOLD, box.size.x / 2, mm2px(6.5f), 11.f, rcText(), "REC", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, box.size.x / 2, mm2px(9.5f), 8.f, rcTextDim(), "RECORD", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, box.size.x / 2, 9.f, 12.f, rcText(), "REC", NVG_ALIGN_CENTER);
+		// "RECORD" label above the bezel button, whose centre sits at y=70 (aligned with
+		// the Looper's OVERDUB so the two line up when placed around Ninjam).
+		drawTxt(vg, FONT_BOLD, box.size.x / 2, 50.f, 9.f, rcTextDim(), "RECORD", NVG_ALIGN_CENTER);
 		drawTxt(vg, FONT_BOLD, box.size.x / 2, mm2px(AK_MARK_Y_MM), 16.f, rcText(), "AK", NVG_ALIGN_CENTER);
 		Widget::draw(args);
 	}
@@ -155,19 +195,19 @@ struct RecorderWidget : ModuleWidget {
 
 		const float W = box.size.x;
 		// REC: the component-library bezel button + red light — identical to the Looper's
-		// OVERDUB — latching. The light is driven from the archive state in step().
+		// OVERDUB, at the same y so the two align. The light is driven in step().
 		addParam(createLightParamCentered<VCVLightBezelLatch<RedLight>>(
-			Vec(W / 2, mm2px(15.f)), module, Recorder::REC_PARAM, Recorder::REC_LIGHT));
+			Vec(W / 2, 70.f), module, Recorder::REC_PARAM, Recorder::REC_LIGHT));
 
-		TxToggleButton* txBtn = createParam<TxToggleButton>(Vec(W / 2 - 15, mm2px(24.f)), module, Recorder::TX_PARAM);
-		txBtn->box.size = Vec(30, 14);
+		TxToggleButton* txBtn = createParam<TxToggleButton>(Vec(W / 2 - 16, 92.f), module, Recorder::TX_PARAM);
+		txBtn->box.size = Vec(32, 15);
 		txBtn->rec = module;
 		addParam(txBtn);
 
 		RecStatusView* sv = new RecStatusView;
 		sv->rec = module;
-		sv->box.pos = Vec(4, mm2px(31.f));
-		sv->box.size = Vec(W - 8, mm2px(AK_MARK_Y_MM - 4.f) - mm2px(31.f));
+		sv->box.pos = Vec(4, 116.f);
+		sv->box.size = Vec(W - 8, mm2px(AK_MARK_Y_MM - 4.f) - 116.f);
 		addChild(sv);
 	}
 
@@ -186,6 +226,7 @@ struct RecorderWidget : ModuleWidget {
 		};
 		reconcile(Recorder::REC_PARAM, rec->prevRec, lk && lk->recArmed(), &akaudio::RecorderLink::setRecArmed);
 		reconcile(Recorder::TX_PARAM, rec->prevTx, lk ? lk->recordOwnTx() : true, &akaudio::RecorderLink::setRecordOwnTx);
+		if (lk && lk->sessionBase() != rec->sessionBase) lk->setSessionBase(rec->sessionBase);
 		float b = (lk && lk->recActive()) ? 1.f : ((lk && lk->recArmed()) ? 0.35f : 0.f);
 		rec->lights[Recorder::REC_LIGHT].setBrightness(b);
 	}
@@ -199,9 +240,21 @@ struct RecorderWidget : ModuleWidget {
 			menu->addChild(createMenuLabel("Place directly next to a Ninjam module"));
 			return;
 		}
-		menu->addChild(createMenuLabel("Wire archive: raw NINJAM intervals to disk"));
+		menu->addChild(createMenuLabel("Saves raw NINJAM intervals to disk (no re-encode)"));
 		if (lk->recActive())
-			menu->addChild(createMenuLabel("Session: " + lk->recSessionName()));
+			menu->addChild(createMenuLabel("Recording: " + lk->recSessionName()));
+		menu->addChild(new MenuSeparator);
+		menu->addChild(createMenuLabel("Jams folder: " + m->sessionBase));
+		menu->addChild(createMenuItem("Choose folder\xe2\x80\xa6", "", [m]() {
+			char* path = osdialog_file(OSDIALOG_OPEN_DIR, m->sessionBase.c_str(), NULL, NULL);
+			if (path) { m->sessionBase = path; std::free(path); }
+		}));
+		menu->addChild(createMenuItem("Reset to ~/Music/jams", "", [m]() {
+			m->sessionBase = akaudio::defaultJamsDir();
+		}, m->sessionBase == akaudio::defaultJamsDir()));
+		menu->addChild(createMenuItem("Open jams folder", "", [m]() {
+			system::openDirectory(m->sessionBase);
+		}));
 	}
 };
 

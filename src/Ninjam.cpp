@@ -285,6 +285,8 @@ struct Ninjam : Module, public akaudio::RecorderLink {
 	// ---- Wire archive (Recorder companion) ----
 	std::atomic<bool> recArmed_{false};    // the adjacent Recorder's REC latch
 	std::atomic<bool> recordOwnTx_{true};  // also archive our transmitted mix
+	mutable std::mutex recBaseMu;
+	std::string recSessionBase_ = akaudio::defaultJamsDir(); // where session folders go (from the Recorder)
 	std::atomic<bool> txArmed{false};      // capture armed at a beat boundary (aligns intervals)
 
 	// Declared last so it is destroyed FIRST: NjClient::~ joins its threads before the
@@ -501,6 +503,13 @@ struct Ninjam : Module, public akaudio::RecorderLink {
 		return sl == std::string::npos ? d : d.substr(sl + 1);
 	}
 	long recIntervals() const override { return njclient.archiveIntervals(); }
+	long recBytes() const override { return njclient.archiveBytes(); }
+	std::string sessionBase() const override {
+		std::lock_guard<std::mutex> lk(recBaseMu); return recSessionBase_;
+	}
+	void setSessionBase(const std::string& b) override {
+		std::lock_guard<std::mutex> lk(recBaseMu); if (!b.empty()) recSessionBase_ = b;
+	}
 	std::vector<akaudio::RecStatusRow> recStatus() const override {
 		std::vector<akaudio::RecStatusRow> out;
 		for (const auto& p : njclient.archiveStatus()) {
@@ -529,9 +538,9 @@ struct Ninjam : Module, public akaudio::RecorderLink {
 			for (char c : roomLabel)
 				room += ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) ? c : '_';
 			if (room.size() > 32) room.resize(32);
-			std::string dir = asset::user("akaudio-sessions") + "/" + std::string(stamp)
-			                  + (room.empty() ? "" : "_" + room) + "/players_tx";
-			// asset::user(...) is the plugin's user dir; make its parents lazily in NjArchive.
+			std::string base;
+			{ std::lock_guard<std::mutex> lk(recBaseMu); base = recSessionBase_; }
+			std::string dir = base + "/" + std::string(stamp) + (room.empty() ? "" : "_" + room);
 			njclient.startArchive(dir, recordOwnTx_.load(std::memory_order_relaxed));
 		} else if (!want && njclient.archiveRunning()) {
 			njclient.stopArchive();
