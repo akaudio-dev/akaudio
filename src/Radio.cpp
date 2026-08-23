@@ -630,8 +630,18 @@ static void appendStationMenu(Menu* menu, ModuleWidget* mw) {
 	std::string dir = mw->model->getFactoryPresetDirectory();
 	if (system::isDirectory(dir))
 		appendStationDir(menu, mw, dir);
-	else
-		menu->addChild(createMenuLabel("No stations bundled"));
+	else {
+		// The bundled stations ship as factory presets under <plugin>/presets/Radio, which
+		// Rack extracts from the .vcvplugin at startup. This branch means that directory is
+		// missing on disk at runtime — practically only in development (e.g. `make install`
+		// deletes the extracted plugin folder from under a running Rack; a restart re-extracts
+		// it) or after a partial/failed extract. Rather than a bare "none", say what's wrong
+		// and how to recover, and log the path so a glance at log.txt explains it.
+		WARN("akaudio.Radio: factory preset directory not found: %s "
+		     "(restart Rack to re-extract, or reinstall)", dir.c_str());
+		menu->addChild(createMenuLabel("Stations unavailable \xe2\x80\x94 presets not found"));
+		menu->addChild(createMenuLabel("Restart Rack, or reinstall akaudio"));
+	}
 	std::string userDir = mw->model->getUserPresetDirectory();
 	if (system::isDirectory(userDir) && !system::getEntries(userDir).empty()) {
 		menu->addChild(new MenuSeparator);
