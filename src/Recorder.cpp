@@ -69,6 +69,11 @@ struct Recorder : Module {
 		json_t* j = json_object_get(root, "sessionBase");
 		if (j && json_string_value(j) && *json_string_value(j))
 			sessionBase = akaudio::expandHome(json_string_value(j));
+		// REC never persists armed: a loaded patch must come up NOT recording (Rack
+		// restores the param before this runs, so force it back off here). The arm truth
+		// lives in Ninjam and defaults off anyway; this stops the reconcile re-arming it.
+		params[REC_PARAM].setValue(0.f);
+		prevRec = false;
 	}
 };
 
@@ -150,10 +155,7 @@ struct RecStatusView : Widget {
 			drawTxt(vg, FONT_REG, 8, y, 8.5f, rcTextDim(), humanSize(lk->recBytes()), NVG_ALIGN_LEFT, w - 16);
 			y += 14.f;
 		} else {
-			std::string base = lk->sessionBase();
-			size_t sl = base.find_last_of('/');
-			drawTxt(vg, FONT_REG, 8, y, 8.f, rcTextDim(),
-				"â " + (sl == std::string::npos ? base : base.substr(sl + 1)), NVG_ALIGN_LEFT, w - 12);
+			drawTxt(vg, FONT_REG, 8, y, 8.f, rcTextDim(), "nothing yet", NVG_ALIGN_LEFT, w - 12);
 			y += 14.f;
 		}
 		auto rows = lk->recStatus();
@@ -182,7 +184,7 @@ struct Decor : Widget {
 		drawTxt(vg, FONT_BOLD, box.size.x / 2, 21.f, 15.f, rcText(), "REC", NVG_ALIGN_CENTER);
 		// "RECORD" label above the bezel button, whose centre sits at y=70 (aligned with
 		// the Looper's OVERDUB so the two line up when placed around Ninjam).
-		drawTxt(vg, FONT_BOLD, box.size.x / 2, 52.f, 8.5f, rcTextDim(), "RECORD", NVG_ALIGN_CENTER);
+		drawTxt(vg, FONT_BOLD, box.size.x / 2, 50.f, 11.f, rcText(), "RECORD", NVG_ALIGN_CENTER);
 		drawTxt(vg, FONT_BOLD, box.size.x / 2, mm2px(AK_MARK_Y_MM), 16.f, rcText(), "AK", NVG_ALIGN_CENTER);
 		Widget::draw(args);
 	}
