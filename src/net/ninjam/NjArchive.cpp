@@ -47,15 +47,15 @@ NjArchive::~NjArchive() {
 	stop();
 }
 
-void NjArchive::start(const std::string& dir, bool recordTx) {
+void NjArchive::start(const std::string& sessionDir, bool recordTx) {
 	if (run_.load(std::memory_order_acquire)) {
-		if (dir == dir_) {
+		if (sessionDir == dir_) {
 			recordTx_.store(recordTx, std::memory_order_relaxed);
 			return; // already archiving this session
 		}
 		stop();
 	}
-	dir_ = dir;
+	dir_ = sessionDir;
 	recordTx_.store(recordTx, std::memory_order_relaxed);
 	// Create every path component (asset::user's base may exist; the session subdirs won't).
 	for (size_t i = 1; i < dir_.size(); i++)
@@ -169,9 +169,9 @@ void NjArchive::run() {
 		char name[128];
 		std::string rel;
 		if (j.tx)
-			std::snprintf(name, sizeof(name), "tx/%06ld_mix.ogg", id);
+			(void) std::snprintf(name, sizeof(name), "tx/%06ld_mix.ogg", id);
 		else
-			std::snprintf(name, sizeof(name), "players/%06ld_%s_ch%d.ogg", id, slug(j.user).c_str(), j.chidx);
+			(void) std::snprintf(name, sizeof(name), "players/%06ld_%s_ch%d.ogg", id, slug(j.user).c_str(), j.chidx);
 		rel = name;
 		// Atomic write: tmp then rename, so a reader never sees a half file.
 		std::string full = dir_ + "/" + rel;
@@ -183,7 +183,8 @@ void NjArchive::run() {
 				f.flush();
 			}
 		}
-		std::rename(tmp.c_str(), full.c_str());
+		if (std::rename(tmp.c_str(), full.c_str()) != 0)
+			netLog("archive: rename failed, interval lost: " + full);
 		// Index line.
 		if (index) {
 			char line[512];
@@ -194,7 +195,7 @@ void NjArchive::run() {
 				if ((unsigned char) c < 0x20) { u += ' '; continue; }
 				u += c;
 			}
-			std::snprintf(line, sizeof(line),
+			(void) std::snprintf(line, sizeof(line),
 				"{\"seq\":%ld,\"tx\":%s,\"user\":\"%s\",\"chidx\":%d,\"file\":\"%s\","
 				"\"sessionFrame\":%llu,\"bytes\":%zu,\"bpm\":%d,\"bpi\":%d,\"frames\":%d,\"sampleRate\":%g}\n",
 				id, j.tx ? "true" : "false", j.tx ? "" : u.c_str(), j.chidx, rel.c_str(),

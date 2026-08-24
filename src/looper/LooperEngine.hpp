@@ -210,7 +210,7 @@ public:
 	          float& outL, float& outR, float& cueL, float& cueR, float* trackOutLR = nullptr,
 	          bool wantMix = true);
 	// Button intents (from param edges, audio thread).
-	void pressSlot(int t, int s, bool overdubMode);
+	void pressSlot(int t, int s, bool overdubLatch);
 	void pressScene(int row);
 	void stopTrack(int t);
 	void stopAll();
@@ -245,8 +245,8 @@ private:
 	void saveTake(int t, int s);  // enqueue an OGG save of the slot's committed take (M4)
 	void clearFile(int t, int s); // enqueue a retire of the slot's live file into history/ (M4)
 	void release(Buf* b);
-	void setPlaying(Track& tr, int s);
-	void refuse(Slot& sl, double now) { sl.flashAt.store(now, std::memory_order_relaxed); }
+	static void setPlaying(Track& tr, int s);
+	static void refuse(Slot& sl, double now) { sl.flashAt.store(now, std::memory_order_relaxed); }
 	void dropOverdub(Slot& sl);
 
 	SpscQueue<Cmd, 256> cmds;      // audio → worker

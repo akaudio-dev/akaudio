@@ -7,7 +7,9 @@
 // dynamic_cast on its adjacent module (same plugin .dylib, so RTTI works). All calls
 // are UI-thread. This keeps the two modules decoupled — the Recorder is a pure panel,
 // Ninjam owns the archive and the NINJAM session.
+#include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -15,10 +17,12 @@ namespace akaudio {
 
 // Default place for recorded jams: ~/Music/jams (discoverable, unlike Rack's user dir).
 inline std::string homeDir() {
+	// getenv is only mt-unsafe against a concurrent setenv; nothing here or in Rack
+	// mutates the environment.
 #ifdef _WIN32
-	const char* h = std::getenv("USERPROFILE");
+	const char* h = std::getenv("USERPROFILE");  // NOLINT(concurrency-mt-unsafe)
 #else
-	const char* h = std::getenv("HOME");
+	const char* h = std::getenv("HOME");  // NOLINT(concurrency-mt-unsafe)
 #endif
 	return std::string(h && *h ? h : "");
 }
@@ -36,6 +40,23 @@ inline std::string expandHome(const std::string& p) {
 	if (!p.empty() && p[0] == '~')
 		return homeDir() + p.substr(1);
 	return p;
+}
+
+// Format the current local time. std::localtime shares one static buffer across all
+// threads — the UI thread and the looper's disk worker both stamp session folders, so
+// use the reentrant variants.
+inline std::string timeStamp(const char* fmt) {
+	std::time_t t = std::time(nullptr);
+	std::tm tmv{};
+#ifdef _WIN32
+	localtime_s(&tmv, &t);
+#else
+	localtime_r(&t, &tmv);
+#endif
+	char buf[64];
+	if (!std::strftime(buf, sizeof(buf), fmt, &tmv))
+		(void) std::snprintf(buf, sizeof(buf), "%lld", (long long) t);
+	return std::string(buf);
 }
 
 struct RecStatusRow {

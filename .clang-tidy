@@ -14,6 +14,9 @@
 #   cert-str34-c                          — as above
 #   performance-enum-size                 — micro-packing advice, irrelevant
 #   portability-avoid-pragma-once         — #pragma once is Rack's (and this repo's) convention
+#   cert-int09-c                          — Rack's ENUMS() macro (common.hpp) expands to
+#                                           `name, name_LAST = name + N - 1`, mixing implicit
+#                                           and explicit enumerators by design in every module
 Checks: >
   bugprone-*,
   clang-analyzer-*,
@@ -28,7 +31,8 @@ Checks: >
   -bugprone-signed-char-misuse,
   -cert-str34-c,
   -performance-enum-size,
-  -portability-avoid-pragma-once
+  -portability-avoid-pragma-once,
+  -cert-int09-c
 CheckOptions:
   # Allocation failure (bad_alloc, string length_error) is unrecoverable in a Rack
   # plugin; treating it as a reportable escape would flag every string-capturing UI

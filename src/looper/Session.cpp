@@ -58,19 +58,29 @@ static bool writeAtomic(const std::string& path, const uint8_t* data, size_t n) 
 		std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
 		if (!f) return false;
 		if (n) f.write((const char*) data, (std::streamsize) n);
-		if (!f) { f.close(); std::remove(tmp.c_str()); return false; }
+		if (!f) { f.close(); (void) std::remove(tmp.c_str()); return false; }
 	}
 	if (std::rename(tmp.c_str(), path.c_str()) != 0) {
-		std::remove(tmp.c_str());
+		(void) std::remove(tmp.c_str());  // best-effort cleanup
 		return false;
 	}
 	return true;
 }
 
 static std::string nowStamp(const char* fmt) {
+	// Reentrant local time: this runs on the looper's worker thread while the UI
+	// thread may be stamping its own session folders (std::localtime shares one
+	// static buffer process-wide).
 	std::time_t t = std::time(nullptr);
+	std::tm tmv{};
+#ifdef _WIN32
+	localtime_s(&tmv, &t);
+#else
+	localtime_r(&t, &tmv);
+#endif
 	char buf[64];
-	std::strftime(buf, sizeof(buf), fmt, std::localtime(&t));
+	if (!std::strftime(buf, sizeof(buf), fmt, &tmv))
+		(void) std::snprintf(buf, sizeof(buf), "%lld", (long long) t);
 	return std::string(buf);
 }
 
@@ -88,7 +98,7 @@ static std::string jesc(const std::string& s) {
 			default:
 				if (c < 0x20) {
 					char b[8];
-					std::snprintf(b, sizeof(b), "\\u%04x", c);
+					(void) std::snprintf(b, sizeof(b), "\\u%04x", c);
 					o += b;
 				} else {
 					o += (char) c;
@@ -149,9 +159,9 @@ bool Session::hasWritten() const {
 	return everWrote_;
 }
 
-std::string Session::liveName(int t, int s) const {
+std::string Session::liveName(int t, int s) {
 	char b[32];
-	std::snprintf(b, sizeof(b), "t%d_s%d.ogg", t, s);
+	(void) std::snprintf(b, sizeof(b), "t%d_s%d.ogg", t, s);
 	return std::string(b);
 }
 
@@ -161,14 +171,14 @@ void Session::save(int track, int slot, const float* pcm, const TakeMeta& meta) 
 	if (track < 0 || track >= MAX_TRACKS || slot < 0 || slot >= MAX_SLOTS) return;
 	if (!pcm || meta.frames <= 0 || meta.sampleRate <= 0.f) return;
 
-	std::string dir, name = liveName(track, slot);
+	std::string outDir, name = liveName(track, slot);
 	int serial;
 	{
 		std::lock_guard<std::mutex> lk(mu_);
-		dir = dir_;
+		outDir = dir_;
 		serial = serial_++;
 	}
-	if (dir.empty()) return;
+	if (outDir.empty()) return;
 
 	// Encode outside the lock — a full interval is ~100 ms of CPU, and UI-thread setters
 	// must not wait on it. `pcm` is the caller's immutable take buffer.
@@ -176,14 +186,14 @@ void Session::save(int track, int slot, const float* pcm, const TakeMeta& meta) 
 		(int) meta.sampleRate, quality_, serial);
 	if (ogg.empty()) return; // encoder refused the params — nothing to write
 
-	makeDirs(dir);
-	std::string livePath = dir + "/" + name;
+	makeDirs(outDir);
+	std::string livePath = outDir + "/" + name;
 	// An existing take at this slot is retired into history/ before the new one lands.
 	if (pathExists(livePath)) {
-		makeDirs(dir + "/history");
-		std::string hist = dir + "/history/" + nowStamp("%Y%m%d-%H%M%S") + "_"
+		makeDirs(outDir + "/history");
+		std::string hist = outDir + "/history/" + nowStamp("%Y%m%d-%H%M%S") + "_"
 			+ std::to_string(histSeq_++) + "_" + name;
-		std::rename(livePath.c_str(), hist.c_str());
+		(void) std::rename(livePath.c_str(), hist.c_str());  // best-effort retire
 	}
 	if (!writeAtomic(livePath, ogg.data(), ogg.size()))
 		return;
@@ -211,18 +221,18 @@ void Session::save(int track, int slot, const float* pcm, const TakeMeta& meta) 
 
 void Session::clear(int track, int slot) {
 	if (track < 0 || track >= MAX_TRACKS || slot < 0 || slot >= MAX_SLOTS) return;
-	std::string dir, name = liveName(track, slot);
+	std::string outDir, name = liveName(track, slot);
 	{
 		std::lock_guard<std::mutex> lk(mu_);
-		dir = dir_;
+		outDir = dir_;
 	}
-	if (dir.empty()) return;
-	std::string livePath = dir + "/" + name;
+	if (outDir.empty()) return;
+	std::string livePath = outDir + "/" + name;
 	if (pathExists(livePath)) {
-		makeDirs(dir + "/history");
-		std::string hist = dir + "/history/" + nowStamp("%Y%m%d-%H%M%S") + "_"
+		makeDirs(outDir + "/history");
+		std::string hist = outDir + "/history/" + nowStamp("%Y%m%d-%H%M%S") + "_"
 			+ std::to_string(histSeq_++) + "_" + name;
-		std::rename(livePath.c_str(), hist.c_str());
+		(void) std::rename(livePath.c_str(), hist.c_str());  // best-effort retire
 	}
 	std::lock_guard<std::mutex> lk(mu_);
 	recs_[track][slot] = Rec();
@@ -348,9 +358,9 @@ void Session::writeManifestLocked() {
 			j += (first ? "\n" : ",\n");
 			first = false;
 			char peak[32];
-			std::snprintf(peak, sizeof(peak), "%.4f", r.peak);
+			(void) std::snprintf(peak, sizeof(peak), "%.4f", r.peak);
 			char decay[32];
-			std::snprintf(decay, sizeof(decay), "%.2f", r.decayDb);
+			(void) std::snprintf(decay, sizeof(decay), "%.2f", r.decayDb);
 			j += "    { \"track\": " + std::to_string(t)
 			   + ", \"slot\": " + std::to_string(s)
 			   + ", \"file\": \"" + jesc(r.file) + "\""

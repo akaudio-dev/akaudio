@@ -84,8 +84,7 @@ struct JamClock {
 	// Report this frame, then advance. The first tick after regrid() reports frame 0
 	// (downbeat + beat both true).
 	JamClockMessage tick() {
-		JamClockMessage m;
-		std::memset(&m, 0, sizeof(m));
+		JamClockMessage m {};
 		m.gridGeneration = gen;
 		m.sampleRate = sampleRate;
 		if (!running)

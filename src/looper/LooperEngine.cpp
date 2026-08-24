@@ -51,7 +51,7 @@ void LooperEngine::stop() { worker->stop(); }
 void LooperEngine::release(Buf* b) {
 	if (!b)
 		return;
-	Cmd c;
+	Cmd c {};
 	c.kind = Cmd::RELEASE; c.track = c.slot = c.frames = c.upto = 0; c.seq = 0; c.a = b; c.b = nullptr;
 	cmds.push(c); // a full queue would leak the buffer rather than block — sized so it can't happen
 }
@@ -62,7 +62,7 @@ void LooperEngine::requestRec(int t) {
 	// pair is 12-24 MB), a patched one gets its pair within a few ms of plugging in.
 	if (tr.recPending || N <= 0 || !tr.present.load(std::memory_order_relaxed))
 		return;
-	Cmd c;
+	Cmd c {};
 	c.kind = Cmd::ALLOC; c.track = t; c.slot = 0; c.frames = N; c.upto = 0; c.seq = seqCounter++; c.a = c.b = nullptr;
 	if (cmds.push(c))
 		tr.recPending = true;
@@ -76,7 +76,7 @@ void LooperEngine::saveTake(int t, int s) {
 	if (!sink) return;
 	Slot& sl = tracks[t].slots[s];
 	if (!sl.take.buf || sl.take.frames != N) return;
-	Cmd c;
+	Cmd c {};
 	c.kind = Cmd::SAVE; c.track = t; c.slot = s; c.frames = N; c.upto = 0;
 	c.seq = seqCounter++; c.a = sl.take.buf; c.b = nullptr;
 	c.meta.frames = sl.take.frames;
@@ -93,7 +93,7 @@ void LooperEngine::saveTake(int t, int s) {
 // separately; this only touches the on-disk file + manifest, on the worker.
 void LooperEngine::clearFile(int t, int s) {
 	if (!sink) return;
-	Cmd c;
+	Cmd c {};
 	c.kind = Cmd::CLEAR_FILE; c.track = t; c.slot = s; c.frames = 0; c.upto = 0;
 	c.seq = 0; c.a = c.b = nullptr;
 	cmds.push(c);
@@ -108,7 +108,7 @@ bool LooperEngine::armOverdub(int t, int s) {
 	Slot& sl = tr.slots[s];
 	if (!tr.rec || !sl.take.buf || sl.take.frames != N)
 		return false;
-	Cmd cmd;
+	Cmd cmd {};
 	cmd.kind = Cmd::OVERDUB_COPY; cmd.track = t; cmd.slot = s; cmd.frames = N; cmd.upto = 0;
 	cmd.seq = seqCounter++; cmd.a = sl.take.buf; cmd.b = tr.rec;
 	if (!cmds.push(cmd))
@@ -150,10 +150,9 @@ void LooperEngine::drainReplies() {
 			case Reply::ALLOC:
 				tr.recPending = false;
 				if (!r.buf) break;
-				if (r.buf->frames != N)      release(r.buf); // grid moved meanwhile
-				else if (!tr.rec)            tr.rec = r.buf;
-				else if (!tr.spare)          tr.spare = r.buf;
-				else                         release(r.buf);
+				if (r.buf->frames == N && !tr.rec)        tr.rec = r.buf;
+				else if (r.buf->frames == N && !tr.spare) tr.spare = r.buf;
+				else                                      release(r.buf); // grid moved meanwhile, or pair already full
 				if (!tr.rec || (!tr.last && !tr.spare))
 					requestRec(r.track); // top up the rolling pair right away
 				break;
@@ -178,10 +177,10 @@ void LooperEngine::drainIntents() {
 	Intent i;
 	while (intents.pop(i)) {
 		if (i.track < 0 || i.track >= MAX_TRACKS || i.slot < 0 || i.slot >= MAX_SLOTS) continue;
-		Track& tr = tracks[i.track];
-		Slot& sl = tr.slots[i.slot];
 		switch (i.kind) {
 			case Intent::CLEAR: {
+				Track& tr = tracks[i.track];
+				Slot& sl = tr.slots[i.slot];
 				sl.pending.store(NONE, std::memory_order_relaxed);
 				dropOverdub(sl);
 				sl.overdubbing.store(false, std::memory_order_relaxed);
@@ -573,7 +572,7 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 // Intents (audio thread)
 // ---------------------------------------------------------------------------------
 
-void LooperEngine::pressSlot(int t, int s, bool overdubMode) {
+void LooperEngine::pressSlot(int t, int s, bool overdubLatch) {
 	if (t < 0 || t >= MAX_TRACKS || s < 0 || s >= MAX_SLOTS) return;
 	Track& tr = tracks[t];
 	Slot& sl = tr.slots[s];
@@ -582,7 +581,7 @@ void LooperEngine::pressSlot(int t, int s, bool overdubMode) {
 		dropOverdub(sl);
 		return;
 	}
-	switch (sl.state.load(std::memory_order_relaxed)) {
+	switch ((SlotState) sl.state.load(std::memory_order_relaxed)) {
 		case EMPTY:
 			sl.pending.store(CAPTURE, std::memory_order_relaxed);
 			break;
@@ -597,7 +596,7 @@ void LooperEngine::pressSlot(int t, int s, bool overdubMode) {
 			// OVERDUB latch is on, pressing a playing cell just selects it as the overdub
 			// target (the module tracks selection) — it does not stop it. With the latch
 			// off, a press stops the loop, as before.
-			if (!overdubMode)
+			if (!overdubLatch)
 				sl.pending.store(STOP, std::memory_order_relaxed);
 			break;
 	}
@@ -618,11 +617,11 @@ void LooperEngine::pressScene(int row) {
 	if (row < 0 || row >= MAX_SLOTS) return;
 	for (int t = 0; t < MAX_TRACKS; t++) {
 		Slot& sl = tracks[t].slots[row];
-		switch (sl.state.load(std::memory_order_relaxed)) {
+		switch ((SlotState) sl.state.load(std::memory_order_relaxed)) {
 			case EMPTY:     stopTrack(t); break; // Ableton default: an empty slot in the scene stops the track
 			case FILLED:    sl.pending.store(LAUNCH, std::memory_order_relaxed); break;
-			case PLAYING:   break;
-			case RECORDING: break; // let it finish
+			case PLAYING:
+			case RECORDING: break; // keep playing / let it finish
 		}
 	}
 }
@@ -632,7 +631,7 @@ void LooperEngine::pressScene(int row) {
 // ---------------------------------------------------------------------------------
 
 void LooperEngine::requestClear(int t, int s) {
-	Intent i;
+	Intent i {};
 	i.kind = Intent::CLEAR; i.track = t; i.slot = s;
 	intents.push(i);
 }

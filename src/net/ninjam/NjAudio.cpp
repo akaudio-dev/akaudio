@@ -239,7 +239,7 @@ void NjAudio::writeInterval(const uint8_t guid[16], const uint8_t* data, size_t 
 	if (onIntervalReceived && t.ogg && !t.bytes.empty()) {
 		size_t nl = t.chanKey.find('\n');
 		std::string user = nl == std::string::npos ? t.chanKey : t.chanKey.substr(0, nl);
-		int cidx = nl == std::string::npos ? 0 : std::atoi(t.chanKey.c_str() + nl + 1);
+		int cidx = nl == std::string::npos ? 0 : (int) std::strtol(t.chanKey.c_str() + nl + 1, nullptr, 10);
 		int b, i;
 		{ std::lock_guard<std::mutex> lock(mu); b = bpm; i = bpi; }
 		onIntervalReceived(user, cidx, t.bytes.data(), t.bytes.size(), b, i, frames);

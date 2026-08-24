@@ -70,7 +70,7 @@ private:
 	};
 
 	void writeManifestLocked();
-	std::string liveName(int t, int s) const;   // "t<t>_s<s>.ogg"
+	static std::string liveName(int t, int s);   // "t<t>_s<s>.ogg"
 
 	struct LoadReq { int track, slot; std::string path; TakeMeta meta; };
 	std::mutex loadMu_;

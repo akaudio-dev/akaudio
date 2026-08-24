@@ -86,7 +86,7 @@ void LooperWorker::run() {
 				case Cmd::ALLOC: {
 					Buf* b = alloc(c.frames);
 					std::memset(b->pcm, 0, sizeof(float) * (size_t) b->frames * 2);
-					Reply r;
+					Reply r {};
 					r.kind = Reply::ALLOC; r.track = c.track; r.slot = c.slot; r.seq = c.seq; r.buf = b;
 					if (!engine.replies.push(r))
 						recycle(b);
@@ -107,7 +107,7 @@ void LooperWorker::run() {
 						for (size_t i = 0; i < u2; i++)
 							b->pcm[i] += c.b->pcm[i];
 					}
-					Reply r;
+					Reply r {};
 					r.kind = Reply::OVERDUB_COPY; r.track = c.track; r.slot = c.slot; r.seq = c.seq; r.buf = b;
 					if (!engine.replies.push(r))
 						recycle(b);
@@ -147,7 +147,7 @@ void LooperWorker::run() {
 				std::memcpy(b->pcm, pcm.data(), have * sizeof(float));
 				if (have < need)
 					std::memset(b->pcm + have, 0, (need - have) * sizeof(float));
-				LoadInstall li;
+				LoadInstall li {};
 				li.track = t; li.slot = s; li.buf = b; li.meta = meta;
 				computeThumb(b->pcm, frames, li.thumb);
 				if (!engine.submitLoad(li))

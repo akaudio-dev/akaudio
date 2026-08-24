@@ -87,7 +87,7 @@ struct TxToggleButton : app::Switch {
 	void onLeave(const LeaveEvent& e) override { hovered = false; app::Switch::onLeave(e); }
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
-		akaudio::RecorderLink* lk = rec ? rec->link() : nullptr;
+		const akaudio::RecorderLink* lk = rec ? rec->link() : nullptr;
 		bool on = lk && lk->recordOwnTx();
 		const float w = box.size.x, h = box.size.y, r = h / 2.f;
 		NVGcolor body = akTheme(nvgRGB(0xb9, 0xbd, 0xc2), nvgRGB(0x44, 0x48, 0x4c));
@@ -115,9 +115,9 @@ struct RecStatusView : Widget {
 	Recorder* rec = nullptr;
 	static std::string humanSize(long b) {
 		char c[24];
-		if (b >= 1024L * 1024L) std::snprintf(c, sizeof(c), "%.1f MB", b / (1024.0 * 1024.0));
-		else if (b >= 1024L)    std::snprintf(c, sizeof(c), "%ld KB", b / 1024L);
-		else                    std::snprintf(c, sizeof(c), "%ld B", b);
+		if (b >= 1024L * 1024L) (void) std::snprintf(c, sizeof(c), "%.1f MB", b / (1024.0 * 1024.0));
+		else if (b >= 1024L)    (void) std::snprintf(c, sizeof(c), "%ld KB", b / 1024L);
+		else                    (void) std::snprintf(c, sizeof(c), "%ld B", b);
 		return c;
 	}
 	void draw(const DrawArgs& args) override {
@@ -130,7 +130,7 @@ struct RecStatusView : Widget {
 		nvgStrokeColor(vg, rcBorder());
 		nvgStroke(vg);
 
-		akaudio::RecorderLink* lk = rec ? rec->link() : nullptr;
+		const akaudio::RecorderLink* lk = rec ? rec->link() : nullptr;
 		float y = 13.f;
 		if (!lk) {
 			drawTxt(vg, FONT_BOLD, w / 2, box.size.y / 2 - 6, 8.5f, rcTextDim(), "Place next", NVG_ALIGN_CENTER, w - 8);
@@ -149,7 +149,7 @@ struct RecStatusView : Widget {
 		long iv = lk->recIntervals();
 		if (iv > 0) {
 			char sum[48];
-			std::snprintf(sum, sizeof(sum), "%ld interval%s", iv, iv == 1 ? "" : "s");
+			(void) std::snprintf(sum, sizeof(sum), "%ld interval%s", iv, iv == 1 ? "" : "s");
 			drawTxt(vg, FONT_REG, 8, y, 8.5f, rcText(), sum, NVG_ALIGN_LEFT, w - 16);
 			y += 12.f;
 			drawTxt(vg, FONT_REG, 8, y, 8.5f, rcTextDim(), humanSize(lk->recBytes()), NVG_ALIGN_LEFT, w - 16);
@@ -167,7 +167,7 @@ struct RecStatusView : Widget {
 			if (y > box.size.y - 8.f) break;
 			NVGcolor dot = p.tx ? rcRed() : akTheme(nvgRGB(0x2a,0xa8,0x55), nvgRGB(0x3a,0xd0,0x6a));
 			nvgBeginPath(vg); nvgCircle(vg, 9, y, 2.6f); nvgFillColor(vg, dot); nvgFill(vg);
-			char cnt[16]; std::snprintf(cnt, sizeof(cnt), "%ld", p.intervals);
+			char cnt[16]; (void) std::snprintf(cnt, sizeof(cnt), "%ld", p.intervals);
 			float cw = textWidth(vg, FONT_REG, 8.f, cnt);
 			drawTxt(vg, FONT_REG, w - 6, y, 8.f, rcTextDim(), cnt, NVG_ALIGN_RIGHT);
 			drawTxt(vg, FONT_BOLD, 16, y, 8.5f, rcText(), p.label, NVG_ALIGN_LEFT, w - 22 - cw - 4);
@@ -248,7 +248,7 @@ struct RecorderWidget : ModuleWidget {
 	void appendContextMenu(Menu* menu) override {
 		Recorder* m = getModule<Recorder>();
 		if (!m) return;
-		akaudio::RecorderLink* lk = m->link();
+		const akaudio::RecorderLink* lk = m->link();
 		menu->addChild(new MenuSeparator);
 		if (!lk) {
 			menu->addChild(createMenuLabel("Place directly next to a Ninjam module"));

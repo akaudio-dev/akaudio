@@ -40,9 +40,12 @@ public:
 	// UI/setup thread. start() creates <dir>/{players,tx}/ + index.jsonl and launches
 	// the writer thread; a second start() while running is a no-op (same dir) or a
 	// stop+restart (different dir). stop() flushes + joins.
-	void start(const std::string& dir, bool recordTx);
+	void start(const std::string& sessionDir, bool recordTx);
 	void stop();
 	bool running() const { return run_.load(std::memory_order_acquire); }
+	// By-value is deliberate: dir_ is reassigned by a restart, so a caller-held
+	// reference could dangle.
+	// cppcheck-suppress returnByReference
 	std::string dir() const;
 	long totalIntervals() const { return nIntervals.load(std::memory_order_relaxed); }
 	long totalBytes() const { return nBytes.load(std::memory_order_relaxed); }

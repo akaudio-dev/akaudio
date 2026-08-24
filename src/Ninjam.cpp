@@ -493,8 +493,8 @@ struct Ninjam : Module, public akaudio::RecorderLink {
 		return out;
 	}
 	bool recorderAdjacent() {
-		Module* l = leftExpander.module;
-		Module* r = rightExpander.module;
+		const Module* l = leftExpander.module;
+		const Module* r = rightExpander.module;
 		return (l && l->model == modelRecorder) || (r && r->model == modelRecorder);
 	}
 	// UI thread (widget step): start/stop the archive on the arm+join+adjacency state.
@@ -504,9 +504,7 @@ struct Ninjam : Module, public akaudio::RecorderLink {
 		bool want = recorderAdjacent() && recArmed_.load(std::memory_order_relaxed)
 		            && joined.load(std::memory_order_relaxed);
 		if (want && !njclient.archiveRunning()) {
-			std::time_t t = std::time(nullptr);
-			char stamp[32];
-			std::strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H%M", std::localtime(&t));
+			std::string stamp = akaudio::timeStamp("%Y-%m-%d_%H%M");
 			std::string room;
 			for (char c : roomLabel)
 				room += ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) ? c : '_';
@@ -1622,7 +1620,7 @@ struct MetronomeToggle : app::Switch {
 		app::Switch::onLeave(e);
 	}
 	void draw(const DrawArgs& args) override {
-		Ninjam* nj = module ? static_cast<Ninjam*>(module) : nullptr;
+		const Ninjam* nj = module ? static_cast<Ninjam*>(module) : nullptr;
 		bool on = nj && nj->clickEnabled;
 		NVGcolor col = on ? njGreen()
 		             : hovered ? thText() : akShade(0x55);
@@ -2387,8 +2385,8 @@ struct NinjamWidget : ModuleWidget {
 		menu->addChild(createMenuLabel("Companions"));
 		// Don't offer to add a companion that is already a neighbour (either side) — one of
 		// each is what's useful, and the Recorder/Looper only work when adjacent anyway.
-		Module* l = module->leftExpander.module;
-		Module* r = module->rightExpander.module;
+		const Module* l = module->leftExpander.module;
+		const Module* r = module->rightExpander.module;
 		bool looperAdj = (l && l->model == modelLooper) || (r && r->model == modelLooper);
 		bool recorderAdj = (l && l->model == modelRecorder) || (r && r->model == modelRecorder);
 		menu->addChild(createMenuItem("Add Looper (left)", looperAdj ? "already added" : "", [this]() {

@@ -34,7 +34,7 @@ public:
 	bool empty() const { return tail.load(std::memory_order_acquire) == head.load(std::memory_order_acquire); }
 
 private:
-	T buf[CAP];
+	T buf[CAP] {};
 	std::atomic<size_t> head{0}, tail{0};
 };
 

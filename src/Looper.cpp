@@ -353,8 +353,9 @@ struct Looper : Module {
 		// POLY direct out: track t on channels 2t (L) / 2t+1 (R) — mirrors the MULTI input.
 		outputs[POLY_OUTPUT].setChannels(TRACKS * 2);
 		for (int t = 0; t < TRACKS; t++) {
-			outputs[POLY_OUTPUT].setVoltage(trackLR[t * 2] * 5.f, t * 2);
-			outputs[POLY_OUTPUT].setVoltage(trackLR[t * 2 + 1] * 5.f, t * 2 + 1);
+			size_t c = (size_t) t * 2;
+			outputs[POLY_OUTPUT].setVoltage(trackLR[c] * 5.f, t * 2);
+			outputs[POLY_OUTPUT].setVoltage(trackLR[c + 1] * 5.f, t * 2 + 1);
 		}
 		lights[OVERDUB_LIGHT].setBrightness(params[OVERDUB_PARAM].getValue() > 0.5f ? 1.f : 0.f);
 	}
@@ -390,18 +391,14 @@ struct Looper : Module {
 			}
 		}
 		std::string base, folder;
-		akaudio::RecorderLink* rl = adjacentRecorderLink();
+		const akaudio::RecorderLink* rl = adjacentRecorderLink();
 		if (rl && !rl->recSessionName().empty()) {
 			base = akaudio::expandHome(rl->sessionBase());
 			folder = rl->recSessionName();
 		} else {
 			base = akaudio::expandHome(sessionBase);
-			if (ownSessionFolder.empty()) {
-				std::time_t t = std::time(nullptr);
-				char stamp[32];
-				std::strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H%M", std::localtime(&t));
-				ownSessionFolder = std::string(stamp) + "_session";
-			}
+			if (ownSessionFolder.empty())
+				ownSessionFolder = akaudio::timeStamp("%Y-%m-%d_%H%M") + "_session";
 			folder = ownSessionFolder;
 		}
 		std::string dir = base + "/" + folder + "/looper";
@@ -433,7 +430,8 @@ struct Looper : Module {
 		json_t* root = json_loads(s.c_str(), 0, &err);
 		if (!root) return;
 
-		if (json_t* trks = json_object_get(root, "tracks"); json_is_array(trks)) {
+		json_t* trks = json_object_get(root, "tracks");
+		if (json_is_array(trks)) {
 			size_t i; json_t* v;
 			json_array_foreach(trks, i, v) {
 				int idx = (int) json_integer_value(json_object_get(v, "index"));
@@ -448,7 +446,8 @@ struct Looper : Module {
 		appliedSessionBase = sessionBase;
 		sessionRestored = true;
 
-		if (json_t* slots = json_object_get(root, "slots"); json_is_array(slots)) {
+		json_t* slots = json_object_get(root, "slots");
+		if (json_is_array(slots)) {
 			size_t i; json_t* v;
 			json_array_foreach(slots, i, v) {
 				const char* file = json_string_value(json_object_get(v, "file"));
@@ -491,21 +490,26 @@ struct Looper : Module {
 		return root;
 	}
 	void dataFromJson(json_t* root) override {
-		json_t* j;
-		if ((j = json_object_get(root, "simSecondsIdx")))
+		json_t* j = json_object_get(root, "simSecondsIdx");
+		if (j)
 			simSecondsIdx.store(clamp((int) json_integer_value(j), 0, N_SIM_SECONDS - 1));
-		if ((j = json_object_get(root, "sessionBase")) && json_is_string(j)) {
+		j = json_object_get(root, "sessionBase");
+		if (json_is_string(j)) {
 			const char* b = json_string_value(j);
 			if (b && *b) sessionBase = akaudio::expandHome(b);
 		}
 		// Restore the grid from the saved session folder on the first UI step (clip loader).
-		if ((j = json_object_get(root, "sessionDir")) && json_is_string(j)) {
+		j = json_object_get(root, "sessionDir");
+		if (json_is_string(j)) {
 			const char* d = json_string_value(j);
 			if (d && *d) { loadDir = akaudio::expandHome(d); loadPending = true; }
 		}
-		if ((j = json_object_get(root, "defRepeats"))) engine.defRepeats.store((int) json_integer_value(j));
-		if ((j = json_object_get(root, "defDecayDb"))) engine.defDecayDb.store((float) json_number_value(j));
-		if ((j = json_object_get(root, "trackNames")) && json_is_array(j)) {
+		j = json_object_get(root, "defRepeats");
+		if (j) engine.defRepeats.store((int) json_integer_value(j));
+		j = json_object_get(root, "defDecayDb");
+		if (j) engine.defDecayDb.store((float) json_number_value(j));
+		j = json_object_get(root, "trackNames");
+		if (json_is_array(j)) {
 			for (int t = 0; t < TRACKS && t < (int) json_array_size(j); t++) {
 				const char* n = json_string_value(json_array_get(j, t));
 				if (n && *n) trackNames[t] = n;
@@ -837,7 +841,7 @@ struct SlotButton : HoverSwitch {
 				m->selected.store(tt * SLOTS + ss, std::memory_order_relaxed); // the knobs follow
 			}));
 		menu->addChild(createIndexSubmenuItem("Decay per repetition",
-			{"0 dB (none)", "\xe2\x88\x92" "1 dB", "\xe2\x88\x92" "2 dB", "\xe2\x88\x92" "3 dB", "\xe2\x88\x92" "6 dB"},
+			{"0 dB (none)", "−1 dB", "−2 dB", "−3 dB", "−6 dB"},
 			[slp]() { return (size_t) decayIndex(slp->decayDb.load(std::memory_order_relaxed)); },
 			[slp, m, tt, ss](size_t i) {
 				slp->decayDb.store(DECAY_CHOICES[i], std::memory_order_relaxed);
@@ -1067,7 +1071,7 @@ struct LooperWidget : ModuleWidget {
 			[m]() { return (size_t) repeatsIndex(m->engine.defRepeats.load(std::memory_order_relaxed)); },
 			[m](size_t i) { m->engine.defRepeats.store(REPEAT_CHOICES[i], std::memory_order_relaxed); }));
 		menu->addChild(createIndexSubmenuItem("New clips: decay per repetition",
-			{"0 dB (none)", "\xe2\x88\x92" "1 dB", "\xe2\x88\x92" "2 dB", "\xe2\x88\x92" "3 dB", "\xe2\x88\x92" "6 dB"},
+			{"0 dB (none)", "−1 dB", "−2 dB", "−3 dB", "−6 dB"},
 			[m]() { return (size_t) decayIndex(m->engine.defDecayDb.load(std::memory_order_relaxed)); },
 			[m](size_t i) { m->engine.defDecayDb.store(DECAY_CHOICES[i], std::memory_order_relaxed); }));
 		menu->addChild(createMenuItem("Clear all slots", "", [m]() {
