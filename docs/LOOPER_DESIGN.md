@@ -265,8 +265,13 @@ pressing again cancels):
 
 **Any** slot press also **selects** that slot for the REPEATS/DECAY knobs (a ring shows
 it); there is no separate select gesture. One playing slot per track: arming Launch
-elsewhere replaces it at the boundary. Scenes use Ableton's default semantics (a scene
-is a complete state of the band).
+elsewhere replaces it at the boundary. **Recording takes over the track**: when a
+Capture commits (→ Recording), the track's playing clip stops on that same boundary —
+the old loop is never audible under the instrument being recorded (a refused silent
+capture therefore leaves the track stopped). Scenes use Ableton's default semantics (a
+scene is a complete state of the band), and **arming a scene disarms every launch queued
+outside its row** (an earlier scene, a single cell) — only the latest scene fires at the
+boundary.
 
 **Per-clip settings (`repeats`, `decay`) — how they are changed:**
 - **Selection = the last slot you pressed** (arm + select together), shown as a ring.
@@ -643,7 +648,8 @@ Tests (`test/`, no Rack link):
   fresh session on rejoin.
 - `looper_engine_test.cpp` *(built, passes)* — drives `LooperEngine` with a synthetic
   clock + deterministic input: record-next-interval capture and launch/stop/overdub
-  play back sample-exactly; a new recording plays the old loop until it commits; repeats;
+  play back sample-exactly; a new recording stops the track's playing clip at its start
+  boundary (takeover); a later scene press disarms an earlier one's queued launches; repeats;
   −6 dB decay; refused silent recording; scene stop; clear; regrid greys + refuses a
   mismatched take; CUE carries a private track's thru (not MIX); continuous overdub;
   loop declick; a submitted **`LoadInstall` installs as a FILLED slot and launches**;

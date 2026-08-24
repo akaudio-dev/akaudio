@@ -207,21 +207,29 @@ int main() {
 	sim.eng.overdubSel.store(-1);              // clear selection for the sections below
 
 	// ---- A silent recording is refused (slot goes back to Empty) ----
+	// Recording takes over the track (Ableton): the playing clip stops at the boundary
+	// the capture starts on, so the old loop is never audible under the live instrument.
 	Slot& s1 = sim.slot(1);
 	sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressSlot(0, 1, false); });
 	sim.interval(-1); // records silence
 	CHECK(s1.state.load() == RECORDING, "slot 1 recording");
+	CHECK(s0.state.load() == FILLED, "recording takes over: the playing clip stopped");
+	CHECK(sim.outputIs(-1), "old loop not audible while recording");
 	sim.interval(-1);
 	CHECK(s1.state.load() == EMPTY && s1.flashAt.load() > 0, "silent recording refused with a flash");
-	CHECK(s0.state.load() == PLAYING, "the playing slot was not disturbed");
+	CHECK(s0.state.load() == FILLED, "refused capture leaves the track stopped (takeover already happened)");
 
-	// ---- Record a new cell while another plays: the old loop plays until the new take lands ----
-	sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressSlot(0, 1, false); });
-	sim.interval(6); // slot 1 records 6 while slot 0 keeps playing
-	CHECK(s1.state.load() == RECORDING && s0.state.load() == PLAYING, "recording slot 1 while slot 0 plays");
-	CHECK(sim.outputIsSum(1, 2), "old (overdubbed) loop still audible during the recording interval");
+	// ---- Record a new cell while another plays: recording takes over the track ----
+	sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressSlot(0, 0, false); }); // relaunch 0
 	sim.interval(-1);
-	CHECK(s1.state.load() == PLAYING && s0.state.load() == FILLED, "new take replaces the playing slot");
+	CHECK(s0.state.load() == PLAYING, "slot 0 relaunched after the refusal");
+	sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressSlot(0, 1, false); });
+	CHECK(sim.outputIsSum(1, 2), "old loop still plays through the interval the capture was queued in");
+	sim.interval(6); // slot 1 records 6; slot 0 stopped on this interval's boundary
+	CHECK(s1.state.load() == RECORDING && s0.state.load() == FILLED, "capture stopped the playing slot");
+	CHECK(sim.outputIs(-1), "no clip audible during the recording interval (tx off)");
+	sim.interval(-1);
+	CHECK(s1.state.load() == PLAYING && s0.state.load() == FILLED, "new take plays; the old cell keeps its take");
 	CHECK(sim.outputIs(6), "new loop plays interval 6");
 	// Pressing a recording cell cancels it.
 	sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressSlot(0, 4, false); });
@@ -233,6 +241,16 @@ int main() {
 	sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressSlot(0, 0, false); });
 	sim.interval(-1);
 	CHECK(s0.state.load() == PLAYING, "slot 0 relaunched");
+
+	// ---- Arming a scene disarms other queued launches: only the latest scene fires ----
+	sim.interval(-1, true, [&](int f) {
+		if (f == 10) sim.eng.pressScene(1); // queues slot 1's launch (FILLED, take 6)
+		if (f == 20) sim.eng.pressScene(0); // supersedes it before the boundary
+	});
+	CHECK(s1.pending.load() == NONE, "superseded scene's queued launch disarmed");
+	sim.interval(-1);
+	CHECK(s0.state.load() == PLAYING && s1.state.load() == FILLED, "only the latest scene fired");
+	CHECK(sim.outputIsSum(1, 2), "row 0's clip is the one playing");
 
 	// ---- Scene with an empty slot stops the track ----
 	sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressScene(3); });

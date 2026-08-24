@@ -339,11 +339,18 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 				case CAPTURE: {
 					// Start recording the interval that begins now (Ableton clip semantics);
 					// the take is committed at the next boundary. One recording slot per
-					// track: arming another cancels the previous one.
+					// track: arming another cancels the previous one. Recording takes over
+					// the track: its playing clip stops at this same boundary, so the old
+					// loop is never audible under the instrument being recorded.
 					if (!present || !tr.rec) { refuse(sl, now); break; }
 					for (int o = 0; o < MAX_SLOTS; o++)
 						if (o != s && tr.slots[o].state.load(std::memory_order_relaxed) == RECORDING)
 							tr.slots[o].state.store(EMPTY, std::memory_order_relaxed);
+					int ps = tr.playingSlot.load(std::memory_order_relaxed);
+					if (ps >= 0 && ps != s) {
+						tr.slots[ps].state.store(FILLED, std::memory_order_relaxed);
+						tr.playingSlot.store(-1, std::memory_order_relaxed);
+					}
 					sl.state.store(RECORDING, std::memory_order_relaxed);
 					break;
 				}
@@ -615,6 +622,15 @@ void LooperEngine::stopAll() {
 
 void LooperEngine::pressScene(int row) {
 	if (row < 0 || row >= MAX_SLOTS) return;
+	// Arming a scene disarms every launch queued outside its row (an earlier scene, a
+	// single cell): only the latest scene fires at the boundary. Same-thread as the
+	// boundary commit (audio), so clearing pendings here can't race it.
+	for (int t = 0; t < MAX_TRACKS; t++)
+		for (int s = 0; s < MAX_SLOTS; s++) {
+			Slot& o = tracks[t].slots[s];
+			if (s != row && o.pending.load(std::memory_order_relaxed) == LAUNCH)
+				o.pending.store(NONE, std::memory_order_relaxed);
+		}
 	for (int t = 0; t < MAX_TRACKS; t++) {
 		Slot& sl = tracks[t].slots[row];
 		switch ((SlotState) sl.state.load(std::memory_order_relaxed)) {
