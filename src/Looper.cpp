@@ -15,6 +15,7 @@
 #include "RecorderLink.hpp"
 #include "looper/LooperEngine.hpp"
 #include "looper/Session.hpp"
+#include "looper/SessionMirror.hpp"
 
 #include <osdialog.h>
 
@@ -155,6 +156,10 @@ struct Looper : Module {
 	std::string appliedSessionBase;    // sessionBase at the last resolve (menu change ⇒ re-resolve)
 	std::string loadDir;               // session dir restored from the patch (clip loader)
 	bool loadPending = false;          // a restore is queued (run once on the UI thread)
+	// Embed the live grid in the patch (Rack patch storage): onSave mirrors the session
+	// folder's live cells into the .vcv; a load whose session folder is gone hydrates a
+	// fresh one from that snapshot. The session folder stays the source of truth.
+	bool embedTakes = true;
 	bool sessionRestored = false;      // this session was restored — keep its folder, don't reform
 
 	// Editable track labels (UI thread only; persisted). Default "-01-" … "-08-".
@@ -421,6 +426,11 @@ struct Looper : Module {
 	// takes appear as FILLED slots (playable once the live grid matches their length).
 	void loadSession() {
 		loadPending = false;
+		// Disk first: the saved session folder is the source of truth. Only when it is
+		// gone (a shared patch, a deleted jams dir) hydrate a fresh folder from the
+		// patch's embedded snapshot — patch storage is transport, never a write target.
+		if (loadDir.empty() || !system::isFile(loadDir + "/session.json"))
+			hydrateFromSnapshot();
 		if (loadDir.empty()) return;
 		std::ifstream f(loadDir + "/session.json", std::ios::binary);
 		if (!f) return;
@@ -487,6 +497,7 @@ struct Looper : Module {
 		for (int t = 0; t < TRACKS; t++)
 			json_array_append_new(names, json_string(trackNames[t].c_str()));
 		json_object_set_new(root, "trackNames", names);
+		json_object_set_new(root, "embedTakes", json_boolean(embedTakes));
 		return root;
 	}
 	void dataFromJson(json_t* root) override {
@@ -514,6 +525,75 @@ struct Looper : Module {
 				const char* n = json_string_value(json_array_get(j, t));
 				if (n && *n) trackNames[t] = n;
 			}
+		}
+		j = json_object_get(root, "embedTakes");
+		if (json_is_boolean(j)) embedTakes = json_boolean_value(j);
+	}
+
+	// ---- Embed takes in patch (Rack patch storage; see SessionMirror.hpp) ----
+
+	static const int SNAPSHOT_VERSION = 1;
+
+	// A snapshot we don't recognize (a future format) is skipped, never guessed at.
+	static bool snapshotVersionOk(const std::string& snapDir) {
+		json_error_t err;
+		json_t* root = json_load_file((snapDir + "/snapshot.json").c_str(), 0, &err);
+		if (!root) return false;
+		bool ok = json_integer_value(json_object_get(root, "version")) <= SNAPSHOT_VERSION;
+		json_decref(root);
+		return ok;
+	}
+
+	static void writeSnapshotMeta(const std::string& snapDir) {
+		json_t* root = json_object();
+		json_object_set_new(root, "version", json_integer(SNAPSHOT_VERSION));
+		(void) json_dump_file(root, (snapDir + "/snapshot.json").c_str(), JSON_INDENT(2));
+		json_decref(root);
+	}
+
+	// Called before every patch serialization (including autosave every ~15 s): mirror
+	// the live grid into the patch. Incremental and mtime-preserving — an unchanged
+	// grid writes nothing, and no patch-storage dir is created before the first real
+	// take reaches disk (an empty session has no session.json).
+	void onSave(const SaveEvent& e) override {
+		Module::onSave(e);
+		try {
+			if (embedTakes) {
+				if (resolvedSessionDir.empty() || !system::isFile(resolvedSessionDir + "/session.json"))
+					return;
+				std::string snap = createPatchStorageDirectory();
+				int changes = akaudio::looper::mirrorSession(resolvedSessionDir, snap);
+				if (changes > 0 || (changes == 0 && !system::isFile(snap + "/snapshot.json")))
+					writeSnapshotMeta(snap);
+			} else {
+				// Opt-out also retracts an existing snapshot so the patch carries no stale audio.
+				std::string snap = getPatchStorageDirectory();
+				if (system::isDirectory(snap)) {
+					akaudio::looper::clearSessionMirror(snap);
+					system::remove(snap + "/snapshot.json");
+				}
+			}
+		} catch (Exception& ex) {
+			WARN("Looper: takes not embedded in patch: %s", ex.what());
+		}
+	}
+
+	// The saved session folder is gone: rebuild it from the patch's snapshot, then let
+	// the normal clip loader run against it (one input format — a session folder).
+	void hydrateFromSnapshot() {
+		try {
+			std::string snap = getPatchStorageDirectory();
+			if (!system::isFile(snap + "/session.json") || !snapshotVersionOk(snap))
+				return;
+			std::string base = akaudio::expandHome(sessionBase);
+			if (ownSessionFolder.empty())
+				ownSessionFolder = akaudio::timeStamp("%Y-%m-%d_%H%M") + "_session";
+			std::string dir = base + "/" + ownSessionFolder + "/looper";
+			if (akaudio::looper::mirrorSession(snap, dir) < 0)
+				return;
+			loadDir = dir;
+		} catch (Exception& ex) {
+			WARN("Looper: snapshot hydration skipped: %s", ex.what());
 		}
 	}
 };
@@ -1096,6 +1176,9 @@ struct LooperWidget : ModuleWidget {
 		menu->addChild(createMenuItem("Open this session's folder", "", [cur]() {
 			if (!cur.empty()) system::openDirectory(cur);
 		}, cur.empty()));
+		// Snapshot the live grid into the .vcv on save, so a shared patch (or one whose
+		// jams folder is gone) reloads with its loops. The session folder stays canonical.
+		menu->addChild(createBoolPtrMenuItem("Embed takes in patch", "", &m->embedTakes));
 	}
 };
 

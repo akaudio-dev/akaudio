@@ -13,6 +13,7 @@
 // run on the LooperWorker thread (heavy: OGG encode + file writes); setDir()/setRoom()/
 // setTrackName()/setSlotSettings() run on the UI thread. A mutex guards the shared model;
 // the encode itself runs unlocked (it only reads the caller's PCM).
+#include <cstdio>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -40,6 +41,14 @@ public:
 	void setSlotSettings(int track, int slot, int repeats, float decayDb);
 	std::string dir() const;
 	bool hasWritten() const; // true once at least one take reached disk this session
+	// The live cell's on-disk name, "t<t>_s<s>.ogg" — the naming contract SessionMirror
+	// syncs by (history/ files carry a stamp prefix and never match it). Inline so
+	// SessionMirror links without Session.cpp's encoder dependencies.
+	static std::string liveName(int t, int s) {
+		char b[32];
+		(void) std::snprintf(b, sizeof(b), "t%d_s%d.ogg", t, s);
+		return std::string(b);
+	}
 
 	// ---- Clip loader ----
 	// UI thread: queue a saved take to restore (its OGG at `absPath`).
@@ -70,7 +79,6 @@ private:
 	};
 
 	void writeManifestLocked();
-	static std::string liveName(int t, int s);   // "t<t>_s<s>.ogg"
 
 	struct LoadReq { int track, slot; std::string path; TakeMeta meta; };
 	std::mutex loadMu_;

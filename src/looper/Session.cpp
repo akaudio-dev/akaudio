@@ -159,12 +159,6 @@ bool Session::hasWritten() const {
 	return everWrote_;
 }
 
-std::string Session::liveName(int t, int s) {
-	char b[32];
-	(void) std::snprintf(b, sizeof(b), "t%d_s%d.ogg", t, s);
-	return std::string(b);
-}
-
 // ---- Worker thread ---------------------------------------------------------------
 
 void Session::save(int track, int slot, const float* pcm, const TakeMeta& meta) {
