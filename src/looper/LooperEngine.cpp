@@ -223,10 +223,18 @@ void LooperEngine::maybeConvert(Track& tr, int t, int s) {
 	if (sl.state.load(std::memory_order_relaxed) != FILLED) return;
 	if (sl.playable.load(std::memory_order_relaxed)) return; // already fits
 	if (sl.derived.load(std::memory_order_relaxed)) return;  // derivations don't re-derive
-	if (!sl.take.buf || sl.take.sampleRate != sr || sl.take.bpm != curBpm) return;
+	if (!sl.take.buf || sl.take.sampleRate != sr) return;
+	if (sl.take.bpm <= 0 || sl.take.bpi <= 0 || curBpm <= 0 || curBpi <= 0) return;
+	// A BPM change is a varispeed (the worker resamples — pitch shifts, tape-style),
+	// gated by the toggle and bounded to 0.5×–2×: beyond that the shift stops being
+	// musical and grey-until-rerecorded is honest.
+	if (sl.take.bpm != curBpm) {
+		if (!repitch.load(std::memory_order_relaxed)) return;
+		if (2 * curBpm < sl.take.bpm || curBpm > 2 * sl.take.bpm) return;
+	}
 	Cmd c {};
 	c.kind = Cmd::CONVERT; c.track = t; c.slot = s; c.frames = N;
-	c.seq = 0; c.a = sl.take.buf; c.b = nullptr;
+	c.a = sl.take.buf; c.b = nullptr;
 	c.meta.frames = N;
 	c.meta.sampleRate = sr;
 	c.meta.bpm = curBpm; c.meta.bpi = curBpi;
@@ -235,14 +243,22 @@ void LooperEngine::maybeConvert(Track& tr, int t, int s) {
 	c.meta.repeats = sl.repeats.load(std::memory_order_relaxed);
 	c.meta.decayDb = sl.decayDb.load(std::memory_order_relaxed);
 	c.meta.followSlot = sl.followSlot.load(std::memory_order_relaxed);
-	if (curBpi == 2 * sl.take.bpi && std::abs(N - 2 * sl.take.frames) <= 4) {
-		c.upto = -1; // tile ×2 into the doubled interval
-	} else if (2 * curBpi == sl.take.bpi && std::abs(sl.take.frames - 2 * N) <= 4) {
+	// seq carries the placement mode (CONVERT doesn't use sequence numbers):
+	// 0 = in-place (varispeed only), 1 = tile ×2, 2 = split into halves.
+	if (curBpi == sl.take.bpi) {
+		if (sl.take.bpm == curBpm) return; // same grid shape — nothing to derive
+		c.seq = 0;
+		c.upto = -1;
+	} else if (curBpi == 2 * sl.take.bpi) {
+		c.seq = 1; // (varispeed, then) tile ×2 into the doubled interval
+		c.upto = -1;
+	} else if (2 * curBpi == sl.take.bpi) {
 		if (s + 1 >= MAX_SLOTS || tr.slots[s + 1].state.load(std::memory_order_relaxed) != EMPTY)
 			return; // nowhere for the second half
-		c.upto = s + 1; // split: halves become a ×1 follow chain
+		c.seq = 2; // (varispeed, then) split: halves become a ×1 follow chain
+		c.upto = s + 1;
 	} else {
-		return; // not a clean halving/doubling (different BPM, odd ratio, …)
+		return; // not a clean halving/doubling of the BPI
 	}
 	cmds.push(c); // a dropped push just leaves the take grey; never blocks the audio thread
 }

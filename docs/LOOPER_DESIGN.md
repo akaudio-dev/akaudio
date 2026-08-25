@@ -357,6 +357,15 @@ boundary.
    boundary already retargeted the playing slot, so user action always wins over the
    follow jump.
 
+**Tempo conversion (BPM varispeed + BPI halving/doubling).** A **BPM change** within
+0.5×–2× re-pitches takes, tape-style: the worker resamples each mismatched take to the
+new interval length with a small windowed-sinc (16 taps/side, Hann, anti-alias cutoff
+when slowing down) — pitch shifts with the tempo ratio, beats stay aligned. Bigger
+jumps grey the takes (varispeed stops being musical), as does the context-menu toggle
+*Tempo change: re-pitch takes* when off (re-enable + the next regrid re-derives).
+Combined BPM+BPI changes decompose: resample for the tempo ratio, then the BPI
+placement below. Everything shares the machinery described next.
+
 **BPI conversion (halving/doubling at the same BPM).** A regrid greys mismatched
 takes as before, but when the BPI exactly halved or doubled (same BPM, same sample
 rate), the engine derives grid-fitting takes on the worker: **doubling tiles** the take

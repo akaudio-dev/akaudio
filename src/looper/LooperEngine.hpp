@@ -261,6 +261,9 @@ public:
 	// escape hatch for never-silent sources (drones/pads), where the chain would
 	// otherwise eat the whole column.
 	std::atomic<bool> autoAdvance{true};
+	// A BPM change re-pitches takes (varispeed, tape-style) within 0.5×–2×. Off = takes
+	// grey out on tempo changes instead (re-record rather than shift pitch).
+	std::atomic<bool> repitch{true};
 	std::atomic<int> intervalFrames{0};  // current N (UI)
 	std::atomic<long> allocations{0};    // buffers allocated by the worker (diagnostics/test)
 

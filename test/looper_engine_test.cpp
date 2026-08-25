@@ -72,6 +72,7 @@ struct Sim {
 	double now = 0.0;
 	int n = N;
 	int bpm = 120, bpi = 4; // the clock's tempo (BPI-conversion tests change bpi + n + gen)
+	int sineHz = -1;    // input override: a pure sine (varispeed tests need a smooth signal)
 	bool tx_ = false;   // TX latch fed to the track this interval
 	int quietFrom = -1; // input silent from this frame on (tail-gate tests); -1 = full interval
 	std::vector<float> outL, outR, cueL_, cueR_; // last interval's MIX + CUE
@@ -104,9 +105,10 @@ struct Sim {
 			action(f);
 			TrackIn in;
 			in.present = present; in.tx = tx_;
-			bool live = k >= 0 && (quietFrom < 0 || f < quietFrom);
-			in.l = live ? sig(k, f) : 0.f;
-			in.r = live ? -sig(k, f) : 0.f;
+			bool live = (k >= 0 || sineHz > 0) && (quietFrom < 0 || f < quietFrom);
+			float v = sineHz > 0 ? 0.3f * std::sin(2.f * (float) M_PI * sineHz * f / SR) : (k >= 0 ? sig(k, f) : 0.f);
+			in.l = live ? v : 0.f;
+			in.r = live ? -v : 0.f;
 			float l = 0.f, r = 0.f, cl = 0.f, cr = 0.f;
 			eng.tick(clock(), &in, 1, now += 1.0 / SR, l, r, cl, cr);
 			outL[f] = l; outR[f] = r; cueL_[f] = cl; cueR_[f] = cr;
@@ -880,6 +882,114 @@ int main() {
 		CHECK(b.slot(6).playable.load() && b.slot(7).state.load() == FILLED,
 			"split: the neighbor with a free slot below split fine");
 		b.eng.stop();
+	}
+
+	// ---- BPM conversion (varispeed): a tempo change within 0.5×–2× re-pitches takes;
+	// bigger jumps and the toggle-off case grey them out instead. ----
+	{
+		Sim r;
+		r.eng.declickEnabled.store(false);
+		r.eng.start();
+		r.interval(0); // warm-up (bpm 120, bpi 4, n 4800)
+		Slot& s0 = r.slot(0);
+		// Capture one interval of a 440 Hz sine (arm interval silent — a sine there
+		// would be folded into the take's tail by pickup capture, doubling it).
+		r.interval(-1, true, [&](int f) { if (f == 10) r.eng.pressSlot(0, 0, false); });
+		r.sineHz = 440;
+		r.interval(1); // the recorded interval (input = the sine)
+		r.sineHz = -1;
+		r.interval(-1);
+		CHECK(s0.state.load() == PLAYING, "varispeed: sine take captured");
+		r.eng.stopTrack(0);
+		r.interval(-1);
+
+		// BPM 120 → 96 (ratio 0.8): the take resamples to the longer interval and the
+		// sine drops to 440·0.8 = 352 Hz.
+		r.bpm = 96; r.n = 6000; r.gen = 2; r.frame = 0;
+		r.interval(-1); // regrid → varispeed install
+		CHECK(s0.playable.load() && s0.take.frames == 6000 && s0.derived.load(),
+			"varispeed: take re-derived at the new tempo (frames %d)", s0.take.frames);
+		r.interval(-1, true, [&](int f) { if (f == 10) r.eng.pressSlot(0, 0, false); });
+		r.interval(-1);
+		{
+			bool ok = true;
+			for (int f = 64; f < r.n - 64 && ok; f++) {
+				double pos = (f + 0.5) * 0.8 - 0.5; // resampler's source mapping
+				float el = 0.3f * (float) std::sin(2.0 * M_PI * 440.0 * pos / SR);
+				if (std::fabs(r.outL[f] - el) > 0.02f) {
+					std::printf("   varispeed mismatch at %d: got %.4f want %.4f\n", f, r.outL[f], el);
+					ok = false;
+				}
+			}
+			CHECK(ok, "varispeed: playback is the sine re-pitched by the tempo ratio");
+		}
+		r.eng.stopTrack(0);
+		r.interval(-1);
+
+		// Combined BPM + BPI change: capture at (96, 4), then (120, 8) — the take
+		// resamples 1.25× faster AND tiles ×2 into the doubled interval.
+		r.interval(-1, true, [&](int f) { if (f == 10) r.eng.pressSlot(0, 2, false); });
+		r.sineHz = 440;
+		r.interval(1);
+		r.sineHz = -1;
+		r.interval(-1);
+		CHECK(r.slot(2).state.load() == PLAYING, "combined: take captured at 96 BPM");
+		r.eng.stopTrack(0);
+		r.interval(-1);
+		r.bpm = 120; r.bpi = 8; r.n = 9600; r.gen = 3; r.frame = 0;
+		r.interval(-1);
+		CHECK(r.slot(2).playable.load() && r.slot(2).take.frames == 9600 && r.slot(2).derived.load(),
+			"combined: resampled + tiled take fits the new grid");
+		r.interval(-1, true, [&](int f) { if (f == 10) r.eng.pressSlot(0, 2, false); });
+		r.interval(-1);
+		{
+			bool ok = true;
+			for (int f = 64; f < 4800 - 64 && ok; f++) {
+				double pos = (f + 0.5) * 1.25 - 0.5;
+				float el = 0.3f * (float) std::sin(2.0 * M_PI * 440.0 * pos / SR);
+				if (std::fabs(r.outL[f] - el) > 0.02f) {
+					std::printf("   combined mismatch at %d: got %.4f want %.4f\n", f, r.outL[f], el);
+					ok = false;
+				}
+				if (std::fabs(r.outL[f] - r.outL[f + 4800]) > 1e-6f) {
+					std::printf("   combined tile mismatch at %d\n", f);
+					ok = false;
+				}
+			}
+			CHECK(ok, "combined: first half is the re-pitched sine, second half tiles it exactly");
+		}
+		r.eng.stopTrack(0);
+		r.interval(-1);
+
+		// Bounds + toggle need a REAL (underived) take — derived cells never re-derive.
+		// Capture a fresh one at the current grid (120 BPM, 8 BPI).
+		r.interval(-1, true, [&](int f) { if (f == 10) r.eng.pressSlot(0, 4, false); });
+		r.sineHz = 440;
+		r.interval(1);
+		r.sineHz = -1;
+		r.interval(-1);
+		CHECK(r.slot(4).state.load() == PLAYING, "bounds: fresh take captured");
+		r.eng.stopTrack(0);
+		r.interval(-1);
+
+		// Beyond 2× the take stays grey (still underived, so a sane tempo later works).
+		r.bpm = 480; r.n = 2400; r.gen = 4; r.frame = 0;
+		r.interval(-1);
+		CHECK(!r.slot(4).playable.load() && !r.slot(4).derived.load(),
+			"varispeed: a 4x jump is out of bounds — take stays grey");
+
+		// Toggle off: even an in-bounds tempo change greys; re-enabling converts on
+		// the next regrid (a tempo wiggle / rejoin rescans the grid).
+		r.eng.repitch.store(false);
+		r.bpm = 240; r.n = 4800; r.gen = 5; r.frame = 0; // ratio 2 vs the (120,8) take
+		r.interval(-1);
+		CHECK(!r.slot(4).playable.load(), "repitch off: tempo change greys the take");
+		r.eng.repitch.store(true);
+		r.gen = 6; r.frame = 0;
+		r.interval(-1); // same grid, new generation → rescan converts now
+		CHECK(r.slot(4).playable.load() && r.slot(4).take.frames == 4800 && r.slot(4).derived.load(),
+			"repitch back on: the next regrid re-derives");
+		r.eng.stop();
 	}
 
 	std::printf("%s (%d failures)\n", fails ? "FAIL" : "PASS: LooperEngine", fails);

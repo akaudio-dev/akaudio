@@ -541,6 +541,7 @@ struct Looper : Module {
 		json_object_set_new(root, "defRepeats", json_integer(engine.defRepeats.load()));
 		json_object_set_new(root, "defDecayDb", json_real(engine.defDecayDb.load()));
 		json_object_set_new(root, "autoAdvance", json_boolean(engine.autoAdvance.load()));
+		json_object_set_new(root, "repitch", json_boolean(engine.repitch.load()));
 		json_object_set_new(root, "followMixerNames", json_boolean(followMixerNames));
 		json_t* names = json_array();
 		for (int t = 0; t < TRACKS; t++)
@@ -570,6 +571,8 @@ struct Looper : Module {
 		if (j) engine.defDecayDb.store((float) json_number_value(j));
 		j = json_object_get(root, "autoAdvance");
 		if (json_is_boolean(j)) engine.autoAdvance.store(json_boolean_value(j));
+		j = json_object_get(root, "repitch");
+		if (json_is_boolean(j)) engine.repitch.store(json_boolean_value(j));
 		j = json_object_get(root, "followMixerNames");
 		if (json_is_boolean(j)) followMixerNames = json_boolean_value(j);
 		j = json_object_get(root, "trackNames");
@@ -1268,6 +1271,10 @@ struct LooperWidget : ModuleWidget {
 		menu->addChild(createBoolMenuItem("Capture: auto-advance while playing", "",
 			[m]() { return m->engine.autoAdvance.load(std::memory_order_relaxed); },
 			[m](bool v) { m->engine.autoAdvance.store(v, std::memory_order_relaxed); }));
+		// Off = takes grey out on a BPM change instead of re-pitching (varispeed).
+		menu->addChild(createBoolMenuItem("Tempo change: re-pitch takes", "",
+			[m]() { return m->engine.repitch.load(std::memory_order_relaxed); },
+			[m](bool v) { m->engine.repitch.store(v, std::memory_order_relaxed); }));
 		// While on, the MixMaster feeding MULTI names our tracks (overwriting local
 		// renames — that's what following means). The widget sweep does the copying.
 		menu->addChild(createBoolPtrMenuItem("Track names: follow the mixer", "",
