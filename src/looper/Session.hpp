@@ -37,8 +37,14 @@ public:
 	void setDir(const std::string& looperDir);
 	void setRoom(const std::string& room);
 	void setTrackName(int track, const std::string& name);
-	// Reflect a late REPEATS/DECAY edit of an already-saved slot into the manifest.
-	void setSlotSettings(int track, int slot, int repeats, float decayDb);
+	// Reflect a late repeats/decay/follow edit into the manifest. Works for take-less
+	// cells too (an empty "rest" step in a follow chain gets a settings-only row).
+	void setSlotSettings(int track, int slot, int repeats, float decayDb, int followSlot);
+	// A session restored from disk counts as written: its session.json already exists,
+	// so later settings/name edits (and clears) may rewrite it. Without this, flush()
+	// and clear() refuse until a brand-new take lands — a reloaded patch would never
+	// persist edits, and clearing a restored slot would orphan its manifest row.
+	void markRestored();
 	std::string dir() const;
 	bool hasWritten() const; // true once at least one take reached disk this session
 	// The live cell's on-disk name, "t<t>_s<s>.ogg" — the naming contract SessionMirror
@@ -75,6 +81,7 @@ private:
 		uint64_t startFrame = 0;
 		int repeats = 0;
 		float decayDb = 0.f;
+		int followSlot = 0; // 0 = stop, 1..8 = launch slot N after done
 		std::string created;
 	};
 

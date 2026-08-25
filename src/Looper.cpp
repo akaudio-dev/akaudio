@@ -32,10 +32,19 @@ const int TRACKS = akaudio::looper::MAX_TRACKS;
 const int SLOTS = akaudio::looper::MAX_SLOTS;
 const int THUMB_BINS = akaudio::looper::THUMB_BINS;
 
-const int REPEAT_CHOICES[] = {0, 1, 2, 4, 8, 16, 32, 64}; // 0 = ∞ (REPEATS knob positions)
+const int REPEAT_CHOICES[] = {0, 1, 2, 4, 8, 16, 32, 64}; // 0 = ∞ (cell-menu choices)
 const int N_REPEAT_CHOICES = 8;
 const float DECAY_CHOICES[] = {0.f, -1.f, -2.f, -3.f, -6.f}; // dB per repetition (menus)
 const int N_DECAY_CHOICES = 5;
+// Shared menu labels (cell menu + module "New clips" defaults — keep them in sync).
+static const std::vector<std::string>& repeatLabels() {
+	static const std::vector<std::string> v = {"\xe2\x88\x9e", "1", "2", "4", "8", "16", "32", "64"};
+	return v;
+}
+static const std::vector<std::string>& decayLabels() {
+	static const std::vector<std::string> v = {"0 dB (none)", "−1 dB", "−2 dB", "−3 dB", "−6 dB"};
+	return v;
+}
 const int SIM_SECONDS[] = {2, 4, 8, 16, 32};
 const int N_SIM_SECONDS = 5;
 
@@ -50,8 +59,8 @@ inline NVGcolor lpBorder()  { return akShade(akDark() ? 0x2e : 0x26); }
 inline NVGcolor lpRing()    { return akTheme(nvgRGB(0x1f, 0x1f, 0x1f), nvgRGB(0xff, 0xff, 0xff)); }
 
 // ---- Layout (px; 44 HP = 660 × 380) ----
-// Grid on the left, scene column beside it, then a controls column (DUB, REPEATS,
-// DECAY, MIX) to the right. The output plates / input well reuse the
+// Grid on the left, scene column beside it, then a controls column (DUB, the output
+// plates) to the right. The output plates / input well reuse the
 // Theme.hpp plate geometry (AK_PLATE_*) so they read as the same family as Radio and
 // Ninjam; the "AK" mark sits at the shared AK_MARK_Y_MM.
 const float COL_X0 = 8.f, COL_W = 68.f;        // track columns: L+R jack pair reads as a pair
@@ -63,8 +72,8 @@ const float STOP_GAP = 6.f;                    // whitespace between the grid an
 const float STOP_Y = GRID_Y + 7 * ROW_H + BTN_H + STOP_GAP; // bottoms align with the MIX plate (stopH())
 // Controls column (x center RX), top → bottom.
 const float RX = 623.f;
-const float Y_DUB = 62.f;                      // overdub bezel button (label above, like Fundamental's PUSH)
-const float Y_REPEATS = 100.f, Y_DECAY = 136.f; // knob centers (labels 17 px above) — raised to free plate room
+const float Y_DUB = 96.f;                      // overdub bezel button (label above, like Fundamental's PUSH),
+                                               // centered in the column gap above the OUTS plate
 // Three stacked output plates: OUTS (the per-track poly out) over CUE (private) over MIX
 // (to Ninjam). CUE/MIX are vertical stereo plates (L over R, jacks squeezed together but
 // with clear margins — room above for the title, beside for the L/R labels); OUTS is a
@@ -123,8 +132,6 @@ struct Looper : Module {
 		ENUMS(STOP_PARAM, TRACKS),
 		STOP_ALL_PARAM,
 		ENUMS(TX_PARAM, TRACKS),            // latch: this track's live input goes to MIX (on air)
-		REPEATS_PARAM,
-		DECAY_PARAM,
 		OVERDUB_PARAM,
 		PARAMS_LEN
 	};
@@ -164,8 +171,13 @@ struct Looper : Module {
 
 	// Editable track labels (UI thread only; persisted). Default "-01-" … "-08-".
 	std::string trackNames[TRACKS];
+	// Follow a connected MindMeld MixMaster's track labels (menu toggle): while on, the
+	// widget's sweep copies the mixer's names over ours (local renames are overwritten —
+	// that is what "follow" means). Off by default.
+	bool followMixerNames = false;
 
-	// Selection = the last pressed slot (or a menu "Select"). Index track*SLOTS+slot, −1 none.
+	// Selection = the last pressed slot (the continuous overdub's target). Index
+	// track*SLOTS+slot, −1 none.
 	std::atomic<int> selected{-1};
 
 	// ---- Clock source ----
@@ -220,9 +232,6 @@ struct Looper : Module {
 		for (int s = 0; s < SLOTS; s++)
 			configButton(SCENE_PARAM + s, string::f("Scene %d", s + 1));
 		configButton(STOP_ALL_PARAM, "Stop all tracks");
-		configSwitch(REPEATS_PARAM, 0.f, (float) (N_REPEAT_CHOICES - 1), 0.f, "Repeats (selected slot)",
-			{"\xe2\x88\x9e", "1", "2", "4", "8", "16", "32", "64"});
-		configParam(DECAY_PARAM, -6.f, 0.f, 0.f, "Decay (selected slot)", " dB/rep");
 		configSwitch(OVERDUB_PARAM, 0.f, 1.f, 0.f, "Overdub mode", {"Off", "On"});
 		configOutput(MIX_L_OUTPUT, "Mix L (to Ninjam IN)");
 		configOutput(MIX_R_OUTPUT, "Mix R (to Ninjam IN)");
@@ -242,8 +251,6 @@ struct Looper : Module {
 	}
 
 	static std::string defaultTrackName(int t) { return string::f("-%02d-", t + 1); }
-
-	akaudio::looper::Slot& slotAt(int idx) { return engine.slotAt(idx); }
 
 	// ---- Button intents (audio thread) ----
 	void pressSlot(int t, int s) {
@@ -366,7 +373,24 @@ struct Looper : Module {
 	}
 
 	// ---- UI-thread helpers ----
-	void clearSlot(int t, int s) { engine.requestClear(t, s); }
+	void clearSlot(int t, int s) {
+		engine.requestClear(t, s);
+		// Drop the cell's manifest settings right away too (the engine's reset of the
+		// slot atomics is async, and a rest cell has no file — no Session::clear runs
+		// for it): otherwise the row would linger until the next sweep.
+		session.setSlotSettings(t, s, 0, 0.f, 0);
+	}
+
+	// UI thread (cell-menu setters + the widget sweep): reflect a slot's
+	// repeats/decay/follow into the session manifest — including take-less "rest"
+	// cells, which get settings-only rows (no-op when nothing changed).
+	void pushSlotSettings(int t, int s) {
+		akaudio::looper::Slot& sl = engine.tracks[t].slots[s];
+		session.setSlotSettings(t, s,
+			sl.repeats.load(std::memory_order_relaxed),
+			sl.decayDb.load(std::memory_order_relaxed),
+			sl.followSlot.load(std::memory_order_relaxed));
+	}
 	int pendingCount() const { return engine.pendingCount(); }
 
 	// An adjacent Ninjam, as a RecorderLink — used only to borrow the exact jam folder it
@@ -461,7 +485,6 @@ struct Looper : Module {
 			size_t i; json_t* v;
 			json_array_foreach(slots, i, v) {
 				const char* file = json_string_value(json_object_get(v, "file"));
-				if (!file || !*file) continue;
 				int track = (int) json_integer_value(json_object_get(v, "track"));
 				int slot = (int) json_integer_value(json_object_get(v, "slot"));
 				if (track < 0 || track >= TRACKS || slot < 0 || slot >= SLOTS) continue;
@@ -474,12 +497,36 @@ struct Looper : Module {
 				meta.peak = (float) json_number_value(json_object_get(v, "peak"));
 				meta.repeats = (int) json_integer_value(json_object_get(v, "repeats"));
 				meta.decayDb = (float) json_number_value(json_object_get(v, "decayDb"));
+				meta.followSlot = (int) json_integer_value(json_object_get(v, "follow")); // absent (old manifest) → 0 = stop
+				// The manifest is hand-editable: clamp what the engine consumes. A
+				// positive decayDb would GROW the gain each wrap without bound (the
+				// POLY direct outs have no limiter); out-of-range follow just clutters.
+				meta.repeats = std::max(0, meta.repeats);
+				meta.decayDb = clamp(meta.decayDb, -60.f, 0.f);
+				meta.followSlot = clamp(meta.followSlot, 0, SLOTS);
+				// Seed the slot's settings atomics right away (for take rows too, not
+				// just settings-only ones): the widget's settings sweep runs before the
+				// decoded take installs, and must see the restored values — not the
+				// defaults — or it would clobber the just-seeded manifest entries.
+				{
+					akaudio::looper::Slot& sl = engine.tracks[track].slots[slot];
+					sl.repeats.store(meta.repeats, std::memory_order_relaxed);
+					sl.decayDb.store(meta.decayDb, std::memory_order_relaxed);
+					sl.followSlot.store(meta.followSlot, std::memory_order_relaxed);
+				}
+				// Settings-only row (no file): an empty "rest" cell in a follow chain —
+				// the seeding above is all it needs, nothing to load.
+				if (!file || !*file) continue;
 				if (meta.frames <= 0) continue;
 				session.noteExistingTake(track, slot, file, meta);
 				session.enqueueLoad(track, slot, loadDir + "/" + file, meta);
 			}
 		}
 		json_decref(root);
+		// The restored session.json exists on disk, so later settings/name edits (and
+		// clears) may rewrite it — without this, flush()/clear() would refuse until a
+		// brand-new take lands, and a reloaded patch would never persist edits.
+		session.markRestored();
 	}
 
 	json_t* dataToJson() override {
@@ -493,6 +540,8 @@ struct Looper : Module {
 			json_object_set_new(root, "sessionDir", json_string(akaudio::collapseHome(resolvedSessionDir).c_str()));
 		json_object_set_new(root, "defRepeats", json_integer(engine.defRepeats.load()));
 		json_object_set_new(root, "defDecayDb", json_real(engine.defDecayDb.load()));
+		json_object_set_new(root, "autoAdvance", json_boolean(engine.autoAdvance.load()));
+		json_object_set_new(root, "followMixerNames", json_boolean(followMixerNames));
 		json_t* names = json_array();
 		for (int t = 0; t < TRACKS; t++)
 			json_array_append_new(names, json_string(trackNames[t].c_str()));
@@ -519,6 +568,10 @@ struct Looper : Module {
 		if (j) engine.defRepeats.store((int) json_integer_value(j));
 		j = json_object_get(root, "defDecayDb");
 		if (j) engine.defDecayDb.store((float) json_number_value(j));
+		j = json_object_get(root, "autoAdvance");
+		if (json_is_boolean(j)) engine.autoAdvance.store(json_boolean_value(j));
+		j = json_object_get(root, "followMixerNames");
+		if (json_is_boolean(j)) followMixerNames = json_boolean_value(j);
 		j = json_object_get(root, "trackNames");
 		if (json_is_array(j)) {
 			for (int t = 0; t < TRACKS && t < (int) json_array_size(j); t++) {
@@ -614,8 +667,6 @@ struct LooperDecor : Widget {
 		// ---- Controls column: Radio/Ninjam plate geometry (Theme.hpp) ----
 		const NVGcolor bd = nvgRGBA(0, 0, 0, 0x55);
 		drawTxt(vg, FONT_BOLD, RX, Y_DUB - 20.f, 11.f, lpText(), "OVERDUB", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, RX, Y_REPEATS - 17.f, 11.f, lpText(), "REPEATS", NVG_ALIGN_CENTER);
-		drawTxt(vg, FONT_BOLD, RX, Y_DECAY - 17.f, 11.f, lpText(), "DECAY", NVG_ALIGN_CENTER);
 		// Three stacked plates: OUTS (poly per-track out) over CUE (cyan) over MIX.
 		auto plateBox = [&](float top, float h) {
 			nvgBeginPath(vg);
@@ -774,6 +825,7 @@ struct SlotButton : HoverSwitch {
 		NVGcontext* vg = args.vg;
 		const float w = box.size.x, h = box.size.y;
 		int state = akaudio::looper::EMPTY, pending = akaudio::looper::NONE, reps = 0, repCount = 0;
+		int follow = 0;
 		float decay = 0.f, gain = 1.f;
 		bool sel = false, playable = true, overdubbing = false;
 		const float* thumb = nullptr;
@@ -784,6 +836,7 @@ struct SlotButton : HoverSwitch {
 			pending = sl.pending.load(std::memory_order_relaxed);
 			reps = sl.repeats.load(std::memory_order_relaxed);
 			repCount = sl.repCount.load(std::memory_order_relaxed);
+			follow = sl.followSlot.load(std::memory_order_relaxed);
 			decay = sl.decayDb.load(std::memory_order_relaxed);
 			gain = sl.gain.load(std::memory_order_relaxed);
 			sel = lp->selected.load(std::memory_order_relaxed) == t * SLOTS + s;
@@ -850,14 +903,31 @@ struct SlotButton : HoverSwitch {
 			nvgFillColor(vg, lpText());
 			nvgFill(vg);
 		}
-		// Settings tag (top-right): ∞ / ×N / N left, plus ↘ when decaying.
-		if (state == akaudio::looper::FILLED || state == akaudio::looper::PLAYING) {
+		// Settings tag (top-right): ∞ / ×N / N left, plus ↘ when decaying, →N when chained.
+		// An EMPTY cell shows it only when a follow action makes it a "rest" step.
+		// A translucent scrim backs the text so it stays legible over thumbnails.
+		if (state == akaudio::looper::FILLED || state == akaudio::looper::PLAYING
+		        || (state == akaudio::looper::EMPTY && follow > 0)) {
 			std::string tag;
 			if (reps == 0) tag = "\xe2\x88\x9e";
 			else if (state == akaudio::looper::PLAYING) tag = string::f("%d", std::max(0, reps - repCount));
 			else tag = string::f("\xc3\x97%d", reps);
 			if (decay < -0.01f) tag += "\xe2\x86\x98";
-			drawTxt(vg, FONT_BOLD, w - 2.5f, 5.f, 7.f, lpText(), tag, NVG_ALIGN_RIGHT);
+			if (follow > 0) tag += string::f("\xe2\x86\x92%d", follow);
+			std::shared_ptr<window::Font> tf = akLoadFont(FONT_BOLD);
+			if (tf && tf->handle >= 0) {
+				nvgFontFaceId(vg, tf->handle);
+				nvgFontSize(vg, 10.f);
+				nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+				float tb[4];
+				nvgTextBounds(vg, 0, 0, tag.c_str(), NULL, tb);
+				const float tw = tb[2] - tb[0];
+				nvgBeginPath(vg);
+				nvgRoundedRect(vg, w - 4.f - tw - 3.f, 1.5f, tw + 5.f, 11.f, 3.f);
+				nvgFillColor(vg, akTheme(nvgRGBA(0xeb, 0xeb, 0xeb, 200), nvgRGBA(0x16, 0x18, 0x1a, 200)));
+				nvgFill(vg);
+			}
+			drawTxt(vg, FONT_BOLD, w - 4.f, 7.f, 10.f, lpText(), tag, NVG_ALIGN_RIGHT);
 		}
 		// Armed: blinking outline colored by the queued operation; a steady amber outline
 		// marks the cell that is actively overdubbing (continuous, not a queued action).
@@ -909,23 +979,32 @@ struct SlotButton : HoverSwitch {
 		akaudio::looper::Slot& sl = lp->engine.tracks[t].slots[s];
 		menu->addChild(new MenuSeparator);
 		menu->addChild(createMenuLabel(string::f("Track %d \xc2\xb7 slot %d", t + 1, s + 1)));
-		menu->addChild(createMenuItem("Select (for REPEATS / DECAY)", "", [m, tt, ss]() {
-			m->selected.store(tt * SLOTS + ss, std::memory_order_relaxed);
-		}));
 		akaudio::looper::Slot* slp = &sl;
 		menu->addChild(createIndexSubmenuItem("Repeats",
-			{"\xe2\x88\x9e", "1", "2", "4", "8", "16", "32", "64"},
+			repeatLabels(),
 			[slp]() { return (size_t) repeatsIndex(slp->repeats.load(std::memory_order_relaxed)); },
 			[slp, m, tt, ss](size_t i) {
 				slp->repeats.store(REPEAT_CHOICES[i], std::memory_order_relaxed);
-				m->selected.store(tt * SLOTS + ss, std::memory_order_relaxed); // the knobs follow
+				m->pushSlotSettings(tt, ss);
 			}));
 		menu->addChild(createIndexSubmenuItem("Decay per repetition",
-			{"0 dB (none)", "−1 dB", "−2 dB", "−3 dB", "−6 dB"},
+			decayLabels(),
 			[slp]() { return (size_t) decayIndex(slp->decayDb.load(std::memory_order_relaxed)); },
 			[slp, m, tt, ss](size_t i) {
 				slp->decayDb.store(DECAY_CHOICES[i], std::memory_order_relaxed);
-				m->selected.store(tt * SLOTS + ss, std::memory_order_relaxed);
+				m->pushSlotSettings(tt, ss);
+			}));
+		// After the clip is done (repeats exhausted / decayed out): stop, or chain on.
+		std::vector<std::string> after;
+		after.push_back("Stop");
+		for (int i = 0; i < SLOTS; i++)
+			after.push_back(i == ss ? string::f("Play slot %d (this: retrigger)", i + 1)
+			                        : string::f("Play slot %d", i + 1));
+		menu->addChild(createIndexSubmenuItem("After", after,
+			[slp]() { return (size_t) slp->followSlot.load(std::memory_order_relaxed); },
+			[slp, m, tt, ss](size_t i) {
+				slp->followSlot.store((int) i, std::memory_order_relaxed); // 0 = stop, i = slot i (1-based)
+				m->pushSlotSettings(tt, ss);
 			}));
 		menu->addChild(createMenuItem("Clear slot", "", [m, tt, ss]() { m->clearSlot(tt, ss); },
 			sl.state.load(std::memory_order_relaxed) == akaudio::looper::EMPTY));
@@ -1021,9 +1100,6 @@ struct PolyPort : ThemedPJ301MPort {
 
 struct LooperWidget : ModuleWidget {
 	Looper* lp = nullptr;
-	// Knob <-> selected-slot reconcile state (UI thread).
-	int lastSel = -2;
-	float lastRep = -1.f, lastDec = 99.f;
 
 	explicit LooperWidget(Looper* module) {
 		lp = module;
@@ -1083,8 +1159,6 @@ struct LooperWidget : ModuleWidget {
 		addParam(sa);
 
 		// Bottom I/O strip.
-		addParam(createParamCentered<RoundSmallBlackKnob>(Vec(RX, Y_REPEATS), module, Looper::REPEATS_PARAM));
-		addParam(createParamCentered<RoundSmallBlackKnob>(Vec(RX, Y_DECAY), module, Looper::DECAY_PARAM));
 		addOutput(createOutputCentered<PolyPort>(Vec(RX, OUTS_JACK_Y), module, Looper::POLY_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(PLATE_JACK_X, plateLY(CUE_TOP)), module, Looper::CUE_L_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(PLATE_JACK_X, plateRY(CUE_TOP)), module, Looper::CUE_R_OUTPUT));
@@ -1096,47 +1170,79 @@ struct LooperWidget : ModuleWidget {
 			Looper::OVERDUB_PARAM, Looper::OVERDUB_LIGHT));
 	}
 
-	// REPEATS / DECAY knobs mirror the selected slot: a selection change loads the knobs;
-	// a knob move writes the slot. (Same reconcile pattern as Ninjam's ParamStateSync.)
 	void step() override {
 		ModuleWidget::step();
 		if (!lp) return;
 		lp->syncSession(); // M4: keep the on-disk session folder + manifest current
-		int sel = lp->selected.load(std::memory_order_relaxed);
-		ParamQuantity* rq = lp->paramQuantities[Looper::REPEATS_PARAM];
-		ParamQuantity* dq = lp->paramQuantities[Looper::DECAY_PARAM];
-		if (!rq || !dq) return;
-		if (sel != lastSel) {
-			lastSel = sel;
-			if (sel >= 0) {
-				akaudio::looper::Slot& sl = lp->slotAt(sel);
-				lastRep = (float) repeatsIndex(sl.repeats.load(std::memory_order_relaxed));
-				lastDec = sl.decayDb.load(std::memory_order_relaxed);
-				rq->setValue(lastRep);
-				dq->setValue(lastDec);
+		// Reconcile every cell's settings into the manifest about twice a second: menu
+		// edits push directly, but the engine also rewires cells itself (auto-advance
+		// chain wiring) and empty "rest" cells have settings worth persisting. Each
+		// push is a mutex-guarded compare that no-ops when nothing changed.
+		if (++settingsSweep >= 30) {
+			settingsSweep = 0;
+			for (int t = 0; t < TRACKS; t++)
+				for (int s = 0; s < SLOTS; s++)
+					lp->pushSlotSettings(t, s);
+			// The name sync serializes the whole MixMaster (dataToJson) — every 4th
+			// sweep (~2 s) is plenty for label edits.
+			if (lp->followMixerNames && ++nameSweep >= 4) {
+				nameSweep = 0;
+				syncMixerNames();
 			}
-			return;
 		}
-		if (sel < 0) return;
-		akaudio::looper::Slot& sl = lp->slotAt(sel);
-		float r = rq->getValue();
-		if (r != lastRep) {
-			lastRep = r;
-			sl.repeats.store(REPEAT_CHOICES[clamp((int) std::round(r), 0, N_REPEAT_CHOICES - 1)], std::memory_order_relaxed);
+	}
+	int settingsSweep = 0;
+	int nameSweep = 3; // first name sync on the first sweep after enabling
+
+	// Copy the track labels of the MindMeld MixMaster feeding our MULTI input over our
+	// own (menu toggle "Track names: follow the mixer"). MixMaster stores all labels as
+	// one string of 4-char chunks ("trackLabels" in its module JSON, tracks first);
+	// its direct-out poly jack interleaves L/R exactly like MULTI, so labels map 1:1.
+	// The 16-track MixMaster has two direct-out jacks — the connected port's own name
+	// ("1-8" / "9-16") gives the offset. UI thread only (dataToJson allocates).
+	void syncMixerNames() {
+		Module* src = nullptr;
+		int outId = -1;
+		for (int64_t cid : APP->engine->getCableIds()) {
+			const Cable* c = APP->engine->getCable(cid);
+			if (c && c->inputModule == lp && c->inputId == Looper::MULTI_INPUT) {
+				src = c->outputModule;
+				outId = c->outputId;
+				break;
+			}
 		}
-		float d = dq->getValue();
-		if (d != lastDec) {
-			lastDec = d;
-			sl.decayDb.store(d, std::memory_order_relaxed);
+		if (!src || !src->model || !src->model->plugin) return;
+		if (src->model->plugin->slug != "MindMeldModular") return;
+		const std::string& ms = src->model->slug;
+		if (ms != "MixMasterJr" && ms != "MixMaster") return;
+		json_t* j = src->dataToJson();
+		if (!j) return;
+		const char* s = json_string_value(json_object_get(j, "trackLabels"));
+		if (s) {
+			const std::string all = s;
+			int off = 0;
+			if (outId >= 0 && outId < (int) src->outputInfos.size() && src->outputInfos[outId]
+			        && src->outputInfos[outId]->getName().find("9-16") != std::string::npos)
+				off = 8;
+			for (int t = 0; t < TRACKS; t++) {
+				size_t pos = (size_t) (off + t) * 4;
+				if (pos + 4 > all.size()) break;
+				// Printable ASCII only: the byte-wise 4-char slice could split a
+				// multi-byte UTF-8 character, and an invalid-UTF-8 name corrupts both
+				// the patch JSON (json_string() rejects it, silently shifting every
+				// later name) and session.json (which then fails to parse on reload,
+				// killing the whole clip restore).
+				std::string name;
+				for (size_t i = pos; i < pos + 4; i++) {
+					char ch = all[i];
+					if ((ch >= 0x21 && ch <= 0x7E) || (ch == ' ' && !name.empty()))
+						name += ch;
+				}
+				while (!name.empty() && name.back() == ' ') name.pop_back();
+				if (!name.empty()) lp->trackNames[t] = name;
+			}
 		}
-		// External edits (menu) of the selected slot reflect back into the knobs.
-		float curRep = (float) repeatsIndex(sl.repeats.load(std::memory_order_relaxed));
-		if (curRep != lastRep) { lastRep = curRep; rq->setValue(curRep); }
-		float curDec = sl.decayDb.load(std::memory_order_relaxed);
-		if (curDec != lastDec) { lastDec = curDec; dq->setValue(curDec); }
-		// A repeats/decay change of an already-saved slot updates its manifest entry.
-		lp->session.setSlotSettings(sel / SLOTS, sel % SLOTS,
-			sl.repeats.load(std::memory_order_relaxed), sl.decayDb.load(std::memory_order_relaxed));
+		json_decref(j);
 	}
 
 	void appendContextMenu(Menu* menu) override {
@@ -1147,13 +1253,22 @@ struct LooperWidget : ModuleWidget {
 			[m]() { return (size_t) m->simSecondsIdx.load(std::memory_order_relaxed); },
 			[m](size_t i) { m->simSecondsIdx.store((int) i, std::memory_order_relaxed); }));
 		menu->addChild(createIndexSubmenuItem("New clips: repeats",
-			{"\xe2\x88\x9e", "1", "2", "4", "8", "16", "32", "64"},
+			repeatLabels(),
 			[m]() { return (size_t) repeatsIndex(m->engine.defRepeats.load(std::memory_order_relaxed)); },
 			[m](size_t i) { m->engine.defRepeats.store(REPEAT_CHOICES[i], std::memory_order_relaxed); }));
 		menu->addChild(createIndexSubmenuItem("New clips: decay per repetition",
-			{"0 dB (none)", "−1 dB", "−2 dB", "−3 dB", "−6 dB"},
+			decayLabels(),
 			[m]() { return (size_t) decayIndex(m->engine.defDecayDb.load(std::memory_order_relaxed)); },
 			[m](size_t i) { m->engine.defDecayDb.store(DECAY_CHOICES[i], std::memory_order_relaxed); }));
+		// Off = the escape hatch for never-silent sources (drones), where playing
+		// through the downbeat would chain the capture down the whole column.
+		menu->addChild(createBoolMenuItem("Capture: auto-advance while playing", "",
+			[m]() { return m->engine.autoAdvance.load(std::memory_order_relaxed); },
+			[m](bool v) { m->engine.autoAdvance.store(v, std::memory_order_relaxed); }));
+		// While on, the MixMaster feeding MULTI names our tracks (overwriting local
+		// renames — that's what following means). The widget sweep does the copying.
+		menu->addChild(createBoolPtrMenuItem("Track names: follow the mixer", "",
+			&m->followMixerNames));
 		menu->addChild(createMenuItem("Clear all slots", "", [m]() {
 			for (int t = 0; t < TRACKS; t++)
 				for (int s = 0; s < SLOTS; s++)

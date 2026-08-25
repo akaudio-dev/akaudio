@@ -61,7 +61,15 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
   `make unittest` (or `test/archive_test.cpp`).
 - **Looper** (built through M4: `src/Looper.cpp` is the Rack glue over
   the Rack-free engine in `src/looper/` — `LooperEngine` (audio thread: always-record,
-  boundary-quantized capture/launch/stop/overdub, scenes, repeats/decay, gate, TX latch,
+  boundary-quantized capture/launch/stop/overdub, scenes, per-slot repeats/decay + follow
+  actions ("After": stop or chain to slot N, edited in the cell menu; an empty target
+  is a rest step that plays silence then follows on), auto-advance
+  capture (playing through the downbeat rolls the recording into the next empty cell —
+  tail-gated at −40 dB; menu-toggleable for drones — and self-wires the chain:
+  each cell ×1 + follow→next, so launching the first cell replays the take), pickup
+  capture (press→downbeat audio folds into the take's tail — early hits and lead-in
+  phrases survive the loop point), "Track names: follow the mixer" (a MindMeld
+  MixMaster feeding MULTI names our tracks via its `trackLabels` JSON), gate, TX latch,
   submix + limiter), `LooperWorker` (the only thread that allocates/frees buffers;
   SPSC `Spsc.hpp` both ways — and the thread that runs the M4 disk jobs), and `Session`
   (Rack-free `LooperSink`: encodes each committed take to raw OGG under
@@ -70,7 +78,9 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
   folder via `RecorderLink` when one is armed. The **clip loader restores the grid on patch
   reload**: the resolved session dir is persisted, and on load the Session decodes each
   saved OGG (stb_vorbis, on the worker) back into its slot as a FILLED take — playable once
-  the live grid matches its length; continued captures land in the same folder/manifest.
+  the live grid matches its length; continued captures land in the same folder/manifest,
+  and the restored session counts as written (`markRestored`) so settings/name edits and
+  clears rewrite session.json immediately instead of waiting for a new take.
   **Takes also embed in the patch** (`looper/SessionMirror`, on by default, menu-toggleable):
   `onSave` mirrors the live cells + manifest into Rack patch storage — incremental and
   mtime-preserving, so an unchanged grid writes nothing — and a load whose session folder
@@ -410,8 +420,13 @@ with undo).
   ```
 - `looper_engine_test.cpp` — drives `LooperEngine` with a synthetic clock and deterministic
   input: capture/launch/stop/overdub commit on the boundary and play back sample-exactly,
-  repeats, −6 dB decay, silent-capture refusal, scene stop, clear, regrid (mismatched
-  take greyed + refused), bounded allocations. Build:
+  repeats, −6 dB decay, follow actions (exhaustion/decay-floor chain, self-retrigger,
+  rest cells, launch-wins precedence, A→B→C chains), auto-advance capture
+  (tail gate: quiet tail loops at once, hot tail chains down the column and wires
+  itself, silence ends the chain, launch replays the performance), pickup capture
+  (press→downbeat fold into the take tail, fade-in, no false chain trigger),
+  silent-capture refusal,
+  scene stop, clear, regrid (mismatched take greyed + refused), bounded allocations. Build:
   `c++ -std=c++11 -I src test/looper_engine_test.cpp src/looper/LooperEngine.cpp src/looper/LooperWorker.cpp -lpthread -o build/looper_engine_test && build/looper_engine_test`
 - `session_mirror_test.cpp` — offline check of `looper/SessionMirror` (live cells + manifest
   sync, 0-writes-when-unchanged, mtime-preserving hydration round-trip, stale-cell removal,

@@ -86,6 +86,7 @@ void LooperEngine::saveTake(int t, int s) {
 	c.meta.peak = sl.take.peak;
 	c.meta.repeats = sl.repeats.load(std::memory_order_relaxed);
 	c.meta.decayDb = sl.decayDb.load(std::memory_order_relaxed);
+	c.meta.followSlot = sl.followSlot.load(std::memory_order_relaxed);
 	cmds.push(c); // a dropped save just misses the disk copy; never blocks the audio thread
 }
 
@@ -132,7 +133,7 @@ void LooperEngine::dropOverdub(Slot& sl) {
 void LooperEngine::setPlaying(Track& tr, int s) {
 	int prev = tr.playingSlot.load(std::memory_order_relaxed);
 	if (prev >= 0 && prev != s)
-		tr.slots[prev].state.store(FILLED, std::memory_order_relaxed);
+		demote(tr.slots[prev]);
 	Slot& sl = tr.slots[s];
 	sl.state.store(PLAYING, std::memory_order_relaxed);
 	sl.repCount.store(0, std::memory_order_relaxed);
@@ -190,8 +191,14 @@ void LooperEngine::drainIntents() {
 				const bool hadTake = sl.take.buf != nullptr;
 				if (sl.take.buf) { release(sl.take.buf); sl.take = Take(); }
 				if (hadTake) clearFile(i.track, i.slot); // retire the live file into history/ (M4)
+				breakChain(tr, i.slot); // clearing a chain member ends the chain
 				sl.state.store(EMPTY, std::memory_order_relaxed);
 				sl.playable.store(true, std::memory_order_relaxed);
+				// Settings reset too: an empty cell's settings are visible now (a
+				// "rest" step in a follow chain), so Clear must not leave a ghost.
+				sl.repeats.store(0, std::memory_order_relaxed);
+				sl.decayDb.store(0.f, std::memory_order_relaxed);
+				sl.followSlot.store(0, std::memory_order_relaxed);
 				for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = 0.f;
 				break;
 			}
@@ -210,7 +217,9 @@ void LooperEngine::drainLoads() {
 			release(li.buf);
 			continue;
 		}
-		Slot& sl = tracks[li.track].slots[li.slot];
+		Track& ltr = tracks[li.track];
+		Slot& sl = ltr.slots[li.slot];
+		breakChain(ltr, li.slot); // a load landing on a chain member ends the chain
 		if (sl.take.buf) release(sl.take.buf); // replace whatever is there
 		sl.take.buf = li.buf;
 		sl.take.frames = li.buf->frames; // the buffer's real length (== declared N when set right)
@@ -221,6 +230,7 @@ void LooperEngine::drainLoads() {
 		sl.take.peak = li.meta.peak;
 		sl.repeats.store(li.meta.repeats, std::memory_order_relaxed);
 		sl.decayDb.store(li.meta.decayDb, std::memory_order_relaxed);
+		sl.followSlot.store(li.meta.followSlot, std::memory_order_relaxed);
 		for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = li.thumb[b];
 		bool ok = haveGrid && li.buf && li.buf->frames == N && li.meta.sampleRate == sr;
 		sl.playable.store(!haveGrid || ok, std::memory_order_relaxed);
@@ -241,6 +251,7 @@ void LooperEngine::regrid(const ClockFrame& c) {
 	sr = c.sampleRate;
 	gen = c.gridGeneration;
 	haveGrid = true;
+	for (int t = 0; t < MAX_TRACKS; t++) tracks[t].chainFrom = -1; // chains die with the old grid
 	intervalFrames.store(N, std::memory_order_relaxed);
 	gateDecay = sr > 0.f ? std::exp(-1.f / (0.1f * sr)) : 0.f; // ~100 ms release
 	declickN = N > 0 ? std::max(1, std::min(N / 4, (int) (sr * 0.0015f))) : 0; // ~1.5 ms loop-end fade
@@ -260,7 +271,7 @@ void LooperEngine::regrid(const ClockFrame& c) {
 			bool ok = sl.take.buf && sl.take.frames == N && sl.take.sampleRate == sr;
 			sl.playable.store(ok || !sl.take.buf, std::memory_order_relaxed);
 			if (sl.state.load(std::memory_order_relaxed) == PLAYING && !ok) {
-				sl.state.store(FILLED, std::memory_order_relaxed);
+				demote(sl); // a playing rest cell (no take) goes back to EMPTY, not FILLED
 				if (tr.playingSlot.load(std::memory_order_relaxed) == s)
 					tr.playingSlot.store(-1, std::memory_order_relaxed);
 			}
@@ -293,8 +304,12 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 		}
 
 		// 1. Rotate: the recording buffer becomes `last` (the completed interval); the
-		// previous `last` (or the spare) records next. Pointer moves only.
+		// previous `last` (or the spare) records next. Pointer moves only. When `rec`
+		// comes from `last`, it still holds the interval completed one boundary ago —
+		// intact until this interval overwrites it — which is the pickup source for a
+		// capture committing right now (see below).
 		Buf* done = tr.rec;
+		tr.recPrevOk = tr.last != nullptr && tr.last->frames == N;
 		if (tr.last)       { tr.rec = tr.last; tr.last = nullptr; }
 		else if (tr.spare) { tr.rec = tr.spare; tr.spare = nullptr; }
 		else               tr.rec = nullptr;
@@ -308,12 +323,19 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 		// take (`last` moves into the slot, no copy) and it starts playing. Refused —
 		// back to Empty — if nothing was recorded (cable gone, no buffer yet) or it was
 		// silence (−70 dBFS gate).
+		int armedThisBoundary = -1; // slot the auto-advance chain just armed — it records the
+		                            // interval that STARTS now; committing it here would steal
+		                            // the (already consumed) `last` buffer as a null take
 		for (int s = 0; s < MAX_SLOTS; s++) {
 			Slot& sl = tr.slots[s];
+			if (s == armedThisBoundary) continue;
 			if (sl.state.load(std::memory_order_relaxed) != RECORDING) continue;
 			if (!present || !lastOk || tr.lastPeak < GATE) {
 				refuse(sl, now);
 				sl.state.store(EMPTY, std::memory_order_relaxed);
+				// The chain's armed cell caught only silence: chain over (breakChain
+				// stamps the predecessor as the performance's last cell).
+				breakChain(tr, s);
 				continue;
 			}
 			if (sl.take.buf) release(sl.take.buf);
@@ -326,8 +348,82 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 			for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = tr.lastLive[b];
 			sl.repeats.store(defRepeats.load(std::memory_order_relaxed), std::memory_order_relaxed);
 			sl.decayDb.store(defDecayDb.load(std::memory_order_relaxed), std::memory_order_relaxed);
+			sl.followSlot.store(0, std::memory_order_relaxed); // a fresh take never inherits a stale follow
 			sl.playable.store(true, std::memory_order_relaxed);
-			setPlaying(tr, s);
+			// This cell was recorded as the continuation of an auto-advance chain: wire
+			// the predecessor (repeats 1, follow → here) so the whole performance
+			// replays in order from its first cell. Wiring happens only when the
+			// successor really commits, so a follow never dangles on a refused cell.
+			const bool chainedIn = tr.chainFrom >= 0 && s == tr.chainFrom + 1;
+			if (chainedIn) {
+				Slot& p = tr.slots[tr.chainFrom];
+				p.repeats.store(1, std::memory_order_relaxed);
+				p.followSlot.store(s + 1, std::memory_order_relaxed); // 1-based
+			}
+			// Auto-advance capture: if the player blew through the downbeat (the take's
+			// tail is hot), the performance isn't over — keep recording into the next
+			// empty slot below; the committed cell stays FILLED and silent (recording
+			// still owns the track). The chain ends when an interval is silent (the
+			// gate above refuses it), the next slot is occupied, or the column runs
+			// out. A quiet tail = the player stopped before the loop point: the take
+			// starts looping right now (Ableton clip semantics, the common case).
+			bool chain = false;
+			// The OVERDUB latch suppresses the chain: playing through the downbeat then
+			// layers onto the committed cell (the continuous overdub arms on it below)
+			// instead of rolling into the next one.
+			if (autoAdvance.load(std::memory_order_relaxed)
+			        && !overdubMode.load(std::memory_order_relaxed)
+			        && s + 1 < MAX_SLOTS && tr.rec
+			        && tr.slots[s + 1].state.load(std::memory_order_relaxed) == EMPTY) {
+				int tw = std::min((int) (TAIL_SECONDS * sr), N / 2);
+				if (tw < 1) tw = 1;
+				float tp = 0.f;
+				const float* pcm = sl.take.buf->pcm + (size_t) (N - tw) * 2;
+				for (int f = 0; f < tw * 2; f++) tp = std::max(tp, std::fabs(pcm[f]));
+				chain = tp >= TAIL_GATE;
+			}
+			// Pickup (press → downbeat): the always-on rolling record means the audio
+			// performed between arming the capture and the downbeat is still intact in
+			// the buffer that just rotated back into `rec` (the press's interval; frame
+			// 0 of the new interval is written only after this boundary). A loop is
+			// circular, so the pickup belongs at the take's TAIL — it replays right
+			// before each repeat's downbeat, exactly as performed (an early-hit attack
+			// or a full lead-in phrase both survive). Chained cells skip this: their
+			// "pickup" is the previous cell's tail, contiguous on replay by
+			// construction. Ordered AFTER the tail-gate scan above, which must judge
+			// the raw take — a folded lead-in must not read as "played through the
+			// downbeat". Ordered BEFORE saveTake, so the encoded file carries it.
+			if (!chainedIn && tr.recPrevOk && tr.rec) {
+				const int from = std::min(std::max(sl.armFrame, 0), N);
+				const int fadeF = std::max(1, std::min(declickN > 0 ? declickN : 64, N - from));
+				float pk = sl.take.peak;
+				for (int j = from; j < N; j++) {
+					float fg = j - from < fadeF ? (float) (j - from + 1) / (float) fadeF : 1.f;
+					float* out = sl.take.buf->pcm + (size_t) j * 2;
+					out[0] += tr.rec->pcm[(size_t) j * 2] * fg;
+					out[1] += tr.rec->pcm[(size_t) j * 2 + 1] * fg;
+					float a = std::max(std::fabs(out[0]), std::fabs(out[1]));
+					if (a > pk) pk = a;
+					int b = (int) std::min<long long>(THUMB_BINS - 1, (long long) j * THUMB_BINS / N);
+					sl.thumb[b] = std::max(sl.thumb[b], std::min(1.f, a));
+				}
+				sl.take.peak = pk;
+			}
+			if (chain) {
+				sl.state.store(FILLED, std::memory_order_relaxed);
+				tr.slots[s + 1].state.store(RECORDING, std::memory_order_relaxed);
+				armedThisBoundary = s + 1;
+				tr.chainFrom = s;
+			} else if (chainedIn) {
+				// A quiet tail ends the chain here: this cell is the performance's
+				// outro — one pass on replay, and nothing auto-plays now (chain end
+				// leaves the track stopped).
+				sl.repeats.store(1, std::memory_order_relaxed);
+				sl.state.store(FILLED, std::memory_order_relaxed);
+				tr.chainFrom = -1;
+			} else {
+				setPlaying(tr, s);
+			}
 			saveTake(t, s); // encode + index the captured interval (M4)
 		}
 
@@ -344,11 +440,13 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 					// loop is never audible under the instrument being recorded.
 					if (!present || !tr.rec) { refuse(sl, now); break; }
 					for (int o = 0; o < MAX_SLOTS; o++)
-						if (o != s && tr.slots[o].state.load(std::memory_order_relaxed) == RECORDING)
+						if (o != s && tr.slots[o].state.load(std::memory_order_relaxed) == RECORDING) {
 							tr.slots[o].state.store(EMPTY, std::memory_order_relaxed);
+							breakChain(tr, o); // cancelling the armed cell ends the chain
+						}
 					int ps = tr.playingSlot.load(std::memory_order_relaxed);
 					if (ps >= 0 && ps != s) {
-						tr.slots[ps].state.store(FILLED, std::memory_order_relaxed);
+						demote(tr.slots[ps]);
 						tr.playingSlot.store(-1, std::memory_order_relaxed);
 					}
 					sl.state.store(RECORDING, std::memory_order_relaxed);
@@ -360,7 +458,7 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 					break;
 				case STOP:
 					if (sl.state.load(std::memory_order_relaxed) == PLAYING) {
-						sl.state.store(FILLED, std::memory_order_relaxed);
+						demote(sl);
 						if (tr.playingSlot.load(std::memory_order_relaxed) == s)
 							tr.playingSlot.store(-1, std::memory_order_relaxed);
 					}
@@ -404,8 +502,32 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 				sl.gain.store(g, std::memory_order_relaxed);
 				int reps = sl.repeats.load(std::memory_order_relaxed);
 				if ((reps > 0 && rc >= reps) || g < 1e-3f) {
-					sl.state.store(FILLED, std::memory_order_relaxed);
-					tr.playingSlot.store(-1, std::memory_order_relaxed);
+					// Done (repeats exhausted / decayed below −60 dB): follow action.
+					// 0 = stop; 1..8 = launch that slot on this track (self = retrigger
+					// at full gain — setPlaying resets repCount/gain). An EMPTY target
+					// is a "rest": it plays silence for its own repeats, then runs its
+					// own follow — chains may pass through gaps. Runs only while this
+					// slot is still the playing slot: a LAUNCH/STOP/CAPTURE committed
+					// at 2b this same boundary already retargeted playingSlot, so
+					// explicit user action wins over the follow jump.
+					int fs = sl.followSlot.load(std::memory_order_relaxed) - 1;
+					// A RECORDING target (only possible when 2a chain-armed it this very
+					// boundary) must not be hijacked into playback — the recording wins.
+					if (fs >= 0 && fs < MAX_SLOTS
+					        && tr.slots[fs].state.load(std::memory_order_relaxed) != RECORDING
+					        && (!tr.slots[fs].take.buf || tr.slots[fs].take.frames == N)) {
+						setPlaying(tr, fs);
+						// setPlaying's startedThisBoundary is meant to be consumed by
+						// this very step (as a 2a/2b launch's is); we are already past
+						// it, so clear it now — otherwise the target skips its first
+						// wrap and plays one interval longer than a launch would.
+						tr.slots[fs].startedThisBoundary = false;
+					} else {
+						demote(sl);
+						tr.playingSlot.store(-1, std::memory_order_relaxed);
+						if (fs >= 0 && fs < MAX_SLOTS)
+							refuse(tr.slots[fs], now); // grid-mismatched target: flash it, stop
+					}
 				}
 			}
 		}
@@ -591,9 +713,13 @@ void LooperEngine::pressSlot(int t, int s, bool overdubLatch) {
 	switch ((SlotState) sl.state.load(std::memory_order_relaxed)) {
 		case EMPTY:
 			sl.pending.store(CAPTURE, std::memory_order_relaxed);
+			// The pickup window opens here: what the player performs between this
+			// press and the downbeat folds into the committed take's tail.
+			sl.armFrame = lastFrameRecorded >= 0 ? lastFrameRecorded : 0;
 			break;
 		case RECORDING:
 			sl.state.store(EMPTY, std::memory_order_relaxed); // cancel the recording
+			breakChain(tr, s); // cancelling a chain member ends the chain
 			break;
 		case FILLED:
 			sl.pending.store(LAUNCH, std::memory_order_relaxed);

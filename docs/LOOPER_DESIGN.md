@@ -263,30 +263,68 @@ pressing again cancels):
 | scene press (row) | track **stops** (empty slot in the row) | arm Launch | no-op if already the playing slot | leave it |
 | track STOP / STOP ALL | — | — | arm Stop | — |
 
-**Any** slot press also **selects** that slot for the REPEATS/DECAY knobs (a ring shows
-it); there is no separate select gesture. One playing slot per track: arming Launch
+**Any** slot press also **selects** that slot (a ring shows it — the selection is the
+continuous overdub's target); there is no separate select gesture. One playing slot per track: arming Launch
 elsewhere replaces it at the boundary. **Recording takes over the track**: when a
 Capture commits (→ Recording), the track's playing clip stops on that same boundary —
 the old loop is never audible under the instrument being recorded (a refused silent
-capture therefore leaves the track stopped). Scenes use Ableton's default semantics (a
+capture therefore leaves the track stopped). **Pickup capture (press → downbeat)**: the
+always-on rolling record means the audio performed between *pressing* the cell and the
+downbeat is still in the buffer that rotates back into `rec` at the commit boundary —
+it is folded into the committed take's **tail** (a loop is circular: the pickup replays
+right before each repeat's downbeat, exactly as performed). An early-hit attack a few
+ms before the beat and a full lead-in phrase both survive; pre-press noodling never
+does. The fold is faded in over ~1.5 ms, updates the take's peak + thumbnail tail
+bins, runs *after* the auto-advance tail-gate scan (a folded lead-in must not read as
+"played through the downbeat") and *before* the disk save (the OGG carries it).
+Chained auto-advance cells skip the fold — their pickup is the previous cell's tail,
+contiguous on replay by construction. **Auto-advance capture** (on by default;
+context-menu toggle *Capture: auto-advance while playing*): if the committed take's
+final ~300 ms are hot (≥ −40 dB — the player blew through the downbeat), the recording
+rolls into the **next empty slot below** instead of the take starting to loop; one
+interval per cell, silent while it rolls (recording still owns the track). **The chain
+wires itself as it commits**: when a cell's successor really lands, the cell gets
+`repeats 1` + `follow → next` — so launching the performance's first cell replays the
+whole take in order, once (the last cell's follow stays *Stop*; wiring waits for the
+successor's commit, so a follow never dangles on a refused cell). The chain ends when
+an interval is fully silent (the −70 dB gate refuses it — cells sit FILLED, wired,
+nothing auto-plays), when a chain member ends with a quiet tail (that outro cell
+commits FILLED + `repeats 1` instead of looping alone), when the next slot is occupied,
+or at the bottom of the column (those two commit-and-play as usual). **The OVERDUB
+latch suppresses the chain**: playing through the downbeat then layers onto the
+committed cell (the continuous overdub arms on it) instead of rolling into the next
+one. A quiet tail on a
+standalone capture = the player stopped before the loop point: the take loops
+immediately (the classic one-interval capture). Cancelling the armed cell (a press), clearing either chain member, a clip-loader
+install landing on one, or capturing elsewhere ends the chain the same way
+(`breakChain`: predecessor stamped `repeats 1` when its armed cell dies). The −40 dB tail
+gate is deliberately much hotter than the −70 dB silence gate so a released chord's
+decay/reverb tail doesn't chain; a drone that never goes silent is what the toggle is
+for (cancel a runaway chain by pressing the recording cell). Scenes use Ableton's default semantics (a
 scene is a complete state of the band), and **arming a scene disarms every launch queued
 outside its row** (an earlier scene, a single cell) — only the latest scene fires at the
 boundary.
 
-**Per-clip settings (`repeats`, `decay`) — how they are changed:**
-- **Selection = the last slot you pressed** (arm + select together), shown as a ring.
-  MIDI pads select as a side effect of launching.
-- The **REPEATS** and **DECAY** knobs (bottom strip; real params ⇒ MIDI-mappable)
-  show and edit the selected slot's settings: turning a knob writes to the selected
-  slot; changing the selection reloads the knobs (a `ParamStateSync`-style reconcile
-  in the widget's `step()`). REPEATS snaps to {∞, 1, 2, 4, 8, 16, 32, 64}; DECAY is
-  0 … −6 dB **per repetition** (gain = 10^(dB/20) per wrap).
-- The **slot's right-click menu** (Rack's param context menu, extended) offers the same
-  two settings as submenus plus *Select* and *Clear slot* — editing there never arms.
-- **The slot shows its settings**: a corner tag (`∞`, `×4`; `↘` when decay < 0 dB);
-  a playing finite slot counts down (`3 left`).
+**Per-clip settings (`repeats`, `decay`, `after`) — how they are changed:**
+- All three are **per slot** and live only in the **slot's right-click menu** (Rack's
+  param context menu, extended): *Repeats* {∞, 1, 2, 4, 8, 16, 32, 64}, *Decay per
+  repetition* (0 … −6 dB; gain = 10^(dB·repCount/20) per wrap), and *After* — the
+  **follow action**: *Stop* (default) or *Play slot N* on the same track (the entry for
+  the slot itself is marked "this: retrigger"). Editing in the menu never arms.
+- **Selection = the last slot you pressed** (arm + select together), shown as a ring;
+  it targets the continuous overdub, not the settings (the front-panel REPEATS/DECAY
+  knobs are gone — settings are per-cell, not per-selection).
+- **The slot shows its settings**: a corner tag (`∞`, `×4`; `↘` when decay < 0 dB;
+  `→N` when a follow action is set); a playing finite slot counts down (`3 left`).
+  Settings are editable on **empty cells too** — a follow action there makes the cell a
+  **rest step** (the tag shows on an empty cell once a follow is set). Empty-cell
+  settings persist as settings-only manifest rows (`"file": ""`), and *Clear slot* now
+  resets a cell's settings along with its take. A UI-thread sweep (~2 Hz) reconciles
+  every cell's settings into the manifest, so engine-side rewiring (auto-advance) and
+  rest cells are never lost on save.
 - **Defaults for new captures** are module-level (context menu: *New clips: repeats /
-  decay*; default ∞ / 0 dB). New captures do not inherit the knob positions.
+  decay*; default ∞ / 0 dB). A fresh capture always resets *After* to *Stop* — a stale
+  follow from the cell's previous take never haunts a new one.
 
 **At the boundary** (per track, in order):
 1. Finish the rolling interval: swap `rec[0]`↔`rec[1]`; compute its peak; reset the
@@ -306,8 +344,18 @@ boundary.
      `process()`) swaps in as the new take.
    *(The `Committed`/`Overwritten` encode-and-write steps are M4; the M1 engine keeps
    takes in RAM only.)*
-3. Playing slots wrap: `repCount++`; `gain = decay^repCount`; stop if `repeats &&
+3. Playing slots wrap: `repCount++`; `gain = decay^repCount`; **done** if `repeats &&
    repCount == repeats` or `gain < 1e-3` (−60 dB). Repeat/decay edits apply at the wrap.
+   A done clip runs its **follow action**: `after = 0` stops; `after = N` launches slot
+   N on the same track at this very boundary (self = retrigger at full gain — repCount
+   and gain reset; chains hop one clip per boundary, so cycles are safe). An **EMPTY
+   target is a rest**: it "plays" silence for its own repeat count, then runs its own
+   follow — chains may pass through gaps (a playing take-less cell demotes back to
+   EMPTY, never to FILLED). A grid-mismatched target falls back to stop + a red flash
+   on the target, and so does a RECORDING target (only possible when the auto-advance
+   chain armed it this same boundary — the recording wins over the jump). An explicit launch/stop/capture committed at step 2 this same
+   boundary already retargeted the playing slot, so user action always wins over the
+   follow jump.
 
 ### 5.3 Per-frame `process()` (audio thread)
 
@@ -452,10 +500,10 @@ Radio/Ninjam (`ebebeb→e1e1e1`, `#1f1f1f` Nunito-Bold title).
  ├──────┬──────┬─ … ─┬──────┼────────┤  L,R jacks SIDE BY SIDE per track
  │(L)(R)│(L)(R)│     │(L)(R)│ [MULTI]│  poly MULTI jack sits in the controls column
  │[-01J]│[bassP]│    │[-08-]│  ◎ DUB │  editable label + source tag (J / P3-4, green=live)
- ├──────┼──────┼─ … ─┼──────┤ REPEATS│
- │clip  │ clip │     │ clip │  ◯     │  8×8 clip grid            scene ▶ column
- │ grid │ grid │ …8× │ grid │ DECAY  │  (right edge, not shown)
- │  …   │  …   │     │  …   │  ◯     │
+ ├──────┼──────┼─ … ─┼──────┤        │
+ │clip  │ clip │     │ clip │        │  8×8 clip grid            scene ▶ column
+ │ grid │ grid │ …8× │ grid │        │  (right edge, not shown)
+ │  …   │  …   │     │  …   │        │
  ├──────┼──────┼─ … ─┼──────┤ ┌────┐ │
  │[■ ◉] │[■ ◉] │     │[■ ◉] │ │CUE │ │  track STOP + bi-color TX LED (green=MIX, cyan=CUE)
  ├──────┴──────┴─ … ─┴──────┤ │L  R│ │  STOP ALL under the grid
@@ -475,14 +523,20 @@ Radio/Ninjam (`ebebeb→e1e1e1`, `#1f1f1f` Nunito-Bold title).
   the track's live thumb (one compare per frame); the armed slot's widget reads it.
 - **Track labels**: MindMeld-style dark boxes with amber monospace text, default
   `-01-`…`-08-`; click opens an inline editor; persisted in the patch and written to
-  `session.json`.
+  `session.json`. **Follow the mixer** (context-menu toggle, off by default): while on,
+  the MindMeld MixMaster feeding our MULTI input names our tracks — the widget sweep
+  walks the cable to the source module, reads its `trackLabels` JSON (4-char chunks,
+  tracks first; the 16-track MixMaster's "1-8"/"9-16" direct-out port name gives the
+  offset), and copies the names over ours (~2×/s; local renames are overwritten while
+  following — that is the point). MixMaster's direct-out poly jack interleaves L/R
+  exactly like MULTI, so labels map 1:1.
 - **Scene** ×8 (▶ glyph, no number), **track STOP** ×8 (full-column-height raised
   buttons, visually distinct from the sunken clip cells) each with a **bi-color TX LED**
   beside it (`akDrawTxLedC` in Theme.hpp: green = on air → MIX, cyan = private → CUE),
   **STOP ALL**, **OVERDUB** latch: all params (MIDI-mappable). No per-track
   mute/level/pan — mute at the mixer, levels arrive set.
 - Controls column right of the scenes, top → bottom: **OVERDUB** (component-library
-  bezel button + red light, as Fundamental's PUSH), REPEATS, DECAY, the poly **MULTI**
+  bezel button + red light, as Fundamental's PUSH), the poly **MULTI**
   input, then three compact stacked output **plates** (Theme `AK_PLATE_*` style): **CUE**
   over **POLY** over **MIX** (CUE/MIX are vertical stereo, L over R with the jacks squeezed
   close; POLY is a single poly jack between them). **POLY** is the per-track direct out:
@@ -618,8 +672,8 @@ REAPER can then render stems for any DAW.
 **Deferred (v2+).** Loading clips from arbitrary files (the on-reload restore is built,
 §11; loading a chosen OGG into a slot is not). Standalone clocking with per-track/per-take
 interval lengths. Duplicate /
-extend-with-silence (multi-interval loops). Follow actions; per-slot "no stop"; tape-
-style degradation. History browse. FLAC slot files. NINJAM silence-interval TX.
+extend-with-silence (multi-interval loops). Per-slot "no stop"; tape-
+style degradation. (Follow actions shipped: per-slot *After* = stop / play slot N.) History browse. FLAC slot files. NINJAM silence-interval TX.
 Resample takes on sample-rate change. Recorder: decode-on-demand preview per player.
 
 ---

@@ -35,6 +35,13 @@ static const int MAX_TRACKS = 8;
 static const int MAX_SLOTS = 8;
 static const int THUMB_BINS = 64;
 static const float GATE = 0.000316f; // −70 dBFS on the ±1 scale
+// Auto-advance capture ("keep playing → keep recording"): a committed take whose final
+// TAIL_SECONDS stay above TAIL_GATE means the player blew through the downbeat — the
+// recording rolls into the next empty slot below instead of the take starting to loop.
+// TAIL_GATE is much hotter than GATE on purpose: a released chord's decay/reverb tail
+// crossing the boundary must not chain (−40 dB ≈ inaudible under a live instrument).
+static const float TAIL_GATE = 0.01f; // −40 dBFS
+static const float TAIL_SECONDS = 0.3f;
 
 // A stereo-interleaved buffer of `frames` frames. Allocated/freed by the worker only.
 struct Buf {
@@ -67,13 +74,14 @@ struct TrackIn {
 // Metadata for a committed take, handed to the sink so it can encode + index the file
 // (docs §10). All plain data — no Rack, no Buf ownership.
 struct TakeMeta {
-	int frames;
-	float sampleRate;
-	int bpm, bpi;
-	uint64_t startFrame; // session-timeline position of the take's first frame
-	float peak;
-	int repeats;
-	float decayDb;
+	int frames = 0;
+	float sampleRate = 0.f;
+	int bpm = 0, bpi = 0;
+	uint64_t startFrame = 0; // session-timeline position of the take's first frame
+	float peak = 0.f;
+	int repeats = 0;
+	float decayDb = 0.f;
+	int followSlot = 0; // after done: 0 = stop, 1..8 = launch slot N (0 also = key absent in old manifests)
 };
 
 // The disk side of the Looper (M4): the worker hands committed takes here to be encoded
@@ -142,6 +150,7 @@ struct Slot {
 	std::atomic<int> pending{NONE};
 	std::atomic<int> repeats{0};       // 0 = ∞ (UI writes, audio reads)
 	std::atomic<float> decayDb{0.f};   // dB per repetition, 0…−6
+	std::atomic<int> followSlot{0};    // after done: 0 = stop, 1..8 = launch slot N on this track
 	std::atomic<int> repCount{0};
 	std::atomic<float> gain{1.f};
 	std::atomic<bool> playable{true};  // take length matches the live grid
@@ -150,6 +159,7 @@ struct Slot {
 	float thumb[THUMB_BINS] = {};      // display only; written at a boundary
 	// Audio-thread only.
 	Take take;
+	int armFrame = 0; // frame-in-interval of the capture press: the pickup window start
 	bool startedThisBoundary = false;
 	Buf* staging = nullptr; // overdub in progress: take + this interval's input
 	uint32_t odSeq = 0;
@@ -168,6 +178,9 @@ struct Track {
 	Buf* rec = nullptr;
 	Buf* last = nullptr;
 	Buf* spare = nullptr;
+	int chainFrom = -1;   // predecessor of the auto-advance chain's armed cell (−1 = no chain)
+	bool recPrevOk = false; // post-rotation `rec` still holds the immediately-previous
+	                        // completed interval (pickup source), not a fresh spare
 	bool recPending = false;
 	float peak = 0.f, lastPeak = 0.f;
 	float txGain = 1.f;   // smoothed TX latch (no click)
@@ -230,6 +243,11 @@ public:
 	std::atomic<bool> declickEnabled{true}; // fade each loop cycle's ends to 0 (no click); tests disable it
 	std::atomic<int> defRepeats{0};      // defaults for new captures
 	std::atomic<float> defDecayDb{0.f};
+	// Keep recording into the next empty slot while the player plays through the
+	// downbeat (tail gate; see TAIL_GATE above). On by default; the menu toggle is the
+	// escape hatch for never-silent sources (drones/pads), where the chain would
+	// otherwise eat the whole column.
+	std::atomic<bool> autoAdvance{true};
 	std::atomic<int> intervalFrames{0};  // current N (UI)
 	std::atomic<long> allocations{0};    // buffers allocated by the worker (diagnostics/test)
 
@@ -247,6 +265,22 @@ private:
 	void release(Buf* b);
 	static void setPlaying(Track& tr, int s);
 	static void refuse(Slot& sl, double now) { sl.flashAt.store(now, std::memory_order_relaxed); }
+	// A playing cell steps down to FILLED — unless it has no take (an empty "rest" cell
+	// playing silence in a follow chain), which goes back to EMPTY.
+	static void demote(Slot& sl) {
+		sl.state.store(sl.take.buf ? FILLED : EMPTY, std::memory_order_relaxed);
+	}
+	// The auto-advance chain involving slot `s` broke (its cell was cleared, cancelled,
+	// or replaced): if `s` was the armed cell, the predecessor becomes the performance's
+	// last cell (one pass on replay, follow stays Stop). Audio thread only. Every path
+	// that can kill the armed cell or the predecessor must run this, or chainFrom goes
+	// stale and a later unrelated capture is misclassified as chained.
+	static void breakChain(Track& tr, int s) {
+		if (tr.chainFrom < 0 || (s != tr.chainFrom && s != tr.chainFrom + 1)) return;
+		if (s == tr.chainFrom + 1)
+			tr.slots[tr.chainFrom].repeats.store(1, std::memory_order_relaxed);
+		tr.chainFrom = -1;
+	}
 	void dropOverdub(Slot& sl);
 
 	SpscQueue<Cmd, 256> cmds;      // audio → worker

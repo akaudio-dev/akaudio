@@ -44,10 +44,12 @@ static int countEndingWith(const std::vector<std::string>& v, const std::string&
 }
 static int countEndingWith(const std::string& dir, const std::string& suffix) { return countEndingWith(listDir(dir), suffix); }
 
-static TakeMeta meta(int frames, uint64_t startFrame, float peak, int repeats, float decayDb) {
+static TakeMeta meta(int frames, uint64_t startFrame, float peak, int repeats, float decayDb,
+                     int followSlot = 0) {
 	TakeMeta m;
 	m.frames = frames; m.sampleRate = 48000.f; m.bpm = 120; m.bpi = 4;
 	m.startFrame = startFrame; m.peak = peak; m.repeats = repeats; m.decayDb = decayDb;
+	m.followSlot = followSlot;
 	return m;
 }
 
@@ -69,7 +71,7 @@ int main(int argc, char** argv) {
 	s.setTrackName(0, "piano");
 
 	// --- Save a take ---
-	s.save(0, 0, pcm.data(), meta(N, 9600, 0.71f, 2, -3.f));
+	s.save(0, 0, pcm.data(), meta(N, 9600, 0.71f, 2, -3.f, 3));
 
 	std::string live = dir + "/t0_s0.ogg";
 	CHECK(fileExists(live), "take file written");
@@ -84,12 +86,13 @@ int main(int argc, char** argv) {
 	CHECK(contains(man, "\"room\": \"testroom\""), "manifest carries the room");
 	CHECK(contains(man, "\"name\": \"piano\""), "manifest carries the track name");
 	CHECK(contains(man, "\"repeats\": 2"), "manifest carries repeats");
+	CHECK(contains(man, "\"follow\": 3"), "manifest carries the follow action");
 	CHECK(contains(man, "\"bpm\": 120"), "manifest carries bpm");
 	CHECK(contains(man, "\"startFrame\": 9600"), "manifest carries the session-timeline start");
 
 	// --- Clip loader: the saved OGG decodes back to real audio (round-trip) ---
 	{
-		s.enqueueLoad(0, 0, live, meta(N, 9600, 0.71f, 2, -3.f));
+		s.enqueueLoad(0, 0, live, meta(N, 9600, 0.71f, 2, -3.f, 3));
 		int t = -1, sl = -1, frames = 0;
 		std::vector<float> back;
 		TakeMeta gm{};
@@ -97,6 +100,7 @@ int main(int argc, char** argv) {
 		CHECK(t == 0 && sl == 0, "load targets the right slot (%d,%d)", t, sl);
 		CHECK(frames == N, "declared take length preserved (%d)", frames);
 		CHECK(gm.repeats == 2 && gm.startFrame == 9600, "load carries the take metadata");
+		CHECK(gm.followSlot == 3, "load carries the follow action");
 		int dn = (int) (back.size() / 2);
 		CHECK(dn > N - 2048 && dn < N + 2048, "decoded ~N frames (%d vs %d)", dn, N);
 		double rms = 0;
@@ -112,10 +116,11 @@ int main(int argc, char** argv) {
 	}
 
 	// --- Late settings edit reflects into the manifest ---
-	s.setSlotSettings(0, 0, 4, -6.f);
+	s.setSlotSettings(0, 0, 4, -6.f, 2);
 	s.flush();
 	man = readAll(dir + "/session.json");
 	CHECK(contains(man, "\"repeats\": 4"), "manifest updated after a settings edit");
+	CHECK(contains(man, "\"follow\": 2"), "manifest updated with the follow action");
 
 	// --- Overwrite: the old take is retired into history/, a new live file lands ---
 	s.save(0, 0, pcm.data(), meta(N, 19200, 0.5f, 0, 0.f));
@@ -135,6 +140,37 @@ int main(int argc, char** argv) {
 	man = readAll(dir + "/session.json");
 	CHECK(!contains(man, "\"file\": \"t0_s0.ogg\""), "manifest no longer lists the cleared slot");
 	CHECK(contains(man, "\"file\": \"t1_s3.ogg\""), "manifest still lists the surviving slot");
+
+	// --- Settings-only row: an empty "rest" cell persists its chain settings ---
+	s.setSlotSettings(2, 2, 1, 0.f, 4);
+	s.flush();
+	man = readAll(dir + "/session.json");
+	CHECK(contains(man, "\"track\": 2, \"slot\": 2, \"file\": \"\""), "rest cell row written without a file");
+	CHECK(contains(man, "\"follow\": 4"), "rest cell row carries its follow action");
+	s.setSlotSettings(2, 2, 0, 0.f, 0); // back to defaults → the row disappears
+	s.flush();
+	man = readAll(dir + "/session.json");
+	CHECK(!contains(man, "\"track\": 2, \"slot\": 2"), "default settings drop the rest row");
+
+	// --- Restored session: markRestored() lets edits and clears rewrite the manifest.
+	// (Without it, flush()/clear() refuse until a new take lands: a reloaded patch would
+	// never persist settings edits, and clearing a restored slot would orphan its row —
+	// which comes back on the next load as a ghost.) ---
+	{
+		Session r;
+		r.setDir(dir); // fresh model over the same on-disk session
+		r.noteExistingTake(1, 3, "t1_s3.ogg", meta(N, 0, 0.6f, 0, 0.f));
+		r.markRestored();
+		r.setSlotSettings(1, 3, 8, 0.f, 5);
+		r.flush();
+		man = readAll(dir + "/session.json");
+		CHECK(contains(man, "\"repeats\": 8"), "restored session: settings edit reaches the manifest");
+		CHECK(contains(man, "\"follow\": 5"), "restored session: follow edit reaches the manifest");
+		r.clear(1, 3);
+		CHECK(!fileExists(dir + "/t1_s3.ogg"), "restored session: clear removes the live file");
+		man = readAll(dir + "/session.json");
+		CHECK(!contains(man, "t1_s3.ogg"), "restored session: clear rewrites the manifest (no orphan row)");
+	}
 
 	// --- An untouched session writes nothing (no empty folders) ---
 	Session empty;

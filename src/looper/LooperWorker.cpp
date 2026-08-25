@@ -140,7 +140,9 @@ void LooperWorker::run() {
 			TakeMeta meta;
 			while (engine.sink->nextLoad(t, s, pcm, frames, meta)) {
 				did = true;
-				if (frames <= 0) continue;
+				// Empty pcm = the OGG was missing or undecodable: skip, so the slot
+				// stays EMPTY instead of installing an all-zero silent take.
+				if (frames <= 0 || pcm.empty()) continue;
 				Buf* b = alloc(frames);
 				const size_t need = (size_t) frames * 2;
 				const size_t have = std::min(pcm.size(), need);

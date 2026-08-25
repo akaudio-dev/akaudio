@@ -139,14 +139,23 @@ void Session::setTrackName(int track, const std::string& name) {
 	dirty_ = true;
 }
 
-void Session::setSlotSettings(int track, int slot, int repeats, float decayDb) {
+void Session::setSlotSettings(int track, int slot, int repeats, float decayDb, int followSlot) {
 	if (track < 0 || track >= MAX_TRACKS || slot < 0 || slot >= MAX_SLOTS) return;
 	std::lock_guard<std::mutex> lk(mu_);
 	Rec& r = recs_[track][slot];
-	if (!r.present || (r.repeats == repeats && r.decayDb == decayDb)) return;
+	if (r.repeats == repeats && r.decayDb == decayDb && r.followSlot == followSlot)
+		return;
+	// Settings are kept even for a cell with no take (an empty "rest" step in a follow
+	// chain) — the manifest writes a settings-only row for it (no file).
 	r.repeats = repeats;
 	r.decayDb = decayDb;
+	r.followSlot = followSlot;
 	dirty_ = true;
+}
+
+void Session::markRestored() {
+	std::lock_guard<std::mutex> lk(mu_);
+	everWrote_ = true;
 }
 
 std::string Session::dir() const {
@@ -205,6 +214,7 @@ void Session::save(int track, int slot, const float* pcm, const TakeMeta& meta) 
 		r.startFrame = meta.startFrame;
 		r.repeats = meta.repeats;
 		r.decayDb = meta.decayDb;
+		r.followSlot = meta.followSlot;
 		if (r.created.empty()) r.created = nowStamp("%Y-%m-%dT%H:%M:%S");
 		sBpm_ = meta.bpm; sBpi_ = meta.bpi; sFrames_ = meta.frames; sSampleRate_ = meta.sampleRate;
 		everWrote_ = true;
@@ -263,6 +273,7 @@ void Session::noteExistingTake(int track, int slot, const std::string& file, con
 	r.startFrame = meta.startFrame;
 	r.repeats = meta.repeats;
 	r.decayDb = meta.decayDb;
+	r.followSlot = meta.followSlot;
 	sBpm_ = meta.bpm; sBpi_ = meta.bpi; sFrames_ = meta.frames; sSampleRate_ = meta.sampleRate;
 	// The on-disk session.json is already correct — don't set everWrote_/dirty_ here; a
 	// later real save/clear rewrites the manifest with these entries preserved.
@@ -348,7 +359,10 @@ void Session::writeManifestLocked() {
 	for (int t = 0; t < MAX_TRACKS; t++) {
 		for (int s = 0; s < MAX_SLOTS; s++) {
 			const Rec& r = recs_[t][s];
-			if (!r.present) continue;
+			// A cell with no take still gets a row when its settings are non-default
+			// (an empty "rest" step in a follow chain): the row has an empty "file".
+			const bool hasSettings = r.repeats != 0 || r.decayDb != 0.f || r.followSlot != 0;
+			if (!r.present && !hasSettings) continue;
 			j += (first ? "\n" : ",\n");
 			first = false;
 			char peak[32];
@@ -360,6 +374,7 @@ void Session::writeManifestLocked() {
 			   + ", \"file\": \"" + jesc(r.file) + "\""
 			   + ", \"repeats\": " + std::to_string(r.repeats)
 			   + ", \"decayDb\": " + std::string(decay)
+			   + ", \"follow\": " + std::to_string(r.followSlot)
 			   + ", \"created\": \"" + jesc(r.created) + "\""
 			   + ", \"startFrame\": " + std::to_string((long long) r.startFrame)
 			   + ", \"frames\": " + std::to_string(r.frames)
