@@ -199,6 +199,7 @@ void LooperEngine::drainIntents() {
 				sl.repeats.store(0, std::memory_order_relaxed);
 				sl.decayDb.store(0.f, std::memory_order_relaxed);
 				sl.followSlot.store(0, std::memory_order_relaxed);
+				sl.derived.store(false, std::memory_order_relaxed);
 				for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = 0.f;
 				break;
 			}
@@ -210,6 +211,42 @@ void LooperEngine::drainIntents() {
 // FILLED slot with its saved settings; playability is decided against the live grid (a
 // take whose length/rate matches the current N is launchable, else greyed until it does —
 // the regrid rule). Buffer ownership passes to the slot (freed on clear/overwrite).
+// If the take in (t, s) misfits the live grid because the BPI halved or doubled at the
+// same BPM, ask the worker to derive a fitting take: tile it twice into a doubled
+// interval, or split it into two chained halves (the second lands in the next EMPTY
+// slot below; occupied → the take just stays grey). Derivations are RAM-only — the
+// disk keeps the original OGG + settings, so reload + regrid re-derives from pristine
+// sources — and are never derived again themselves (they grey out on further tempo
+// changes; reload restores the originals). Audio thread.
+void LooperEngine::maybeConvert(Track& tr, int t, int s) {
+	Slot& sl = tr.slots[s];
+	if (sl.state.load(std::memory_order_relaxed) != FILLED) return;
+	if (sl.playable.load(std::memory_order_relaxed)) return; // already fits
+	if (sl.derived.load(std::memory_order_relaxed)) return;  // derivations don't re-derive
+	if (!sl.take.buf || sl.take.sampleRate != sr || sl.take.bpm != curBpm) return;
+	Cmd c {};
+	c.kind = Cmd::CONVERT; c.track = t; c.slot = s; c.frames = N;
+	c.seq = 0; c.a = sl.take.buf; c.b = nullptr;
+	c.meta.frames = N;
+	c.meta.sampleRate = sr;
+	c.meta.bpm = curBpm; c.meta.bpi = curBpi;
+	c.meta.startFrame = sl.take.startFrame;
+	c.meta.peak = sl.take.peak;
+	c.meta.repeats = sl.repeats.load(std::memory_order_relaxed);
+	c.meta.decayDb = sl.decayDb.load(std::memory_order_relaxed);
+	c.meta.followSlot = sl.followSlot.load(std::memory_order_relaxed);
+	if (curBpi == 2 * sl.take.bpi && std::abs(N - 2 * sl.take.frames) <= 4) {
+		c.upto = -1; // tile ×2 into the doubled interval
+	} else if (2 * curBpi == sl.take.bpi && std::abs(sl.take.frames - 2 * N) <= 4) {
+		if (s + 1 >= MAX_SLOTS || tr.slots[s + 1].state.load(std::memory_order_relaxed) != EMPTY)
+			return; // nowhere for the second half
+		c.upto = s + 1; // split: halves become a ×1 follow chain
+	} else {
+		return; // not a clean halving/doubling (different BPM, odd ratio, …)
+	}
+	cmds.push(c); // a dropped push just leaves the take grey; never blocks the audio thread
+}
+
 void LooperEngine::drainLoads() {
 	LoadInstall li;
 	while (loads.pop(li)) {
@@ -219,6 +256,19 @@ void LooperEngine::drainLoads() {
 		}
 		Track& ltr = tracks[li.track];
 		Slot& sl = ltr.slots[li.slot];
+		if (li.guard) {
+			// BPI conversion: only land on the exact state it was derived against —
+			// the source take still in place, or (split's second half) a still-EMPTY
+			// slot. Anything else (clear, re-record, another load) wins; recycle.
+			const bool ok = li.expect
+				? sl.take.buf == li.expect
+				: (sl.take.buf == nullptr
+				   && sl.state.load(std::memory_order_relaxed) == EMPTY);
+			if (!ok) {
+				release(li.buf);
+				continue;
+			}
+		}
 		breakChain(ltr, li.slot); // a load landing on a chain member ends the chain
 		if (sl.take.buf) release(sl.take.buf); // replace whatever is there
 		sl.take.buf = li.buf;
@@ -231,6 +281,7 @@ void LooperEngine::drainLoads() {
 		sl.repeats.store(li.meta.repeats, std::memory_order_relaxed);
 		sl.decayDb.store(li.meta.decayDb, std::memory_order_relaxed);
 		sl.followSlot.store(li.meta.followSlot, std::memory_order_relaxed);
+		sl.derived.store(li.derived, std::memory_order_relaxed);
 		for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = li.thumb[b];
 		bool ok = haveGrid && li.buf && li.buf->frames == N && li.meta.sampleRate == sr;
 		sl.playable.store(!haveGrid || ok, std::memory_order_relaxed);
@@ -238,6 +289,10 @@ void LooperEngine::drainLoads() {
 		sl.gain.store(1.f, std::memory_order_relaxed);
 		sl.pending.store(NONE, std::memory_order_relaxed);
 		sl.state.store(FILLED, std::memory_order_relaxed);
+		// A restored take landing on a mismatched grid (reload mid-jam after a BPI
+		// change): try the same derivation the live regrid would have done.
+		if (!ok && haveGrid)
+			maybeConvert(ltr, li.track, li.slot);
 	}
 }
 
@@ -250,6 +305,8 @@ void LooperEngine::regrid(const ClockFrame& c) {
 	N = c.intervalFrames;
 	sr = c.sampleRate;
 	gen = c.gridGeneration;
+	curBpm = c.bpm;
+	curBpi = c.bpi;
 	haveGrid = true;
 	for (int t = 0; t < MAX_TRACKS; t++) tracks[t].chainFrom = -1; // chains die with the old grid
 	intervalFrames.store(N, std::memory_order_relaxed);
@@ -279,6 +336,10 @@ void LooperEngine::regrid(const ClockFrame& c) {
 		if (!tr.rec || (!tr.last && !tr.spare))
 			requestRec(t);
 		tr.bufs.store((tr.rec ? 1 : 0) + (tr.last ? 1 : 0) + (tr.spare ? 1 : 0), std::memory_order_relaxed);
+		// BPI halved/doubled at the same BPM: derive grid-fitting takes from the ones
+		// that just greyed out (tile into the doubled interval / split into halves).
+		for (int s = 0; s < MAX_SLOTS; s++)
+			maybeConvert(tr, t, s);
 	}
 	odTrack = odSlot = -1; // the overdub re-targets against the new grid at the next boundary
 }
@@ -349,6 +410,7 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 			sl.repeats.store(defRepeats.load(std::memory_order_relaxed), std::memory_order_relaxed);
 			sl.decayDb.store(defDecayDb.load(std::memory_order_relaxed), std::memory_order_relaxed);
 			sl.followSlot.store(0, std::memory_order_relaxed); // a fresh take never inherits a stale follow
+			sl.derived.store(false, std::memory_order_relaxed); // a real recording, not a derivation
 			sl.playable.store(true, std::memory_order_relaxed);
 			// This cell was recorded as the continuation of an auto-advance chain: wire
 			// the predecessor (repeats 1, follow → here) so the whole performance
@@ -483,6 +545,9 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 				sl.odReady = false;
 				sl.odSeq = 0;
 				for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = std::min(1.f, std::max(sl.thumb[b], tr.lastLive[b]));
+				// An overdub onto a tempo-derived take makes it real user content —
+				// it is saved to disk below, so the manifest tracks it again.
+				sl.derived.store(false, std::memory_order_relaxed);
 				saveTake(t, odSlot); // the overdubbed take replaces the file (old → history), M4
 			} else {
 				dropOverdub(sl);

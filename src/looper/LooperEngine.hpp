@@ -102,25 +102,32 @@ struct LooperSink {
 	                      TakeMeta& meta) { return false; }
 };
 
-// A decoded take on its way from the worker into a slot (clip loader). The worker
-// allocates + fills `buf` (like a committed take) and computes the thumbnail; the audio
-// thread installs it as a FILLED take. Buffer lifetime follows the usual rule — freed by
-// the worker when the slot is later cleared/overwritten.
+// A decoded take on its way from the worker into a slot (clip loader / BPI converter).
+// The worker allocates + fills `buf` (like a committed take) and computes the thumbnail;
+// the audio thread installs it as a FILLED take. Buffer lifetime follows the usual rule —
+// freed by the worker when the slot is later cleared/overwritten.
 struct LoadInstall {
 	int track, slot;
 	Buf* buf;
 	TakeMeta meta;
 	float thumb[THUMB_BINS];
+	// Guarded install (BPI conversions): only land if the slot still holds `expect`
+	// (the source take the conversion was derived from), or — expect == null — if the
+	// slot is still EMPTY (the split's second half). A stale result is recycled, so a
+	// clear/re-record between enqueue and install can never be clobbered.
+	bool guard;
+	Buf* expect;
+	bool derived; // mark the installed take as tempo-derived (RAM-only; see Slot::derived)
 };
 
 // Audio → worker.
 struct Cmd {
-	enum Kind { ALLOC, OVERDUB_COPY, RELEASE, SAVE, CLEAR_FILE } kind;
-	int track, slot, frames, upto;
+	enum Kind { ALLOC, OVERDUB_COPY, RELEASE, SAVE, CLEAR_FILE, CONVERT } kind;
+	int track, slot, frames, upto; // CONVERT: frames = new N; upto = split target slot (−1 = tile)
 	uint32_t seq;
-	Buf* a;      // OVERDUB_COPY: the take to copy; RELEASE: the buffer; SAVE: the take to encode
+	Buf* a;      // OVERDUB_COPY: the take to copy; RELEASE: the buffer; SAVE/CONVERT: the source take
 	Buf* b;      // OVERDUB_COPY: the rolling buffer whose [0, upto) is added
-	TakeMeta meta; // SAVE only
+	TakeMeta meta; // SAVE: the take's metadata; CONVERT: new-grid bpm/bpi + the ORIGINAL settings
 };
 // Worker → audio.
 struct Reply {
@@ -154,6 +161,12 @@ struct Slot {
 	std::atomic<int> repCount{0};
 	std::atomic<float> gain{1.f};
 	std::atomic<bool> playable{true};  // take length matches the live grid
+	// This take is a RAM-only tempo derivation (a BPI tile or split half): the settings
+	// sweep must NOT push its rewired settings into the manifest — the disk keeps the
+	// original take and its original settings, and reload + regrid re-derives. Derived
+	// takes are not converted again on further tempo changes (they grey out; reload
+	// restores the originals). Cleared on capture/clear/real-load.
+	std::atomic<bool> derived{false};
 	std::atomic<bool> overdubbing{false}; // this slot is the live overdub target (UI marker)
 	std::atomic<double> flashAt{-1.0}; // wall time of a refused action (UI: red flash)
 	float thumb[THUMB_BINS] = {};      // display only; written at a boundary
@@ -262,6 +275,10 @@ private:
 	bool armOverdub(int t, int s); // request staging = copy(take) for the next interval's overdub
 	void saveTake(int t, int s);  // enqueue an OGG save of the slot's committed take (M4)
 	void clearFile(int t, int s); // enqueue a retire of the slot's live file into history/ (M4)
+	// BPI halved/doubled at the same BPM: derive grid-fitting takes from mismatched
+	// ones — tile a take into the doubled interval, or split it into two chained
+	// halves (worker builds the buffers; guarded install through the load path).
+	void maybeConvert(Track& tr, int t, int s);
 	void release(Buf* b);
 	static void setPlaying(Track& tr, int s);
 	static void refuse(Slot& sl, double now) { sl.flashAt.store(now, std::memory_order_relaxed); }
@@ -292,6 +309,7 @@ private:
 	int N = 0;
 	float sr = 0.f;
 	uint32_t gen = 0;
+	int curBpm = 0, curBpi = 0; // the live grid's tempo (set at regrid; BPI converter)
 	bool haveGrid = false;
 	float gateDecay = 0.f;
 	int declickN = 0;   // loop-end fade length in frames (~1.5 ms), computed on regrid

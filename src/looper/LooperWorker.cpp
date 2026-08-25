@@ -127,6 +127,55 @@ void LooperWorker::run() {
 					if (engine.sink)
 						engine.sink->clear(c.track, c.slot);
 					break;
+				case Cmd::CONVERT: {
+					// BPI halved/doubled at the same BPM: derive grid-fitting takes.
+					// The source (c.a) is an immutable committed take, valid like a
+					// SAVE's (any RELEASE is queued after this command). Results go
+					// through the guarded load path: a stale result is recycled by
+					// the audio thread, never installed. RAM-only — nothing is saved
+					// to disk; the session keeps the original take + settings.
+					if (!c.a || c.frames <= 0 || c.a->frames <= 0) break;
+					const int n = c.frames;
+					const int srcN = c.a->frames;
+					auto push = [&](int slot, Buf* expect, int srcFrom, const TakeMeta& m) {
+						Buf* b = alloc(n);
+						for (int f = 0; f < n; f++) {
+							int sf = srcFrom < 0 ? f % srcN : srcFrom + f; // tile vs slice
+							bool in = sf < srcN;
+							b->pcm[(size_t) f * 2]     = in ? c.a->pcm[(size_t) sf * 2] : 0.f;
+							b->pcm[(size_t) f * 2 + 1] = in ? c.a->pcm[(size_t) sf * 2 + 1] : 0.f;
+						}
+						LoadInstall li {};
+						li.track = c.track; li.slot = slot; li.buf = b; li.meta = m;
+						li.guard = true; li.expect = expect; li.derived = true;
+						computeThumb(b->pcm, n, li.thumb);
+						if (!engine.submitLoad(li))
+							recycle(b);
+					};
+					if (c.upto < 0) {
+						// Tile ×2: the take plays twice per doubled interval — exactly
+						// what the room heard. Settings carry over unchanged.
+						push(c.slot, c.a, -1, c.meta);
+					} else {
+						// Split into two ×1-chained halves: the pair replays the take
+						// exactly. The second half takes the original's After; an
+						// endless original (repeats ∞, After Stop) becomes an A↔B
+						// cycle. (A finite repeat count can't span a chain — the pair
+						// plays once, then the original's After. Decay resets on each
+						// chain hop, so it is effectively lost — as in any chain.)
+						TakeMeta m1 = c.meta;
+						m1.repeats = 1;
+						m1.followSlot = c.upto + 1; // 1-based: → the second half
+						TakeMeta m2 = c.meta;
+						m2.repeats = 1;
+						m2.startFrame = c.meta.startFrame + (uint64_t) n;
+						if (m2.followSlot == 0 && c.meta.repeats == 0)
+							m2.followSlot = c.slot + 1; // 1-based: back to the first half
+						push(c.slot, c.a, 0, m1);
+						push(c.upto, nullptr, n, m2);
+					}
+					break;
+				}
 			}
 		}
 		if (engine.sink)

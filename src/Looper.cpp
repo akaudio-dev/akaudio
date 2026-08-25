@@ -1180,9 +1180,12 @@ struct LooperWidget : ModuleWidget {
 		// push is a mutex-guarded compare that no-ops when nothing changed.
 		if (++settingsSweep >= 30) {
 			settingsSweep = 0;
+			// Tempo-derived cells (BPI tile/split) are RAM-only: their rewired settings
+			// must not leak into the manifest, which keeps the ORIGINAL take's settings.
 			for (int t = 0; t < TRACKS; t++)
 				for (int s = 0; s < SLOTS; s++)
-					lp->pushSlotSettings(t, s);
+					if (!lp->engine.tracks[t].slots[s].derived.load(std::memory_order_relaxed))
+						lp->pushSlotSettings(t, s);
 			// The name sync serializes the whole MixMaster (dataToJson) — every 4th
 			// sweep (~2 s) is plenty for label edits.
 			if (lp->followMixerNames && ++nameSweep >= 4) {

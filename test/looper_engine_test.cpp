@@ -71,6 +71,7 @@ struct Sim {
 	uint64_t session = 0;
 	double now = 0.0;
 	int n = N;
+	int bpm = 120, bpi = 4; // the clock's tempo (BPI-conversion tests change bpi + n + gen)
 	bool tx_ = false;   // TX latch fed to the track this interval
 	int quietFrom = -1; // input silent from this frame on (tail-gate tests); -1 = full interval
 	std::vector<float> outL, outR, cueL_, cueR_; // last interval's MIX + CUE
@@ -83,7 +84,7 @@ struct Sim {
 	ClockFrame clock() {
 		ClockFrame c;
 		c.running = true; c.intervalFrames = n; c.frameInInterval = frame; c.downbeat = frame == 0;
-		c.gridGeneration = gen; c.sessionFrame = session++; c.sampleRate = SR; c.bpm = 120; c.bpi = 4;
+		c.gridGeneration = gen; c.sessionFrame = session++; c.sampleRate = SR; c.bpm = bpm; c.bpi = bpi;
 		if (++frame >= n) frame = 0;
 		return c;
 	}
@@ -780,6 +781,105 @@ int main() {
 		p.eng.overdubSel.store(-1);
 		p.interval(-1);
 		p.eng.stop();
+	}
+
+	// ---- BPI conversion: doubling tiles the take ×2; halving splits it into two
+	// ×1-chained halves. Derivations are RAM-only, guarded, and never re-derived. ----
+	{
+		Sim b;
+		b.eng.declickEnabled.store(false);
+		b.eng.start();
+		b.interval(0); // warm-up at bpi 4 / n 4800
+		Slot& s0 = b.slot(0);
+		// Capture sig 1 at bpi 4.
+		b.interval(-1, true, [&](int f) { if (f == 10) b.eng.pressSlot(0, 0, false); });
+		b.interval(1);
+		b.interval(-1);
+		CHECK(s0.state.load() == PLAYING, "bpi: base take captured");
+		b.eng.stopTrack(0);
+		b.interval(-1);
+
+		// Double the BPI (4 → 8, same BPM): the take tiles to fill the new interval.
+		b.bpi = 8; b.n = 9600; b.gen = 2; b.frame = 0;
+		b.interval(-1); // regrid → convert → install (worker runs during the naps)
+		CHECK(s0.state.load() == FILLED && s0.playable.load(), "tile: converted take is playable");
+		CHECK(s0.take.frames == 9600, "tile: take now spans the doubled interval (got %d)", s0.take.frames);
+		CHECK(s0.derived.load(), "tile: converted take is marked derived");
+		b.interval(-1, true, [&](int f) { if (f == 10) b.eng.pressSlot(0, 0, false); });
+		b.interval(-1);
+		{
+			bool ok = true;
+			for (int f = 0; f < b.n && ok; f++) {
+				float el = Sim::sig(1, f % 4800);
+				if (std::fabs(b.outL[f] - el) > 1e-6f || std::fabs(b.outR[f] + el) > 1e-6f) {
+					std::printf("   tile mismatch at %d: got %.6f want %.6f\n", f, b.outL[f], el);
+					ok = false;
+				}
+			}
+			CHECK(ok, "tile: playback is the take twice, sample-exact");
+		}
+		b.eng.stopTrack(0);
+		b.interval(-1);
+
+		// Capture sig 2 at bpi 8 into slot 2, then halve the BPI (8 → 4): the take
+		// splits into two ×1-chained halves; the tile-derived slot 0 must NOT be
+		// re-derived (derivations grey out on further changes).
+		b.interval(-1, true, [&](int f) { if (f == 10) b.eng.pressSlot(0, 2, false); });
+		b.interval(2);
+		b.interval(-1);
+		CHECK(b.slot(2).state.load() == PLAYING, "bpi: 8-beat take captured");
+		b.eng.stopTrack(0);
+		b.interval(-1);
+		b.bpi = 4; b.n = 4800; b.gen = 3; b.frame = 0;
+		b.interval(-1); // regrid → split installs
+		CHECK(!s0.playable.load() && s0.derived.load(), "split: tile-derived cell greys, not re-derived");
+		CHECK(b.slot(2).playable.load() && b.slot(2).take.frames == 4800, "split: first half fits the grid");
+		CHECK(b.slot(3).state.load() == FILLED && b.slot(3).take.frames == 4800, "split: second half landed below");
+		CHECK(b.slot(2).repeats.load() == 1 && b.slot(2).followSlot.load() == 4,
+			"split: first half wired to the second");
+		CHECK(b.slot(3).repeats.load() == 1 && b.slot(3).followSlot.load() == 3,
+			"split: endless original becomes an A-B cycle");
+		CHECK(b.slot(2).derived.load() && b.slot(3).derived.load(), "split: both halves marked derived");
+		b.interval(-1, true, [&](int f) { if (f == 10) b.eng.pressSlot(0, 2, false); });
+		b.interval(-1);
+		CHECK(b.outputIs(2), "split replay: interval 1 = the first half");
+		b.interval(-1);
+		{
+			bool ok = true;
+			for (int f = 0; f < b.n && ok; f++) {
+				float el = Sim::sig(2, 4800 + f);
+				if (std::fabs(b.outL[f] - el) > 1e-6f || std::fabs(b.outR[f] + el) > 1e-6f) {
+					std::printf("   split mismatch at %d: got %.6f want %.6f\n", f, b.outL[f], el);
+					ok = false;
+				}
+			}
+			CHECK(ok, "split replay: interval 2 = the second half, sample-exact");
+		}
+		b.interval(-1);
+		CHECK(b.outputIs(2), "split replay: interval 3 cycles back to the first half");
+		b.eng.stopTrack(0);
+		b.interval(-1);
+
+		// An occupied next slot blocks a split (the take stays grey) while its
+		// neighbor with a free slot below still splits.
+		b.bpi = 8; b.n = 9600; b.gen = 4; b.frame = 0;
+		b.interval(-1); // regrid: everything greys (all derived or mismatched)
+		b.interval(-1, true, [&](int f) { if (f == 10) b.eng.pressSlot(0, 5, false); });
+		b.interval(3);
+		b.interval(-1, true, [&](int f) { if (f == 10) b.eng.pressSlot(0, 6, false); });
+		b.interval(4);
+		b.interval(-1);
+		CHECK(b.slot(5).state.load() == FILLED && b.slot(6).state.load() == PLAYING,
+			"bpi: two adjacent 8-beat takes captured");
+		b.eng.stopTrack(0);
+		b.interval(-1);
+		b.bpi = 4; b.n = 4800; b.gen = 5; b.frame = 0;
+		b.interval(-1); // regrid: slot 5 blocked (6 occupied); slot 6 splits into 6+7
+		CHECK(!b.slot(5).playable.load() && !b.slot(5).derived.load(),
+			"split: occupied next slot leaves the take grey (and underived)");
+		CHECK(b.slot(6).playable.load() && b.slot(7).state.load() == FILLED,
+			"split: the neighbor with a free slot below split fine");
+		b.eng.stop();
 	}
 
 	std::printf("%s (%d failures)\n", fails ? "FAIL" : "PASS: LooperEngine", fails);

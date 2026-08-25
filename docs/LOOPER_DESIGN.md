@@ -357,6 +357,22 @@ boundary.
    boundary already retargeted the playing slot, so user action always wins over the
    follow jump.
 
+**BPI conversion (halving/doubling at the same BPM).** A regrid greys mismatched
+takes as before, but when the BPI exactly halved or doubled (same BPM, same sample
+rate), the engine derives grid-fitting takes on the worker: **doubling tiles** the take
+twice into the new interval (byte-identical to what the room heard); **halving splits**
+it into two ×1-chained halves in the cell and the next EMPTY slot below (occupied → the
+take stays grey) — an endless original becomes an A↔B cycle, so the pair replays the
+phrase exactly. Derivations are **RAM-only**: nothing is saved, session.json keeps the
+original take + settings (the widget sweep skips `derived` cells), so reload + regrid
+re-derives from pristine sources. Results install through the **guarded** load path
+(only if the source take / EMPTY target is still in place — a clear or re-record wins),
+and derived takes are never derived again (they grey on further tempo changes; reload
+restores originals). An overdub onto a derived take makes it real content: the derived
+mark clears and the layered take saves to disk as usual. Limitations: finite repeat
+counts can't span a split chain (the pair plays once, then the original's After) and
+decay resets on every chain hop, as in any chain.
+
 ### 5.3 Per-frame `process()` (audio thread)
 
 ```

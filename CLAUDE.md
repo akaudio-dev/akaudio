@@ -68,7 +68,10 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
   tail-gated at −40 dB; menu-toggleable for drones — and self-wires the chain:
   each cell ×1 + follow→next, so launching the first cell replays the take), pickup
   capture (press→downbeat audio folds into the take's tail — early hits and lead-in
-  phrases survive the loop point), "Track names: follow the mixer" (a MindMeld
+  phrases survive the loop point), BPI conversion (halving/doubling at the same BPM
+  re-derives takes on the worker: doubling tiles ×2, halving splits into two ×1-chained
+  halves; RAM-only + guarded installs, disk keeps the originals), "Track names: follow
+  the mixer" (a MindMeld
   MixMaster feeding MULTI names our tracks via its `trackLabels` JSON), gate, TX latch,
   submix + limiter), `LooperWorker` (the only thread that allocates/frees buffers;
   SPSC `Spsc.hpp` both ways — and the thread that runs the M4 disk jobs), and `Session`
@@ -426,7 +429,9 @@ with undo).
   itself, silence ends the chain, launch replays the performance), pickup capture
   (press→downbeat fold into the take tail, fade-in, no false chain trigger),
   silent-capture refusal,
-  scene stop, clear, regrid (mismatched take greyed + refused), bounded allocations. Build:
+  scene stop, clear, regrid (mismatched take greyed + refused), BPI conversion (tile
+  sample-exact, split pair cycles, derived-not-rederived, occupied-slot block),
+  bounded allocations. Build:
   `c++ -std=c++11 -I src test/looper_engine_test.cpp src/looper/LooperEngine.cpp src/looper/LooperWorker.cpp -lpthread -o build/looper_engine_test && build/looper_engine_test`
 - `session_mirror_test.cpp` — offline check of `looper/SessionMirror` (live cells + manifest
   sync, 0-writes-when-unchanged, mtime-preserving hydration round-trip, stale-cell removal,
