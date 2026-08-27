@@ -470,8 +470,16 @@ struct Ninjam : Module, public akaudio::RecorderLink {
 	void setRecordOwnTx(bool v) override { recordOwnTx_.store(v, std::memory_order_relaxed); }
 	bool recActive() const override { return njclient.archiveRunning(); }
 	bool recJoined() const override { return joined.load(std::memory_order_relaxed); }
+	// The jam folder RELATIVE to the session base ("2026-08-26/0842_room"): callers
+	// compose base + "/" + this, and the date-grouped layout puts a directory between
+	// base and the jam name. Basename fallback for a dir outside the current base.
 	std::string recSessionName() const override {
 		std::string d = njclient.archiveDir();
+		std::string base;
+		{ std::lock_guard<std::mutex> lk(recBaseMu); base = recSessionBase_; }
+		if (!base.empty() && d.size() > base.size() + 1
+		        && d.compare(0, base.size(), base) == 0 && d[base.size()] == '/')
+			return d.substr(base.size() + 1);
 		size_t sl = d.find_last_of('/');
 		return sl == std::string::npos ? d : d.substr(sl + 1);
 	}
@@ -504,14 +512,16 @@ struct Ninjam : Module, public akaudio::RecorderLink {
 		bool want = recorderAdjacent() && recArmed_.load(std::memory_order_relaxed)
 		            && joined.load(std::memory_order_relaxed);
 		if (want && !njclient.archiveRunning()) {
-			std::string stamp = akaudio::timeStamp("%Y-%m-%d_%H%M");
 			std::string room;
 			for (char c : roomLabel)
 				room += ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) ? c : '_';
 			if (room.size() > 32) room.resize(32);
 			std::string base;
 			{ std::lock_guard<std::mutex> lk(recBaseMu); base = recSessionBase_; }
-			std::string dir = base + "/" + std::string(stamp) + (room.empty() ? "" : "_" + room);
+			// Date-grouped layout: <base>/<YYYY-MM-DD>/<HHMM>[_room]/ — jams of one day
+			// share a folder instead of piling flat into the base.
+			std::string dir = base + "/" + akaudio::timeStamp("%Y-%m-%d") + "/"
+			                  + akaudio::timeStamp("%H%M") + (room.empty() ? "" : "_" + room);
 			njclient.startArchive(dir, recordOwnTx_.load(std::memory_order_relaxed));
 		} else if (!want && njclient.archiveRunning()) {
 			njclient.stopArchive();

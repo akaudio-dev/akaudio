@@ -158,8 +158,11 @@ struct Looper : Module {
 	// jam folder when one is armed). UI thread points it at the right folder (syncSession).
 	akaudio::looper::Session session;
 	std::string sessionBase = akaudio::defaultJamsDir(); // where jam folders go (persisted, templated)
-	std::string ownSessionFolder;      // <stamp>_session when jamming without a Recorder (formed once)
+	std::string ownSessionFolder;      // <date>/<time>_session when jamming without a Recorder (formed once)
+	bool ownSessionThisRun = false;    // ownSessionFolder was stamped in THIS run (a
+	                                   // migration may retire it; restored folders never)
 	std::string resolvedSessionDir;    // the looper/ dir last handed to the session
+	std::string adoptedFolder;         // last Recorder jam folder adopted (per-frame gate)
 	std::string appliedSessionBase;    // sessionBase at the last resolve (menu change ⇒ re-resolve)
 	std::string loadDir;               // session dir restored from the patch (clip loader)
 	bool loadPending = false;          // a restore is queued (run once on the UI thread)
@@ -171,10 +174,13 @@ struct Looper : Module {
 
 	// Editable track labels (UI thread only; persisted). Default "-01-" … "-08-".
 	std::string trackNames[TRACKS];
-	// Follow a connected MindMeld MixMaster's track labels (menu toggle): while on, the
-	// widget's sweep copies the mixer's names over ours (local renames are overwritten —
-	// that is what "follow" means). Off by default.
-	bool followMixerNames = false;
+	// Track labels sync with a connected MindMeld MixMaster — always on, BOTH ways,
+	// commit-triggered: closing the Looper's label editor pushes that name into the
+	// mixer's trackLabels (its own preset path: dataToJson → splice → dataFromJson),
+	// and the widget's sweep pulls only the mixer chunks that CHANGED since last seen —
+	// a local rename here survives an unrelated mixer edit. Connecting = full pull
+	// (the mixer is the naming truth at hookup). No mixer on MULTI = quietly inert.
+	std::string mixerLabelsSeen; // last observed mixer trackLabels (change detection)
 
 	// Selection = the last pressed slot (the continuous overdub's target). Index
 	// track*SLOTS+slot, −1 none.
@@ -251,6 +257,12 @@ struct Looper : Module {
 	}
 
 	static std::string defaultTrackName(int t) { return string::f("-%02d-", t + 1); }
+	// Track names are capped at 4 chars everywhere (MixMaster's label size — the two
+	// sides map 1:1). Applied at every entry point so pre-cap names in old patches and
+	// session manifests are grandfathered down on load.
+	static std::string clampName(const std::string& n) {
+		return n.size() > 4 ? n.substr(0, 4) : n;
+	}
 
 	// ---- Button intents (audio thread) ----
 	void pressSlot(int t, int s) {
@@ -393,6 +405,119 @@ struct Looper : Module {
 	}
 	int pendingCount() const { return engine.pendingCount(); }
 
+	// The MindMeld MixMaster feeding our MULTI input (via the connected cable), with the
+	// label offset for its two direct-out jacks ("9-16" → 8). UI thread only.
+	Module* findMixerSource(int& off) {
+		Module* src = nullptr;
+		int outId = -1;
+		for (int64_t cid : APP->engine->getCableIds()) {
+			const Cable* c = APP->engine->getCable(cid);
+			if (c && c->inputModule == this && c->inputId == MULTI_INPUT) {
+				src = c->outputModule;
+				outId = c->outputId;
+				break;
+			}
+		}
+		if (!src || !src->model || !src->model->plugin) return nullptr;
+		if (src->model->plugin->slug != "MindMeldModular") return nullptr;
+		const std::string& ms = src->model->slug;
+		if (ms != "MixMasterJr" && ms != "MixMaster") return nullptr;
+		off = 0;
+		if (outId >= 0 && outId < (int) src->outputInfos.size() && src->outputInfos[outId]
+		        && src->outputInfos[outId]->getName().find("9-16") != std::string::npos)
+			off = 8;
+		return src;
+	}
+
+	// A mixer label chunk is 4 chars; keep it printable ASCII (a byte-wise slice could
+	// split UTF-8, which would corrupt both patch JSON and session.json — see pull).
+	static std::string labelChunk(const std::string& name) {
+		std::string c;
+		for (char ch : name) {
+			if (c.size() >= 4) break;
+			if ((ch >= 0x21 && ch <= 0x7E) || (ch == ' ' && !c.empty())) c += ch;
+		}
+		while (c.size() < 4) c += ' ';
+		return c;
+	}
+
+	// Pull the mixer's labels — commit-triggered: only chunks that CHANGED since the
+	// last observation are applied (a mixer edit of track 3 can't clobber a local
+	// rename of track 5). An empty last-seen (just enabled / recabled) pulls fully.
+	void pullMixerNames() {
+		int off = 0;
+		Module* src = findMixerSource(off);
+		if (!src) {
+			// One-shot diagnostic: nothing to sync with (names stay Looper-local).
+			if (mixerLabelsSeen != "\x01none") {
+				INFO("akaudio: name sync: no MixMaster on MULTI (cable its direct-out into INS)");
+				mixerLabelsSeen = "\x01none";
+			}
+			return;
+		}
+		json_t* j = src->dataToJson();
+		if (!j) return;
+		const char* ls = json_string_value(json_object_get(j, "trackLabels"));
+		if (ls) {
+			const std::string all = ls;
+			const bool baseline = mixerLabelsSeen.empty();
+			for (int t = 0; t < TRACKS; t++) {
+				size_t pos = (size_t) (off + t) * 4;
+				if (pos + 4 > all.size()) break;
+				std::string chunk = all.substr(pos, 4);
+				if (!baseline && pos + 4 <= mixerLabelsSeen.size()
+				        && chunk == mixerLabelsSeen.substr(pos, 4))
+					continue; // unchanged on the mixer: leave our name alone
+				std::string name;
+				for (char ch : chunk)
+					if ((ch >= 0x21 && ch <= 0x7E) || (ch == ' ' && !name.empty())) name += ch;
+				while (!name.empty() && name.back() == ' ') name.pop_back();
+				if (!name.empty() && name != trackNames[t]) {
+					INFO("akaudio: name pull: track %d <- \"%s\"", t + 1, name.c_str());
+					trackNames[t] = name;
+				}
+			}
+			mixerLabelsSeen = all;
+		}
+		json_decref(j);
+	}
+
+	// Push OUR track name into the mixer's labels — called when a label edit commits
+	// (the editor closes). Splices the 4-char chunk into trackLabels and loads it back
+	// through the mixer's own dataFromJson (the same path Rack preset loading uses on
+	// live modules). Updates the last-seen cache so the next pull doesn't echo.
+	void pushNameToMixer(int t) {
+		if (t < 0 || t >= TRACKS) return;
+		int off = 0;
+		Module* src = findMixerSource(off);
+		if (!src) return; // no mixer connected: names are Looper-local, nothing to push
+		json_t* j = src->dataToJson();
+		if (!j) return;
+		const char* ls = json_string_value(json_object_get(j, "trackLabels"));
+		if (ls) {
+			std::string all = ls;
+			size_t pos = (size_t) (off + t) * 4;
+			if (pos + 4 <= all.size()) {
+				std::string chunk = labelChunk(trackNames[t]);
+				if (all.compare(pos, 4, chunk) != 0) {
+					all.replace(pos, 4, chunk);
+					json_object_set_new(j, "trackLabels", json_string(all.c_str()));
+					src->dataFromJson(j);
+					mixerLabelsSeen = all;
+					// Verify the mixer accepted it — self-diagnosing in the field.
+					json_t* j2 = src->dataToJson();
+					const char* ls2 = j2 ? json_string_value(json_object_get(j2, "trackLabels")) : nullptr;
+					if (!ls2 || std::string(ls2).compare(pos, 4, chunk) != 0)
+						WARN("akaudio: name push: mixer did not accept the label write");
+					else
+						INFO("akaudio: name push: track %d -> \"%s\"", t + 1, chunk.c_str());
+					if (j2) json_decref(j2);
+				}
+			}
+		}
+		json_decref(j);
+	}
+
 	// An adjacent Ninjam, as a RecorderLink — used only to borrow the exact jam folder it
 	// archives to (so the looper's takes land beside the Recorder's players/ + tx/).
 	akaudio::RecorderLink* adjacentRecorderLink() {
@@ -404,12 +529,83 @@ struct Looper : Module {
 	}
 
 	// Point the session at the right `.../looper` folder and keep its manifest metadata
-	// current (UI thread, from the widget's step()). We prefer sharing the exact folder a
-	// Recorder is archiving to; otherwise our own `<stamp>_session`. The folder is frozen
-	// once a take has been written, so arming a Recorder mid-jam never splits takes across
-	// two folders — but a menu change of the base folder re-resolves.
+	// current (UI thread, from the widget's step()). While a Recorder RECORDS, its jam
+	// folder wins and the grid migrates along (adoption, below); off-recording, the
+	// resolved folder freezes once written and a menu change of the base re-resolves.
+	// Re-point the session into `dir` (a fresh jam folder). With `carry`, the whole grid
+	// travels: Session::migrateTo byte-copies the live take files (any grid — mismatched
+	// takes grey + re-derive on load, and derived tiles travel as their originals) and
+	// rewrites the manifest there; the engine then re-opens playing cells' spans in the
+	// new events log. Non-destructive: the previous folder keeps all its files.
+	void adoptSessionDir(const std::string& dir, const std::string& folder, bool carry) {
+		resolvedSessionDir = dir;
+		// Room label = the jam NAME (folder may carry a date prefix, "2026-08-26/0842_room").
+		size_t sl = folder.find_last_of('/');
+		session.setRoom(sl == std::string::npos ? folder : folder.substr(sl + 1));
+		// ^ BEFORE the migrate: its manifest must name the new room.
+		if (carry) {
+			// Move semantics for a same-run own `_session` folder: after the worker's
+			// copies verify, the now-duplicate source is retired. A restored session's
+			// folder or a Recorder jam folder is never touched.
+			session.migrateTo(dir, ownSessionThisRun);
+		} else {
+			session.setDir(dir);
+		}
+		sessionRestored = false;
+		ownSessionThisRun = false; // whatever we point at next is not a this-run own stamp
+		appliedSessionBase = sessionBase;
+		if (carry)
+			engine.requestCarrySpans();
+	}
+
+	// Start a fresh session folder on demand (context menu): the Recorder's live jam
+	// folder when one is recording, else a newly stamped `<stamp>_session`. `keepLoops`
+	// carries the grid over; otherwise the grid is cleared (the old folder keeps its
+	// files either way).
+	void newSession(bool keepLoops) {
+		std::string base, folder;
+		const akaudio::RecorderLink* rl = adjacentRecorderLink();
+		if (rl && rl->recActive() && !rl->recSessionName().empty()) {
+			base = akaudio::expandHome(rl->sessionBase());
+			folder = rl->recSessionName();
+		} else {
+			base = akaudio::expandHome(sessionBase);
+			folder = akaudio::timeStamp("%Y-%m-%d") + "/" + akaudio::timeStamp("%H%M") + "_session";
+		}
+		const bool ownStamp = !(rl && rl->recActive());
+		ownSessionFolder = folder;
+		std::string dir = base + "/" + folder + "/looper";
+		// adoptSessionDir consumes ownSessionThisRun as the OLD folder's provenance
+		// (may retire it); only afterwards does the flag describe the NEW folder.
+		adoptSessionDir(dir, folder, keepLoops); // setDir FIRST: the clears below must
+		                                         // not retire the old folder's files
+		ownSessionThisRun = ownStamp;
+		if (!keepLoops)
+			engine.requestClearAll(); // one intent — 64 singles would overflow the queue
+	}
+
 	void syncSession() {
 		if (loadPending) loadSession();
+		// One rule: while a Recorder is recording, the Looper's session lives in the jam
+		// folder. The first sight of a new archive folder re-points the session there and
+		// carries the whole grid along (RESAVE_ALL re-encodes the takes; playing spans
+		// re-open in the new events log) — regardless of restored/touched state, so
+		// "loop first, arm later" and "restart, join, arm" both end with grid + events +
+		// wire archive in ONE folder (the "Session view is empty" splits, 2026-08-25).
+		// Old folders always keep their files. Off-recording, the usual rules hold: a
+		// restored session stays frozen on its folder, a written one on its resolution.
+		const akaudio::RecorderLink* rl = adjacentRecorderLink();
+		if (rl && rl->recActive()) {
+			std::string folder = rl->recSessionName();
+			// Cheap per-frame gate: the folder name is stamped once per arm and stays
+			// constant for the whole recording — only a change warrants building paths.
+			if (!folder.empty() && folder != adoptedFolder) {
+				std::string dir = akaudio::expandHome(rl->sessionBase()) + "/" + folder + "/looper";
+				if (dir != resolvedSessionDir)
+					adoptSessionDir(dir, folder, true);
+				adoptedFolder = folder;
+			}
+		}
 		// A restored session keeps its own folder (so continued captures land beside the
 		// loaded takes and their manifest) — until the user changes the base folder.
 		if (sessionRestored) {
@@ -420,14 +616,16 @@ struct Looper : Module {
 			}
 		}
 		std::string base, folder;
-		const akaudio::RecorderLink* rl = adjacentRecorderLink();
-		if (rl && !rl->recSessionName().empty()) {
+		if (rl && rl->recActive() && !rl->recSessionName().empty()) {
 			base = akaudio::expandHome(rl->sessionBase());
 			folder = rl->recSessionName();
 		} else {
 			base = akaudio::expandHome(sessionBase);
-			if (ownSessionFolder.empty())
-				ownSessionFolder = akaudio::timeStamp("%Y-%m-%d_%H%M") + "_session";
+			if (ownSessionFolder.empty()) {
+				ownSessionFolder = akaudio::timeStamp("%Y-%m-%d") + "/"
+				                   + akaudio::timeStamp("%H%M") + "_session";
+				ownSessionThisRun = true;
+			}
 			folder = ownSessionFolder;
 		}
 		std::string dir = base + "/" + folder + "/looper";
@@ -436,7 +634,8 @@ struct Looper : Module {
 			if (dir != resolvedSessionDir) {
 				resolvedSessionDir = dir;
 				session.setDir(dir);
-				session.setRoom(folder);
+				size_t sl = folder.find_last_of('/');
+				session.setRoom(sl == std::string::npos ? folder : folder.substr(sl + 1));
 			}
 			appliedSessionBase = sessionBase;
 		}
@@ -470,7 +669,7 @@ struct Looper : Module {
 			json_array_foreach(trks, i, v) {
 				int idx = (int) json_integer_value(json_object_get(v, "index"));
 				const char* nm = json_string_value(json_object_get(v, "name"));
-				if (idx >= 0 && idx < TRACKS && nm && *nm) trackNames[idx] = nm;
+				if (idx >= 0 && idx < TRACKS && nm && *nm) trackNames[idx] = clampName(nm);
 			}
 		}
 
@@ -542,7 +741,6 @@ struct Looper : Module {
 		json_object_set_new(root, "defDecayDb", json_real(engine.defDecayDb.load()));
 		json_object_set_new(root, "autoAdvance", json_boolean(engine.autoAdvance.load()));
 		json_object_set_new(root, "repitch", json_boolean(engine.repitch.load()));
-		json_object_set_new(root, "followMixerNames", json_boolean(followMixerNames));
 		json_t* names = json_array();
 		for (int t = 0; t < TRACKS; t++)
 			json_array_append_new(names, json_string(trackNames[t].c_str()));
@@ -573,13 +771,11 @@ struct Looper : Module {
 		if (json_is_boolean(j)) engine.autoAdvance.store(json_boolean_value(j));
 		j = json_object_get(root, "repitch");
 		if (json_is_boolean(j)) engine.repitch.store(json_boolean_value(j));
-		j = json_object_get(root, "followMixerNames");
-		if (json_is_boolean(j)) followMixerNames = json_boolean_value(j);
 		j = json_object_get(root, "trackNames");
 		if (json_is_array(j)) {
 			for (int t = 0; t < TRACKS && t < (int) json_array_size(j); t++) {
 				const char* n = json_string_value(json_array_get(j, t));
-				if (n && *n) trackNames[t] = n;
+				if (n && *n) trackNames[t] = clampName(n);
 			}
 		}
 		j = json_object_get(root, "embedTakes");
@@ -642,8 +838,11 @@ struct Looper : Module {
 			if (!system::isFile(snap + "/session.json") || !snapshotVersionOk(snap))
 				return;
 			std::string base = akaudio::expandHome(sessionBase);
-			if (ownSessionFolder.empty())
-				ownSessionFolder = akaudio::timeStamp("%Y-%m-%d_%H%M") + "_session";
+			if (ownSessionFolder.empty()) {
+				ownSessionFolder = akaudio::timeStamp("%Y-%m-%d") + "/"
+				                   + akaudio::timeStamp("%H%M") + "_session";
+				ownSessionThisRun = true; // hydrated fresh this run: adoptable + retirable
+			}
 			std::string dir = base + "/" + ownSessionFolder + "/looper";
 			if (akaudio::looper::mirrorSession(snap, dir) < 0)
 				return;
@@ -704,7 +903,7 @@ struct HeaderStatus : Widget {
 	void draw(const DrawArgs& args) override {
 		std::string s;
 		if (!lp) {
-			s = "UX scaffold";
+			s = "NINJAM interval looper"; // library/browser preview tagline
 		} else {
 			int sel = lp->selected.load(std::memory_order_relaxed);
 			if (lp->ninjamClock.load(std::memory_order_relaxed))
@@ -746,7 +945,19 @@ struct TrackNameField : ui::TextField {
 	Looper* lp = nullptr;
 	int t = 0;
 	TrackNameField() { box.size.x = 140.f; }
+	// The edit COMMITS when the editor closes (Enter/Escape/click-away all delete the
+	// menu): that is the moment the name pushes to a synced mixer — never per keystroke.
+	~TrackNameField() override {
+		if (lp) lp->pushNameToMixer(t);
+	}
 	void onChange(const ChangeEvent& e) override {
+		// MixMaster labels are exactly 4 chars — ours match, so the two sides map 1:1
+		// with no truncation asymmetry.
+		if (text.size() > 4) {
+			text = text.substr(0, 4);
+			cursor = std::min(cursor, (int) text.size());
+			selection = cursor;
+		}
 		if (lp) lp->trackNames[t] = text;
 		ui::TextField::onChange(e);
 	}
@@ -777,6 +988,7 @@ struct TrackLabel : HoverButton {
 		Looper* m = lp; const int tt = t;
 		menu->addChild(createMenuItem("Reset to default", "", [m, tt]() {
 			m->trackNames[tt] = Looper::defaultTrackName(tt);
+			m->pushNameToMixer(tt); // a reset is a commit too
 		}));
 		APP->event->setSelectedWidget(f);
 		f->selectAll();
@@ -1191,65 +1403,15 @@ struct LooperWidget : ModuleWidget {
 						lp->pushSlotSettings(t, s);
 			// The name sync serializes the whole MixMaster (dataToJson) — every 4th
 			// sweep (~2 s) is plenty for label edits.
-			if (lp->followMixerNames && ++nameSweep >= 4) {
+			if (++nameSweep >= 4) {
 				nameSweep = 0;
-				syncMixerNames();
+				lp->pullMixerNames();
 			}
 		}
 	}
 	int settingsSweep = 0;
 	int nameSweep = 3; // first name sync on the first sweep after enabling
 
-	// Copy the track labels of the MindMeld MixMaster feeding our MULTI input over our
-	// own (menu toggle "Track names: follow the mixer"). MixMaster stores all labels as
-	// one string of 4-char chunks ("trackLabels" in its module JSON, tracks first);
-	// its direct-out poly jack interleaves L/R exactly like MULTI, so labels map 1:1.
-	// The 16-track MixMaster has two direct-out jacks — the connected port's own name
-	// ("1-8" / "9-16") gives the offset. UI thread only (dataToJson allocates).
-	void syncMixerNames() {
-		Module* src = nullptr;
-		int outId = -1;
-		for (int64_t cid : APP->engine->getCableIds()) {
-			const Cable* c = APP->engine->getCable(cid);
-			if (c && c->inputModule == lp && c->inputId == Looper::MULTI_INPUT) {
-				src = c->outputModule;
-				outId = c->outputId;
-				break;
-			}
-		}
-		if (!src || !src->model || !src->model->plugin) return;
-		if (src->model->plugin->slug != "MindMeldModular") return;
-		const std::string& ms = src->model->slug;
-		if (ms != "MixMasterJr" && ms != "MixMaster") return;
-		json_t* j = src->dataToJson();
-		if (!j) return;
-		const char* s = json_string_value(json_object_get(j, "trackLabels"));
-		if (s) {
-			const std::string all = s;
-			int off = 0;
-			if (outId >= 0 && outId < (int) src->outputInfos.size() && src->outputInfos[outId]
-			        && src->outputInfos[outId]->getName().find("9-16") != std::string::npos)
-				off = 8;
-			for (int t = 0; t < TRACKS; t++) {
-				size_t pos = (size_t) (off + t) * 4;
-				if (pos + 4 > all.size()) break;
-				// Printable ASCII only: the byte-wise 4-char slice could split a
-				// multi-byte UTF-8 character, and an invalid-UTF-8 name corrupts both
-				// the patch JSON (json_string() rejects it, silently shifting every
-				// later name) and session.json (which then fails to parse on reload,
-				// killing the whole clip restore).
-				std::string name;
-				for (size_t i = pos; i < pos + 4; i++) {
-					char ch = all[i];
-					if ((ch >= 0x21 && ch <= 0x7E) || (ch == ' ' && !name.empty()))
-						name += ch;
-				}
-				while (!name.empty() && name.back() == ' ') name.pop_back();
-				if (!name.empty()) lp->trackNames[t] = name;
-			}
-		}
-		json_decref(j);
-	}
 
 	void appendContextMenu(Menu* menu) override {
 		Looper* m = lp;
@@ -1275,10 +1437,6 @@ struct LooperWidget : ModuleWidget {
 		menu->addChild(createBoolMenuItem("Tempo change: re-pitch takes", "",
 			[m]() { return m->engine.repitch.load(std::memory_order_relaxed); },
 			[m](bool v) { m->engine.repitch.store(v, std::memory_order_relaxed); }));
-		// While on, the MixMaster feeding MULTI names our tracks (overwriting local
-		// renames — that's what following means). The widget sweep does the copying.
-		menu->addChild(createBoolPtrMenuItem("Track names: follow the mixer", "",
-			&m->followMixerNames));
 		menu->addChild(createMenuItem("Clear all slots", "", [m]() {
 			for (int t = 0; t < TRACKS; t++)
 				for (int s = 0; s < SLOTS; s++)
@@ -1301,6 +1459,18 @@ struct LooperWidget : ModuleWidget {
 		menu->addChild(createMenuItem("Open this session's folder", "", [cur]() {
 			if (!cur.empty()) system::openDirectory(cur);
 		}, cur.empty()));
+		// Start a fresh jam folder on demand (a restored session otherwise keeps its
+		// folder forever). "Keep loops" carries the grid into the new folder; both
+		// leave the old folder's files untouched.
+		menu->addChild(createMenuItem("New session (keep loops)", "", [m]() {
+			m->newSession(true);
+		}));
+		menu->addChild(createMenuItem("New session (clear grid)", "", [m]() {
+			m->newSession(false);
+		}));
+		// Export the whole jam (our loops + every player's intervals) as an Ableton Live
+		// Set. Pick the jam folder (defaults to the current one); writes <folder>/<name>.als.
+		// (.als export lives on the Recorder module now — one owner for jam export.)
 		// Snapshot the live grid into the .vcv on save, so a shared patch (or one whose
 		// jams folder is gone) reloads with its loops. The session folder stays canonical.
 		menu->addChild(createBoolPtrMenuItem("Embed takes in patch", "", &m->embedTakes));

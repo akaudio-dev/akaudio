@@ -13,8 +13,12 @@
 #include "plugin.hpp"
 #include "Theme.hpp"
 #include "RecorderLink.hpp"
+#include "JamExport.hpp"
 
 #include <osdialog.h>
+
+#include <atomic>
+#include <thread>
 
 namespace {
 
@@ -24,6 +28,28 @@ inline NVGcolor rcRed()     { return akTheme(nvgRGB(0xc0, 0x39, 0x2b), nvgRGB(0x
 inline NVGcolor rcWell()    { return akShade(akDark() ? 0x14 : 0x10); }
 inline NVGcolor rcCard()    { return akTheme(nvgRGB(0xd6, 0xd9, 0xdc), nvgRGB(0x2e, 0x31, 0x34)); }
 inline NVGcolor rcBorder()  { return akShade(akDark() ? 0x2e : 0x26); }
+
+// The auto-export runs on its own thread: exportJamAls scans every archived OGG and
+// gzips a multi-MB document — synchronous in step() it froze the whole Rack UI at the
+// moment recording stops. Self-contained (reads disk, logs) — it never touches the
+// module, so module removal mid-export is safe. One at a time.
+std::atomic<bool> alsExportBusy{false};
+void launchAutoExport(const std::string& jamRoot, bool liteMode) {
+	bool expected = false;
+	if (!alsExportBusy.compare_exchange_strong(expected, true)) {
+		WARN("akaudio: .als export already running, skipping %s", jamRoot.c_str());
+		return;
+	}
+	std::thread([jamRoot, liteMode]() {
+		std::string whyNot;
+		std::string out = akaudio::exportJamAls(jamRoot, liteMode, &whyNot);
+		if (!out.empty())
+			INFO("akaudio: exported Live set %s", out.c_str());
+		else
+			WARN("akaudio: auto .als export failed: %s", whyNot.c_str());
+		alsExportBusy.store(false);
+	}).detach();
+}
 
 } // namespace
 
@@ -39,6 +65,20 @@ struct Recorder : Module {
 	// The folder new session dirs are created in. Owned + persisted here; pushed to the
 	// adjacent Ninjam (which builds the dated session path) every UI step.
 	std::string sessionBase = akaudio::defaultJamsDir();
+	// The jam root of the current/most recent recording (<base>/<stamp>_<room>), cached
+	// while the archive runs — the link's session name is stamped fresh on every arm, and
+	// the Ninjam module may be gone by the time we want to export. Not persisted.
+	std::string lastJamRoot;
+	// Export the .als automatically when recording stops (menu-toggleable, persisted).
+	bool autoExportAls = true;
+	// Target Ableton Live edition for the export (persisted). Lite's 8-track cap gets
+	// the reduced flavor: 6 grid tracks + one merged players lane + TX, no clones.
+	bool liteExport = false;
+	// Auto-export fires this many wall-clock seconds after the disarm, so the Looper's
+	// worker can finish encoding the boundary take (frames would be display-rate-
+	// dependent). < 0 = no export pending.
+	double exportAt = -1.0;
+	bool prevActive = false;
 
 	Recorder() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -63,12 +103,18 @@ struct Recorder : Module {
 	json_t* dataToJson() override {
 		json_t* root = json_object();
 		json_object_set_new(root, "sessionBase", json_string(akaudio::collapseHome(sessionBase).c_str()));
+		json_object_set_new(root, "autoExportAls", json_boolean(autoExportAls));
+		json_object_set_new(root, "liteExport", json_boolean(liteExport));
 		return root;
 	}
 	void dataFromJson(json_t* root) override {
 		json_t* j = json_object_get(root, "sessionBase");
 		if (j && json_string_value(j) && *json_string_value(j))
 			sessionBase = akaudio::expandHome(json_string_value(j));
+		if (json_t* a = json_object_get(root, "autoExportAls"))
+			autoExportAls = json_is_true(a);
+		if (json_t* le = json_object_get(root, "liteExport"))
+			liteExport = json_is_true(le);
 		// REC never persists armed: a loaded patch must come up NOT recording (Rack
 		// restores the param before this runs, so force it back off here). The arm truth
 		// lives in Ninjam and defaults off anyway; this stops the reconcile re-arming it.
@@ -241,14 +287,64 @@ struct RecorderWidget : ModuleWidget {
 		reconcile(Recorder::REC_PARAM, rec->prevRec, lk && lk->recArmed(), &akaudio::RecorderLink::setRecArmed);
 		reconcile(Recorder::TX_PARAM, rec->prevTx, lk ? lk->recordOwnTx() : true, &akaudio::RecorderLink::setRecordOwnTx);
 		if (lk && lk->sessionBase() != rec->sessionBase) lk->setSessionBase(rec->sessionBase);
-		float b = (lk && lk->recActive()) ? 1.f : ((lk && lk->recArmed()) ? 0.35f : 0.f);
+		bool active = lk && lk->recActive();
+		float b = active ? 1.f : ((lk && lk->recArmed()) ? 0.35f : 0.f);
 		rec->lights[Recorder::REC_LIGHT].setBrightness(b);
+
+		// Auto-export the Live set when recording stops. The jam root is cached once at
+		// the arm edge (the folder name is stamped per arm and constant while recording;
+		// the Ninjam module may be detached by the time recording ends). The export
+		// waits a wall-clock grace so the Looper's worker can flush the disarm-boundary
+		// take — NjArchive::stop() already joined its writer, so index.jsonl is
+		// complete — and runs on its own thread (multi-MB build; step() must not stall).
+		if (active && !rec->prevActive) {
+			// Re-armed while an export was still pending: the finished jam's folder is
+			// complete, so export it NOW — before lastJamRoot is repointed below.
+			if (rec->exportAt >= 0.0 && !rec->lastJamRoot.empty())
+				launchAutoExport(rec->lastJamRoot, rec->liteExport);
+			rec->exportAt = -1.0;
+			rec->lastJamRoot = akaudio::expandHome(lk->sessionBase()) + "/" + lk->recSessionName();
+		}
+		if (rec->prevActive && !active && rec->autoExportAls && !rec->lastJamRoot.empty())
+			rec->exportAt = system::getTime() + 1.5;
+		rec->prevActive = active;
+		if (rec->exportAt >= 0.0 && system::getTime() >= rec->exportAt) {
+			rec->exportAt = -1.0;
+			launchAutoExport(rec->lastJamRoot, rec->liteExport);
+		}
 	}
 
 	void appendContextMenu(Menu* menu) override {
 		Recorder* m = getModule<Recorder>();
 		if (!m) return;
 		const akaudio::RecorderLink* lk = m->link();
+		menu->addChild(new MenuSeparator);
+		// Export works without Ninjam adjacent (it only reads the jam folder on disk) —
+		// a player can export an old jam without re-racking. Recording still needs Ninjam.
+		menu->addChild(createMenuItem("Export Ableton Live set (.als)\xe2\x80\xa6", "", [m]() {
+			std::string def = !m->lastJamRoot.empty() ? m->lastJamRoot : m->sessionBase;
+			char* pick = osdialog_file(OSDIALOG_OPEN_DIR, def.c_str(), NULL, NULL);
+			if (!pick) return;
+			std::string root = pick;
+			std::free(pick);
+			std::string whyNot;
+			std::string out = akaudio::exportJamAls(root, m->liteExport, &whyNot);
+			// No Finder/Explorer popup — a dialog names the file; the "Open jams
+			// folder" menu item exists for whoever wants the window.
+			if (!out.empty())
+				osdialog_message(OSDIALOG_INFO, OSDIALOG_OK,
+					("Exported:\n" + akaudio::collapseHome(out)).c_str());
+			else
+				osdialog_message(OSDIALOG_INFO, OSDIALOG_OK, whyNot.c_str());
+		}));
+		menu->addChild(createBoolPtrMenuItem("Export .als when recording stops", "", &m->autoExportAls));
+		// Target Live edition: Lite's 8-track cap gets the reduced flavor — 6 grid
+		// tracks, all players merged onto one lane (overlaps audio-mixed), TX on the
+		// 8th. Standard/Suite gets the full set (8 grid tracks + a track per player).
+		menu->addChild(createIndexSubmenuItem("Target Live edition",
+			{"Standard / Suite (full)", "Lite (8 tracks: 6 loops + players + TX)"},
+			[m]() { return m->liteExport ? 1 : 0; },
+			[m](int i) { m->liteExport = i == 1; }));
 		menu->addChild(new MenuSeparator);
 		if (!lk) {
 			menu->addChild(createMenuLabel("Place directly next to a Ninjam module"));
