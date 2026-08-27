@@ -137,8 +137,17 @@ private:
 	NjAudio audio;
 	NjArchive archive;                        // raw-interval wire archive (off-thread; no-op unless started)
 	// TX thread: accumulate each channel's uploaded bytes so a whole interval reaches
-	// the archive verbatim on its final chunk. TX thread only.
+	// the archive verbatim on its final chunk. TX thread only. `txArchWhole` marks
+	// channels whose current interval was archived from its BEGIN — an archive that
+	// starts mid-interval must skip to the next one, or its first row is a headerless
+	// mid-stream Ogg slice nothing can decode (found 2026-08-25 via Live's
+	// "could not be decoded using OggFLAC" on the first tx row).
 	std::vector<uint8_t> txAccum[NjAudio::MAX_TX];
+	bool txArchWhole[NjAudio::MAX_TX] = {};
+	// Archive generation at the interval's BEGIN: a disarm + re-arm mid-interval bumps
+	// the generation, so the final chunk refuses the gapped accumulation (chunks that
+	// arrived while stopped were skipped — the bytes are not a whole interval).
+	uint32_t txArchGen[NjAudio::MAX_TX] = {};
 	unsigned char txGuid[NjAudio::MAX_TX][16] = {}; // in-flight upload GUID per channel (TX thread only)
 	std::vector<std::string> txChannels;     // declared local broadcast channels (names)
 	bool txVoice = false;                     // declared channels are voice chat (guarded by txMutex)

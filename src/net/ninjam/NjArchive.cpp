@@ -76,6 +76,7 @@ void NjArchive::start(const std::string& sessionDir, bool recordTx) {
 	nIntervals.store(0, std::memory_order_relaxed);
 	nBytes.store(0, std::memory_order_relaxed);
 	abort_.store(false, std::memory_order_relaxed);
+	gen_.fetch_add(1, std::memory_order_acq_rel); // a new archive generation begins
 	run_.store(true, std::memory_order_release);
 	thread = std::thread(&NjArchive::run, this);
 	netLog("archive: started at " + dir_);

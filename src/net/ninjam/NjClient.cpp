@@ -124,6 +124,12 @@ void NjClient::sendUploadBegin(int chidx) {
 	if (chidx < 0 || chidx >= NjAudio::MAX_TX)
 		return;
 	makeGuid(txGuid[chidx]);
+	// A new interval stream starts here (Ogg headers ride the first WRITE): only from
+	// this point can the archive capture the interval whole — and only while the SAME
+	// archive generation runs (a disarm + re-arm mid-interval skips this interval).
+	txArchWhole[chidx] = archive.running();
+	txArchGen[chidx] = archive.generation();
+	txAccum[chidx].clear();
 	sendAll(buildUploadBegin(txGuid[chidx], FOURCC_OGG, chidx, 0));
 }
 
@@ -131,7 +137,12 @@ void NjClient::sendUploadData(int chidx, const uint8_t* data, size_t len, bool l
 	if (chidx < 0 || chidx >= NjAudio::MAX_TX)
 		return;
 	// Archive our own transmitted interval verbatim (TX thread; no-op unless recording).
-	if (archive.running()) {
+	// Gated on txArchWhole + the archive generation: an interval whose BEGIN predates
+	// the archive is skipped (its header pages never reached us), and one that spans a
+	// disarm + re-arm is skipped too (mid-interval chunks were dropped — the
+	// accumulation has a hole and would be undecodable).
+	if (archive.running() && txArchWhole[chidx]
+	        && txArchGen[chidx] == archive.generation()) {
 		if (data && len)
 			txAccum[chidx].insert(txAccum[chidx].end(), data, data + len);
 		if (last) {

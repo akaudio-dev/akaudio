@@ -43,6 +43,11 @@ public:
 	void start(const std::string& sessionDir, bool recordTx);
 	void stop();
 	bool running() const { return run_.load(std::memory_order_acquire); }
+	// Bumped on every start(): lets a producer detect that "the archive" it began an
+	// interval under is not the one running at the interval's end (a disarm + re-arm
+	// within one interval must NOT archive the gapped accumulation — chunks written
+	// while stopped were skipped). Any thread.
+	uint32_t generation() const { return gen_.load(std::memory_order_acquire); }
 	// By-value is deliberate: dir_ is reassigned by a restart, so a caller-held
 	// reference could dangle.
 	// cppcheck-suppress returnByReference
@@ -82,6 +87,7 @@ private:
 	std::string dir_;
 	std::atomic<bool> recordTx_{false};
 	std::atomic<bool> run_{false};
+	std::atomic<uint32_t> gen_{0};
 	std::atomic<bool> abort_{false};
 	std::atomic<uint64_t> sessionFrame{0};
 	std::atomic<long> nIntervals{0};
