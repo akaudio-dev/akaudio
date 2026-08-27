@@ -9,3 +9,5 @@
 # Local static-analysis artifacts (bear + clangd; see tools/clang_tidy.sh)
 /compile_commands.json
 /.cache
+
+.fakeIcon

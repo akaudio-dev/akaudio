@@ -150,6 +150,9 @@ unittest: $(UT_OGG_OBJ)
 	rm -rf build/archive_test_out
 	$(CXX) -std=c++11 -O1 -I src test/archive_test.cpp src/net/ninjam/NjArchive.cpp \
 	  src/net/Log.cpp -lpthread -o build/archive_test && build/archive_test build/archive_test_out
+	rm -rf build/als_export_out
+	$(CXX) -std=c++11 -O1 -I src test/als_export_test.cpp src/looper/AlsExport.cpp \
+	  -o build/als_export_test && build/als_export_test
 
 .PHONY: leakcheck
 leakcheck: all
