@@ -35,6 +35,18 @@ public:
 	// manifest (a new jam); directories are created lazily on the first real write, so an
 	// empty session leaves nothing on disk. "" disables writing.
 	void setDir(const std::string& looperDir);
+	// Carry the whole session into a new folder (the adoption move): live take files
+	// are byte-copied old→new and the manifest rewritten there, rows kept as-is —
+	// including takes whose grid doesn't match the live one (they grey + re-derive on
+	// load, exactly like a restore; a RAM re-save can't do this, and derived tiles
+	// have no files of their own — the originals are what travel). The old folder
+	// keeps everything; events continue in the new folder's log.
+	// `retireSource`: after the worker's byte-copies all verify, delete the source's
+	// live files + manifest + events log and remove its (then-empty) folders — move
+	// semantics for a same-run own `_session` folder that would otherwise linger as a
+	// full duplicate. history/ (if any) is never touched, which simply keeps the
+	// folder alive. Any copy failure cancels the retirement.
+	void migrateTo(const std::string& newLooperDir, bool retireSource = false);
 	void setRoom(const std::string& room);
 	void setTrackName(int track, const std::string& name);
 	// Reflect a late repeats/decay/follow edit into the manifest. Works for take-less
@@ -68,6 +80,10 @@ public:
 	void clear(int track, int slot) override;
 	void flush() override;
 	bool nextLoad(int& track, int& slot, std::vector<float>& pcm, int& frames, TakeMeta& meta) override;
+	// Performance event → one appended line in <dir>/events.jsonl (the as-played
+	// timeline, docs §12). Events arriving before setDir buffer (bounded) and flush to
+	// the folder once it is known.
+	void event(const LoopEvent& ev) override;
 
 	// Encode quality (VBR), archive-grade by default (~250 kbps). UI thread.
 	void setQuality(float q) { quality_ = q; }
@@ -86,6 +102,8 @@ private:
 	};
 
 	void writeManifestLocked();
+	void appendEventLocked(const LoopEvent& ev); // mu_ held; dir_ non-empty
+	void flushPendingEventsLocked();             // mu_ held
 
 	struct LoadReq { int track, slot; std::string path; TakeMeta meta; };
 	std::mutex loadMu_;
@@ -104,6 +122,13 @@ private:
 	int serial_ = 1;                             // OGG stream serial (varies per file)
 	long histSeq_ = 0;                           // uniquifies history filenames within a second
 	float quality_ = 0.8f;
+	std::vector<LoopEvent> pendingEvents_;       // events before setDir (bounded, drop-oldest)
+	// Migration byte-copies deferred to the worker (drained by flush(), skip-if-exists).
+	std::vector<std::pair<std::string, std::string>> pendingCopies_;
+	// Move-semantics retirement: files to delete + the dir to remove once the copies
+	// above all verified (cleared on any copy failure).
+	std::vector<std::string> retireFiles_;
+	std::string retireDir_;
 };
 
 } // namespace looper

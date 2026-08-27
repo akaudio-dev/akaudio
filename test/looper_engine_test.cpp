@@ -59,6 +59,13 @@ struct MockSink : LooperSink {
 	int nSaves() { std::lock_guard<std::mutex> lk(m); return saves; }
 	int nClears() { std::lock_guard<std::mutex> lk(m); return clears; }
 	int nBad() { std::lock_guard<std::mutex> lk(m); return bad; }
+	// Performance events (the as-played log), in arrival order.
+	std::vector<LoopEvent> events;
+	void event(const LoopEvent& ev) override {
+		std::lock_guard<std::mutex> lk(m);
+		events.push_back(ev);
+	}
+	std::vector<LoopEvent> evs() { std::lock_guard<std::mutex> lk(m); return events; }
 };
 
 static const int N = 4800;       // 0.1 s @ 48k
@@ -693,303 +700,230 @@ int main() {
 		v.eng.stop();
 	}
 
-	// ---- A follow whose target was chain-armed THIS boundary must not hijack the
-	// recording: the finished clip stops, the chain keeps rolling. ----
+	// ---- Any press disarms the rolling recording (chain included); committed chain
+	// cells keep their takes. (The old follow-vs-chain-armed hijack scenario is no
+	// longer constructible: one-queued-action-per-track means a capture and a launch
+	// can't be co-armed — the :597 refusal guard remains as pure defense.) ----
 	{
 		Sim h;
 		h.eng.autoAdvance.store(true);
 		h.eng.declickEnabled.store(false);
 		h.eng.start();
-		h.interval(0); // warm-up
-		// A clip in slot 7 to launch during the chain (quiet tail: no chain of its own).
-		h.interval(-1, true, [&](int f) { if (f == 10) h.eng.pressSlot(0, 7, false); });
-		h.quietFrom = h.n / 2;
-		h.interval(9);
-		h.quietFrom = -1;
-		h.interval(-1);
-		CHECK(h.slot(7).state.load() == PLAYING, "hijack: slot 7 captured");
-		h.eng.stopTrack(0);
-		h.interval(-1);
-		h.slot(7).repeats.store(1);
-		h.slot(7).followSlot.store(4); // → slot index 3: will be RECORDING when this fires
-		// Chain: capture slot 0 → rolls 0→1→2→3...
+		h.interval(0); // warmup
+		// Capture slot 0 with a hot-to-the-end signal: the chain rolls 0 → 1 → 2…
 		h.interval(-1, true, [&](int f) { if (f == 10) h.eng.pressSlot(0, 0, false); });
-		h.interval(1); // records slot 0 (hot)
-		h.interval(2, true, [&](int f) { if (f == 10) h.eng.pressSlot(0, 7, false); }); // slot 1 records; launch 7
-		h.interval(3); // slot 7 plays its single pass; slot 2 records
-		CHECK(h.slot(7).state.load() == PLAYING, "hijack: launched clip plays during the chain");
-		h.interval(4); // boundary: slot 2 commits + arms slot 3; slot 7's follow → slot 3 must be refused
-		CHECK(h.slot(3).state.load() == RECORDING, "hijack: the chain-armed cell keeps recording");
-		CHECK(h.slot(7).state.load() == FILLED, "hijack: the finished clip stopped instead");
-		h.interval(-1); // slot 3 commits (hot) → chain continues; then let it die out
-		h.interval(-1);
+		h.interval(1); // records slot 0
+		h.interval(2); // commits 0 (hot tail) → arms slot 1
+		h.interval(3); // commits 1 → arms slot 2
+		CHECK(h.slot(0).state.load() == FILLED && h.slot(1).state.load() == FILLED
+			&& h.slot(2).state.load() == RECORDING, "chain: rolling down the column");
+		// Press the FILLED slot 0 mid-interval: the launch queues AND the chain's
+		// armed cell disarms immediately; committed cells stay.
+		// (This interval's boundary committed slot 2 and armed slot 3.)
+		bool cancelled = false;
+		h.interval(4, true, [&](int f) {
+			if (f == 100) h.eng.pressSlot(0, 0, false);
+			if (f == 200) cancelled = h.slot(3).state.load() == EMPTY
+			                          && h.slot(2).state.load() == FILLED;
+		});
+		CHECK(cancelled, "press during chain disarms the rolling recording at once");
+		CHECK(h.slot(0).pending.load() == LAUNCH || h.slot(0).state.load() == PLAYING,
+			"the pressed cell is armed to launch");
+		h.interval(-1); // the queued launch commits
+		CHECK(h.slot(0).state.load() == PLAYING, "the pressed clip launched at the boundary");
+		CHECK(h.slot(1).state.load() == FILLED && h.slot(1).take.buf,
+			"already-committed chain cells keep their takes");
 		h.eng.stop();
 	}
 
-	// ---- Pickup capture (press → downbeat): what the player performs between arming a
-	// capture and the downbeat folds into the take's TAIL (a loop is circular — the
-	// pickup replays right before each repeat's downbeat), so early hits and lead-in
-	// phrases survive. The auto-advance tail gate judges the raw take, not the fold. ----
+	// ---- Performance events: the as-played log (docs §12) ----
 	{
-		Sim p;
-		p.eng.declickEnabled.store(false);
-		p.eng.start();
-		p.interval(0); // warm-up
-		const int armF = p.n - 600; // press 600 frames before the downbeat
-		// pressSlot stamps the frame recorded by the PREVIOUS tick, so the window
-		// opens one frame before the press callback's frame.
-		const int from = armF - 1;
-		const int fadeF = 72; // = declickN at 48 kHz (sr * 0.0015)
-		p.interval(9, true, [&](int f) { if (f == armF) p.eng.pressSlot(0, 0, false); });
-		p.interval(1);  // the take interval records sig 1
-		p.interval(-1); // boundary commits; this interval plays the take
-		CHECK(p.slot(0).state.load() == PLAYING, "pickup: take plays");
-		{
-			bool ok = true;
-			for (int f = 0; f < p.n && ok; f++) {
-				float fg = f < from ? 0.f : (f - from < fadeF ? (float) (f - from + 1) / (float) fadeF : 1.f);
-				float el = Sim::sig(1, f) + Sim::sig(9, f) * fg;
-				if (std::fabs(p.outL[f] - el) > 1e-5f || std::fabs(p.outR[f] + el) > 1e-5f) {
-					std::printf("   pickup mismatch at %d: got %.6f want %.6f\n", f, p.outL[f], el);
-					ok = false;
-				}
-			}
-			CHECK(ok, "pickup: post-press audio in the tail, body untouched, faded-in fold");
-		}
-		// A folded lead-in must not read as "played through the downbeat": with
-		// auto-advance on and a quiet raw tail, no chain starts.
-		p.eng.autoAdvance.store(true);
-		p.eng.stopTrack(0);
-		p.interval(-1);
-		p.interval(9, true, [&](int f) { if (f == armF) p.eng.pressSlot(0, 1, false); });
-		p.quietFrom = p.n / 2;
-		p.interval(2);  // take: hot first half, silent raw tail
-		p.quietFrom = -1;
-		p.interval(-1);
-		CHECK(p.slot(1).state.load() == PLAYING, "pickup + quiet tail: loops immediately (fold doesn't trigger the chain)");
-		CHECK(p.slot(2).state.load() == EMPTY, "pickup + quiet tail: nothing chained");
+		Sim e;
+		MockSink es;
+		e.eng.setSink(&es);
+		e.eng.start();
+		auto last = [&](int back = 0) {
+			auto v = es.evs();
+			return v[v.size() - 1 - (size_t) back];
+		};
+		e.interval(-1); // warmup: buffer allocation
+		CHECK(es.evs().empty(), "events: nothing before any commit");
 
-		// The OVERDUB latch suppresses auto-advance: playing through the downbeat
-		// overdubs the committed cell instead of chaining to the next.
-		p.eng.overdubMode.store(true);
-		p.eng.overdubSel.store(2); // in Rack the press selects the cell; mirror that here
-		p.interval(-1, true, [&](int f) { if (f == 10) p.eng.pressSlot(0, 2, true); });
-		p.interval(3); // hot to the last frame — would chain without the latch
-		p.interval(-1);
-		CHECK(p.slot(2).state.load() == PLAYING, "overdub latch: capture plays instead of chaining");
-		CHECK(p.slot(3).state.load() == EMPTY, "overdub latch: nothing chained to the next cell");
-		CHECK(p.slot(2).overdubbing.load(), "overdub latch: the committed cell is the overdub target");
-		p.eng.overdubMode.store(false);
-		p.eng.overdubSel.store(-1);
-		p.interval(-1);
-		p.eng.stop();
+		// Capture: press → records the next interval → commits + starts playing.
+		e.interval(1, true, [&](int f) { if (f == 100) e.eng.pressSlot(0, 0, false); });
+		e.interval(1);
+		uint64_t sfCommit = e.session; // boundary sf of the next interval() call
+		e.interval(-1);
+		Sim::nap();
+		{
+			auto v = es.evs();
+			CHECK(v.size() == 1, "events: capture commit emitted one event (got %zu)", v.size());
+			const LoopEvent& ev = last();
+			CHECK(ev.start && ev.track == 0 && ev.slot == 0 && ev.reason == LoopEvent::R_CAPTURE,
+				"events: capture START on (0,0), reason capture");
+			CHECK(ev.sessionFrame == sfCommit, "events: START stamped at the commit boundary (got %llu want %llu)",
+				(unsigned long long) ev.sessionFrame, (unsigned long long) sfCommit);
+			CHECK(ev.takeStartFrame == sfCommit - (uint64_t) e.n,
+				"events: take identity = the recorded interval's start");
+			CHECK(!ev.rest && ev.bpm == e.bpm && ev.bpi == e.bpi, "events: grid stamped");
+		}
+
+		// Capture steal: recording another slot stops the playing one at the arm boundary.
+		e.interval(1, true, [&](int f) { if (f == 10) e.eng.pressSlot(0, 1, false); });
+		uint64_t sfSteal = e.session;
+		e.interval(2);
+		uint64_t sfCommit1 = e.session;
+		e.interval(-1);
+		Sim::nap();
+		{
+			auto v = es.evs();
+			CHECK(v.size() == 3, "events: steal STOP + commit START (got %zu)", v.size());
+			CHECK(!last(1).start && last(1).slot == 0 && last(1).reason == LoopEvent::R_STEAL
+				&& last(1).sessionFrame == sfSteal, "events: capture stole the track at the arm boundary");
+			CHECK(last().start && last().slot == 1 && last().reason == LoopEvent::R_CAPTURE
+				&& last().sessionFrame == sfCommit1, "events: new take's START at its commit");
+		}
+
+		// Launch replaces: slot 0 launches, slot 1 stops — same boundary frame.
+		uint64_t sfLaunch = e.session + (uint64_t) e.n; // press this interval, commits next boundary
+		e.interval(-1, true, [&](int f) { if (f == 10) e.eng.pressSlot(0, 0, false); });
+		e.interval(-1);
+		Sim::nap();
+		{
+			auto v = es.evs();
+			CHECK(v.size() == 5, "events: launch = STOP + START (got %zu)", v.size());
+			CHECK(!last(1).start && last(1).slot == 1 && last(1).reason == LoopEvent::R_REPLACED,
+				"events: playing slot replaced");
+			CHECK(last().start && last().slot == 0 && last().reason == LoopEvent::R_LAUNCH,
+				"events: launch START");
+			CHECK(last().sessionFrame == last(1).sessionFrame && last().sessionFrame == sfLaunch,
+				"events: replace pair shares the boundary frame");
+			CHECK(last().takeStartFrame == sfCommit - (uint64_t) e.n,
+				"events: relaunch carries the original take identity");
+		}
+
+		// Stop button.
+		e.interval(-1, true, [&](int f) { if (f == 10) e.eng.pressSlot(0, 0, false); });
+		e.interval(-1);
+		Sim::nap();
+		CHECK(!last().start && last().slot == 0 && last().reason == LoopEvent::R_STOP,
+			"events: STOP commit logged");
+
+		// Follow to a rest cell, then the rest exhausts: START(rest) then STOP(exhausted).
+		e.slot(0).repeats.store(1);
+		e.slot(0).followSlot.store(3); // slot index 2 — EMPTY: a rest step
+		e.slot(2).repeats.store(1);
+		e.interval(-1, true, [&](int f) { if (f == 10) e.eng.pressSlot(0, 0, false); });
+		e.interval(-1); // launch commits; plays its 1 repeat
+		e.interval(-1); // exhausted → follow to the rest cell
+		e.interval(-1); // rest exhausts → stop
+		Sim::nap();
+		{
+			auto v = es.evs();
+			bool sawRestStart = false, sawRestStop = false;
+			for (const LoopEvent& ev : v) {
+				if (ev.slot == 2 && ev.start && ev.rest && ev.reason == LoopEvent::R_FOLLOW)
+					sawRestStart = true;
+				if (ev.slot == 2 && !ev.start && ev.rest && ev.reason == LoopEvent::R_EXHAUSTED)
+					sawRestStop = true;
+			}
+			CHECK(sawRestStart, "events: follow into a rest cell logged (rest START)");
+			CHECK(sawRestStop, "events: rest exhaustion logged (rest STOP)");
+		}
+		e.slot(0).repeats.store(0);
+		e.slot(0).followSlot.store(0);
+		e.slot(2).repeats.store(0);
+
+		// Self-retrigger (follow → itself): the span continues, no events.
+		e.slot(0).repeats.store(1);
+		e.slot(0).followSlot.store(1); // itself
+		e.interval(-1, true, [&](int f) { if (f == 10) e.eng.pressSlot(0, 0, false); });
+		e.interval(-1);
+		Sim::nap();
+		size_t nBeforeRetrig = es.evs().size();
+		e.interval(-1); // exhausts + follows to itself
+		e.interval(-1);
+		Sim::nap();
+		CHECK(es.evs().size() == nBeforeRetrig, "events: self-retrigger emits nothing (span continues)");
+		e.slot(0).repeats.store(0);
+		e.slot(0).followSlot.store(0);
+
+		// Clear the playing cell mid-interval: STOP stamped with the current frame.
+		size_t nBeforeClear = es.evs().size();
+		e.interval(-1, true, [&](int f) { if (f == 137) e.eng.requestClear(0, 0); });
+		Sim::nap();
+		{
+			auto v = es.evs();
+			CHECK(v.size() == nBeforeClear + 1, "events: clear logged one STOP (got %zu, had %zu)",
+				v.size(), nBeforeClear);
+			CHECK(!last().start && last().reason == LoopEvent::R_CLEAR
+				&& last().sessionFrame % (uint64_t) e.n != 0,
+				"events: clear STOP stamped mid-interval (sf %llu)", (unsigned long long) last().sessionFrame);
+		}
+
+		// Session adoption: CARRY_SPANS re-opens the playing cells' spans in the new
+		// events log (files/rows travel via Session::migrateTo, not the engine — no
+		// re-encodes are enqueued).
+		e.interval(-1, true, [&](int f) { if (f == 10) e.eng.pressSlot(0, 1, false); });
+		e.interval(-1); // slot 1 (the earlier capture) launches
+		Sim::nap();
+		int savesBefore = es.nSaves();
+		size_t evBefore = es.evs().size();
+		e.eng.requestCarrySpans();
+		e.interval(-1);
+		Sim::nap();
+		CHECK(es.nSaves() == savesBefore, "carry: no re-encodes enqueued (%d)", es.nSaves());
+		{
+			auto v = es.evs();
+			CHECK(v.size() == evBefore + 1 && v.back().start && v.back().slot == 1
+				&& v.back().reason == LoopEvent::R_CARRY,
+				"carry: the playing span re-opens with reason carry");
+		}
+		// CLEAR_ALL: the whole grid as one intent (a 64-cell burst of singles would
+		// overflow the 63-slot queue and silently keep one cell).
+		e.interval(-1, true, [&](int f) { if (f == 10) e.eng.pressSlot(0, 1, false); });
+		e.interval(-1); // slot 1 playing again; slot 0 was cleared earlier
+		int clearsBefore = es.nClears();
+		e.eng.requestClearAll();
+		e.interval(-1);
+		Sim::nap();
+		bool allEmpty = true;
+		for (int sl2 = 0; sl2 < 8; sl2++)
+			if (e.slot(sl2).state.load() != EMPTY) allEmpty = false;
+		CHECK(allEmpty, "clear-all: every cell on the track is EMPTY");
+		CHECK(es.nClears() > clearsBefore, "clear-all: file retirements reached the sink");
+		e.eng.stop();
 	}
 
-	// ---- BPI conversion: doubling tiles the take ×2; halving splits it into two
-	// ×1-chained halves. Derivations are RAM-only, guarded, and never re-derived. ----
+	// ---- One queued action per instrument: the latest press wins ----
 	{
-		Sim b;
-		b.eng.declickEnabled.store(false);
-		b.eng.start();
-		b.interval(0); // warm-up at bpi 4 / n 4800
-		Slot& s0 = b.slot(0);
-		// Capture sig 1 at bpi 4.
-		b.interval(-1, true, [&](int f) { if (f == 10) b.eng.pressSlot(0, 0, false); });
-		b.interval(1);
-		b.interval(-1);
-		CHECK(s0.state.load() == PLAYING, "bpi: base take captured");
-		b.eng.stopTrack(0);
-		b.interval(-1);
-
-		// Double the BPI (4 → 8, same BPM): the take tiles to fill the new interval.
-		b.bpi = 8; b.n = 9600; b.gen = 2; b.frame = 0;
-		b.interval(-1); // regrid → convert → install (worker runs during the naps)
-		CHECK(s0.state.load() == FILLED && s0.playable.load(), "tile: converted take is playable");
-		CHECK(s0.take.frames == 9600, "tile: take now spans the doubled interval (got %d)", s0.take.frames);
-		CHECK(s0.derived.load(), "tile: converted take is marked derived");
-		b.interval(-1, true, [&](int f) { if (f == 10) b.eng.pressSlot(0, 0, false); });
-		b.interval(-1);
-		{
-			bool ok = true;
-			for (int f = 0; f < b.n && ok; f++) {
-				float el = Sim::sig(1, f % 4800);
-				if (std::fabs(b.outL[f] - el) > 1e-6f || std::fabs(b.outR[f] + el) > 1e-6f) {
-					std::printf("   tile mismatch at %d: got %.6f want %.6f\n", f, b.outL[f], el);
-					ok = false;
-				}
-			}
-			CHECK(ok, "tile: playback is the take twice, sample-exact");
-		}
-		b.eng.stopTrack(0);
-		b.interval(-1);
-
-		// Capture sig 2 at bpi 8 into slot 2, then halve the BPI (8 → 4): the take
-		// splits into two ×1-chained halves; the tile-derived slot 0 must NOT be
-		// re-derived (derivations grey out on further changes).
-		b.interval(-1, true, [&](int f) { if (f == 10) b.eng.pressSlot(0, 2, false); });
-		b.interval(2);
-		b.interval(-1);
-		CHECK(b.slot(2).state.load() == PLAYING, "bpi: 8-beat take captured");
-		b.eng.stopTrack(0);
-		b.interval(-1);
-		b.bpi = 4; b.n = 4800; b.gen = 3; b.frame = 0;
-		b.interval(-1); // regrid → split installs
-		CHECK(!s0.playable.load() && s0.derived.load(), "split: tile-derived cell greys, not re-derived");
-		CHECK(b.slot(2).playable.load() && b.slot(2).take.frames == 4800, "split: first half fits the grid");
-		CHECK(b.slot(3).state.load() == FILLED && b.slot(3).take.frames == 4800, "split: second half landed below");
-		CHECK(b.slot(2).repeats.load() == 1 && b.slot(2).followSlot.load() == 4,
-			"split: first half wired to the second");
-		CHECK(b.slot(3).repeats.load() == 1 && b.slot(3).followSlot.load() == 3,
-			"split: endless original becomes an A-B cycle");
-		CHECK(b.slot(2).derived.load() && b.slot(3).derived.load(), "split: both halves marked derived");
-		b.interval(-1, true, [&](int f) { if (f == 10) b.eng.pressSlot(0, 2, false); });
-		b.interval(-1);
-		CHECK(b.outputIs(2), "split replay: interval 1 = the first half");
-		b.interval(-1);
-		{
-			bool ok = true;
-			for (int f = 0; f < b.n && ok; f++) {
-				float el = Sim::sig(2, 4800 + f);
-				if (std::fabs(b.outL[f] - el) > 1e-6f || std::fabs(b.outR[f] + el) > 1e-6f) {
-					std::printf("   split mismatch at %d: got %.6f want %.6f\n", f, b.outL[f], el);
-					ok = false;
-				}
-			}
-			CHECK(ok, "split replay: interval 2 = the second half, sample-exact");
-		}
-		b.interval(-1);
-		CHECK(b.outputIs(2), "split replay: interval 3 cycles back to the first half");
-		b.eng.stopTrack(0);
-		b.interval(-1);
-
-		// An occupied next slot blocks a split (the take stays grey) while its
-		// neighbor with a free slot below still splits.
-		b.bpi = 8; b.n = 9600; b.gen = 4; b.frame = 0;
-		b.interval(-1); // regrid: everything greys (all derived or mismatched)
-		b.interval(-1, true, [&](int f) { if (f == 10) b.eng.pressSlot(0, 5, false); });
-		b.interval(3);
-		b.interval(-1, true, [&](int f) { if (f == 10) b.eng.pressSlot(0, 6, false); });
-		b.interval(4);
-		b.interval(-1);
-		CHECK(b.slot(5).state.load() == FILLED && b.slot(6).state.load() == PLAYING,
-			"bpi: two adjacent 8-beat takes captured");
-		b.eng.stopTrack(0);
-		b.interval(-1);
-		b.bpi = 4; b.n = 4800; b.gen = 5; b.frame = 0;
-		b.interval(-1); // regrid: slot 5 blocked (6 occupied); slot 6 splits into 6+7
-		CHECK(!b.slot(5).playable.load() && !b.slot(5).derived.load(),
-			"split: occupied next slot leaves the take grey (and underived)");
-		CHECK(b.slot(6).playable.load() && b.slot(7).state.load() == FILLED,
-			"split: the neighbor with a free slot below split fine");
-		b.eng.stop();
-	}
-
-	// ---- BPM conversion (varispeed): a tempo change within 0.5×–2× re-pitches takes;
-	// bigger jumps and the toggle-off case grey them out instead. ----
-	{
-		Sim r;
-		r.eng.declickEnabled.store(false);
-		r.eng.start();
-		r.interval(0); // warm-up (bpm 120, bpi 4, n 4800)
-		Slot& s0 = r.slot(0);
-		// Capture one interval of a 440 Hz sine (arm interval silent — a sine there
-		// would be folded into the take's tail by pickup capture, doubling it).
-		r.interval(-1, true, [&](int f) { if (f == 10) r.eng.pressSlot(0, 0, false); });
-		r.sineHz = 440;
-		r.interval(1); // the recorded interval (input = the sine)
-		r.sineHz = -1;
-		r.interval(-1);
-		CHECK(s0.state.load() == PLAYING, "varispeed: sine take captured");
-		r.eng.stopTrack(0);
-		r.interval(-1);
-
-		// BPM 120 → 96 (ratio 0.8): the take resamples to the longer interval and the
-		// sine drops to 440·0.8 = 352 Hz.
-		r.bpm = 96; r.n = 6000; r.gen = 2; r.frame = 0;
-		r.interval(-1); // regrid → varispeed install
-		CHECK(s0.playable.load() && s0.take.frames == 6000 && s0.derived.load(),
-			"varispeed: take re-derived at the new tempo (frames %d)", s0.take.frames);
-		r.interval(-1, true, [&](int f) { if (f == 10) r.eng.pressSlot(0, 0, false); });
-		r.interval(-1);
-		{
-			bool ok = true;
-			for (int f = 64; f < r.n - 64 && ok; f++) {
-				double pos = (f + 0.5) * 0.8 - 0.5; // resampler's source mapping
-				float el = 0.3f * (float) std::sin(2.0 * M_PI * 440.0 * pos / SR);
-				if (std::fabs(r.outL[f] - el) > 0.02f) {
-					std::printf("   varispeed mismatch at %d: got %.4f want %.4f\n", f, r.outL[f], el);
-					ok = false;
-				}
-			}
-			CHECK(ok, "varispeed: playback is the sine re-pitched by the tempo ratio");
-		}
-		r.eng.stopTrack(0);
-		r.interval(-1);
-
-		// Combined BPM + BPI change: capture at (96, 4), then (120, 8) — the take
-		// resamples 1.25× faster AND tiles ×2 into the doubled interval.
-		r.interval(-1, true, [&](int f) { if (f == 10) r.eng.pressSlot(0, 2, false); });
-		r.sineHz = 440;
-		r.interval(1);
-		r.sineHz = -1;
-		r.interval(-1);
-		CHECK(r.slot(2).state.load() == PLAYING, "combined: take captured at 96 BPM");
-		r.eng.stopTrack(0);
-		r.interval(-1);
-		r.bpm = 120; r.bpi = 8; r.n = 9600; r.gen = 3; r.frame = 0;
-		r.interval(-1);
-		CHECK(r.slot(2).playable.load() && r.slot(2).take.frames == 9600 && r.slot(2).derived.load(),
-			"combined: resampled + tiled take fits the new grid");
-		r.interval(-1, true, [&](int f) { if (f == 10) r.eng.pressSlot(0, 2, false); });
-		r.interval(-1);
-		{
-			bool ok = true;
-			for (int f = 64; f < 4800 - 64 && ok; f++) {
-				double pos = (f + 0.5) * 1.25 - 0.5;
-				float el = 0.3f * (float) std::sin(2.0 * M_PI * 440.0 * pos / SR);
-				if (std::fabs(r.outL[f] - el) > 0.02f) {
-					std::printf("   combined mismatch at %d: got %.4f want %.4f\n", f, r.outL[f], el);
-					ok = false;
-				}
-				if (std::fabs(r.outL[f] - r.outL[f + 4800]) > 1e-6f) {
-					std::printf("   combined tile mismatch at %d\n", f);
-					ok = false;
-				}
-			}
-			CHECK(ok, "combined: first half is the re-pitched sine, second half tiles it exactly");
-		}
-		r.eng.stopTrack(0);
-		r.interval(-1);
-
-		// Bounds + toggle need a REAL (underived) take — derived cells never re-derive.
-		// Capture a fresh one at the current grid (120 BPM, 8 BPI).
-		r.interval(-1, true, [&](int f) { if (f == 10) r.eng.pressSlot(0, 4, false); });
-		r.sineHz = 440;
-		r.interval(1);
-		r.sineHz = -1;
-		r.interval(-1);
-		CHECK(r.slot(4).state.load() == PLAYING, "bounds: fresh take captured");
-		r.eng.stopTrack(0);
-		r.interval(-1);
-
-		// Beyond 2× the take stays grey (still underived, so a sane tempo later works).
-		r.bpm = 480; r.n = 2400; r.gen = 4; r.frame = 0;
-		r.interval(-1);
-		CHECK(!r.slot(4).playable.load() && !r.slot(4).derived.load(),
-			"varispeed: a 4x jump is out of bounds — take stays grey");
-
-		// Toggle off: even an in-bounds tempo change greys; re-enabling converts on
-		// the next regrid (a tempo wiggle / rejoin rescans the grid).
-		r.eng.repitch.store(false);
-		r.bpm = 240; r.n = 4800; r.gen = 5; r.frame = 0; // ratio 2 vs the (120,8) take
-		r.interval(-1);
-		CHECK(!r.slot(4).playable.load(), "repitch off: tempo change greys the take");
-		r.eng.repitch.store(true);
-		r.gen = 6; r.frame = 0;
-		r.interval(-1); // same grid, new generation → rescan converts now
-		CHECK(r.slot(4).playable.load() && r.slot(4).take.frames == 4800 && r.slot(4).derived.load(),
-			"repitch back on: the next regrid re-derives");
-		r.eng.stop();
+		Sim q;
+		MockSink qs;
+		q.eng.setSink(&qs);
+		q.eng.start();
+		q.interval(-1); // warmup
+		// Two takes: capture slot 0, then slot 1 (the capture steals; both end FILLED).
+		q.interval(1, true, [&](int f) { if (f == 10) q.eng.pressSlot(0, 0, false); });
+		q.interval(1);
+		q.interval(2, true, [&](int f) { if (f == 10) q.eng.pressSlot(0, 1, false); });
+		q.interval(2);
+		q.interval(-1);
+		q.eng.stopTrack(0);
+		q.interval(-1);
+		CHECK(q.slot(0).state.load() == FILLED && q.slot(1).state.load() == FILLED,
+			"latest-wins: two takes parked");
+		// Queue launches on BOTH cells in one interval: the later press disarms the
+		// earlier cell's pending, and only the later cell plays at the boundary.
+		q.interval(-1, true, [&](int f) {
+			if (f == 10) q.eng.pressSlot(0, 1, false); // would win by slot order anyway…
+			if (f == 20) q.eng.pressSlot(0, 0, false); // …so press the LOWER slot last
+		});
+		CHECK(q.slot(1).pending.load() == NONE && q.slot(0).pending.load() == LAUNCH,
+			"latest-wins: only the last-pressed cell stays armed");
+		q.interval(-1);
+		CHECK(q.slot(0).state.load() == PLAYING && q.slot(1).state.load() == FILLED,
+			"latest-wins: the last-pressed cell plays, not the highest slot");
+		q.eng.stop();
 	}
 
 	std::printf("%s (%d failures)\n", fails ? "FAIL" : "PASS: LooperEngine", fails);

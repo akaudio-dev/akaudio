@@ -159,6 +159,12 @@ void LooperWorker::run() {
 					if (engine.sink)
 						engine.sink->clear(c.track, c.slot);
 					break;
+				case Cmd::EVENT:
+					// Performance event → events.jsonl. FIFO with SAVE means the take a
+					// START references has already reached the sink.
+					if (engine.sink)
+						engine.sink->event(c.ev);
+					break;
 				case Cmd::CONVERT: {
 					// Tempo conversion (BPI halved/doubled, and/or BPM changed within
 					// 0.5×–2×): derive grid-fitting takes. The source (c.a) is an
@@ -269,6 +275,8 @@ void LooperWorker::run() {
 			engine.sink->save(c.track, c.slot, c.a->pcm, c.meta);
 		else if (c.kind == Cmd::CLEAR_FILE && engine.sink)
 			engine.sink->clear(c.track, c.slot);
+		else if (c.kind == Cmd::EVENT && engine.sink)
+			engine.sink->event(c.ev);
 	}
 	if (engine.sink)
 		engine.sink->flush();

@@ -130,16 +130,50 @@ void LooperEngine::dropOverdub(Slot& sl) {
 	sl.odCatch = 0;
 }
 
-void LooperEngine::setPlaying(Track& tr, int s) {
+void LooperEngine::setPlaying(int t, int s, uint8_t reason) {
+	Track& tr = tracks[t];
 	int prev = tr.playingSlot.load(std::memory_order_relaxed);
 	if (prev >= 0 && prev != s)
-		demote(tr.slots[prev]);
+		demote(t, prev, LoopEvent::R_REPLACED);
 	Slot& sl = tr.slots[s];
+	// A self-retrigger (follow → itself, or launching the playing slot) restarts the
+	// repeat counter but the audible span continues — no STOP/START pair.
+	const bool retrigger = prev == s && sl.state.load(std::memory_order_relaxed) == PLAYING;
 	sl.state.store(PLAYING, std::memory_order_relaxed);
 	sl.repCount.store(0, std::memory_order_relaxed);
 	sl.gain.store(1.f, std::memory_order_relaxed);
 	sl.startedThisBoundary = true;
 	tr.playingSlot.store(s, std::memory_order_relaxed);
+	if (!retrigger)
+		emitEvent(true, t, s, reason);
+}
+
+void LooperEngine::demote(int t, int s, uint8_t reason) {
+	Slot& sl = tracks[t].slots[s];
+	if (sl.state.load(std::memory_order_relaxed) == PLAYING)
+		emitEvent(false, t, s, reason);
+	sl.state.store(sl.take.buf ? FILLED : EMPTY, std::memory_order_relaxed);
+}
+
+void LooperEngine::emitEvent(bool start, int t, int s, uint8_t reason) {
+	if (!sink) return;
+	Slot& sl = tracks[t].slots[s];
+	Cmd c {};
+	c.kind = Cmd::EVENT; c.track = t; c.slot = s; c.frames = 0; c.upto = 0;
+	c.seq = seqCounter++; c.a = c.b = nullptr;
+	c.ev.start = start;
+	c.ev.track = t;
+	c.ev.slot = s;
+	c.ev.sessionFrame = curSession;
+	c.ev.takeStartFrame = sl.take.buf ? sl.take.startFrame : 0;
+	c.ev.rest = sl.take.buf == nullptr;
+	c.ev.bpm = curBpm;
+	c.ev.bpi = curBpi;
+	c.ev.sampleRate = sr;
+	c.ev.gridGeneration = gen;
+	c.ev.reason = reason;
+	if (!cmds.push(c))
+		eventsDropped.fetch_add(1, std::memory_order_relaxed);
 }
 
 void LooperEngine::drainReplies() {
@@ -174,33 +208,60 @@ void LooperEngine::drainReplies() {
 	}
 }
 
+// One cell's CLEAR (audio thread): stop + release + retire + reset settings.
+void LooperEngine::clearCell(int t, int s) {
+	Track& tr = tracks[t];
+	Slot& sl = tr.slots[s];
+	sl.pending.store(NONE, std::memory_order_relaxed);
+	dropOverdub(sl);
+	sl.overdubbing.store(false, std::memory_order_relaxed);
+	if (odTrack == t && odSlot == s) { odTrack = odSlot = -1; }
+	if (tr.playingSlot.load(std::memory_order_relaxed) == s) {
+		// The playing cell dies mid-interval: close its span now (stamped
+		// with the current frame, not the last boundary).
+		if (sl.state.load(std::memory_order_relaxed) == PLAYING)
+			emitEvent(false, t, s, LoopEvent::R_CLEAR);
+		tr.playingSlot.store(-1, std::memory_order_relaxed);
+	}
+	const bool hadTake = sl.take.buf != nullptr;
+	if (sl.take.buf) { release(sl.take.buf); sl.take = Take(); }
+	if (hadTake) clearFile(t, s); // retire the live file into history/ (M4)
+	breakChain(tr, s); // clearing a chain member ends the chain
+	sl.state.store(EMPTY, std::memory_order_relaxed);
+	sl.playable.store(true, std::memory_order_relaxed);
+	// Settings reset too: an empty cell's settings are visible now (a
+	// "rest" step in a follow chain), so Clear must not leave a ghost.
+	sl.repeats.store(0, std::memory_order_relaxed);
+	sl.decayDb.store(0.f, std::memory_order_relaxed);
+	sl.followSlot.store(0, std::memory_order_relaxed);
+	sl.derived.store(false, std::memory_order_relaxed);
+	for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = 0.f;
+}
+
 void LooperEngine::drainIntents() {
 	Intent i;
 	while (intents.pop(i)) {
 		if (i.track < 0 || i.track >= MAX_TRACKS || i.slot < 0 || i.slot >= MAX_SLOTS) continue;
 		switch (i.kind) {
-			case Intent::CLEAR: {
-				Track& tr = tracks[i.track];
-				Slot& sl = tr.slots[i.slot];
-				sl.pending.store(NONE, std::memory_order_relaxed);
-				dropOverdub(sl);
-				sl.overdubbing.store(false, std::memory_order_relaxed);
-				if (odTrack == i.track && odSlot == i.slot) { odTrack = odSlot = -1; }
-				if (tr.playingSlot.load(std::memory_order_relaxed) == i.slot)
-					tr.playingSlot.store(-1, std::memory_order_relaxed);
-				const bool hadTake = sl.take.buf != nullptr;
-				if (sl.take.buf) { release(sl.take.buf); sl.take = Take(); }
-				if (hadTake) clearFile(i.track, i.slot); // retire the live file into history/ (M4)
-				breakChain(tr, i.slot); // clearing a chain member ends the chain
-				sl.state.store(EMPTY, std::memory_order_relaxed);
-				sl.playable.store(true, std::memory_order_relaxed);
-				// Settings reset too: an empty cell's settings are visible now (a
-				// "rest" step in a follow chain), so Clear must not leave a ghost.
-				sl.repeats.store(0, std::memory_order_relaxed);
-				sl.decayDb.store(0.f, std::memory_order_relaxed);
-				sl.followSlot.store(0, std::memory_order_relaxed);
-				sl.derived.store(false, std::memory_order_relaxed);
-				for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = 0.f;
+			case Intent::CLEAR:
+				clearCell(i.track, i.slot);
+				break;
+			case Intent::CLEAR_ALL:
+				// The whole grid, as one intent — a 64-cell burst of per-cell intents
+				// would overflow the 63-slot queue and silently drop the last.
+				for (int t = 0; t < MAX_TRACKS; t++)
+					for (int s = 0; s < MAX_SLOTS; s++)
+						clearCell(t, s);
+				break;
+			case Intent::CARRY_SPANS: {
+				// The session migrated to a fresh folder (adoption): the files and
+				// manifest rows traveled via Session::migrateTo; here we only re-open
+				// the playing cells' spans in the new folder's events log, so the
+				// as-played timeline starts whole.
+				for (int t = 0; t < MAX_TRACKS; t++)
+					for (int s = 0; s < MAX_SLOTS; s++)
+						if (tracks[t].slots[s].state.load(std::memory_order_relaxed) == PLAYING)
+							emitEvent(true, t, s, LoopEvent::R_CARRY);
 				break;
 			}
 		}
@@ -344,7 +405,7 @@ void LooperEngine::regrid(const ClockFrame& c) {
 			bool ok = sl.take.buf && sl.take.frames == N && sl.take.sampleRate == sr;
 			sl.playable.store(ok || !sl.take.buf, std::memory_order_relaxed);
 			if (sl.state.load(std::memory_order_relaxed) == PLAYING && !ok) {
-				demote(sl); // a playing rest cell (no take) goes back to EMPTY, not FILLED
+				demote(t, s, LoopEvent::R_REGRID); // a playing rest cell (no take) goes back to EMPTY, not FILLED
 				if (tr.playingSlot.load(std::memory_order_relaxed) == s)
 					tr.playingSlot.store(-1, std::memory_order_relaxed);
 			}
@@ -500,7 +561,7 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 				sl.state.store(FILLED, std::memory_order_relaxed);
 				tr.chainFrom = -1;
 			} else {
-				setPlaying(tr, s);
+				setPlaying(t, s, LoopEvent::R_CAPTURE);
 			}
 			saveTake(t, s); // encode + index the captured interval (M4)
 		}
@@ -524,7 +585,7 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 						}
 					int ps = tr.playingSlot.load(std::memory_order_relaxed);
 					if (ps >= 0 && ps != s) {
-						demote(tr.slots[ps]);
+						demote(t, ps, LoopEvent::R_STEAL);
 						tr.playingSlot.store(-1, std::memory_order_relaxed);
 					}
 					sl.state.store(RECORDING, std::memory_order_relaxed);
@@ -532,11 +593,11 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 				}
 				case LAUNCH:
 					if (!sl.take.buf || sl.take.frames != N) { refuse(sl, now); break; }
-					setPlaying(tr, s);
+					setPlaying(t, s, LoopEvent::R_LAUNCH);
 					break;
 				case STOP:
 					if (sl.state.load(std::memory_order_relaxed) == PLAYING) {
-						demote(sl);
+						demote(t, s, LoopEvent::R_STOP);
 						if (tr.playingSlot.load(std::memory_order_relaxed) == s)
 							tr.playingSlot.store(-1, std::memory_order_relaxed);
 					}
@@ -597,14 +658,14 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 					if (fs >= 0 && fs < MAX_SLOTS
 					        && tr.slots[fs].state.load(std::memory_order_relaxed) != RECORDING
 					        && (!tr.slots[fs].take.buf || tr.slots[fs].take.frames == N)) {
-						setPlaying(tr, fs);
+						setPlaying(t, fs, LoopEvent::R_FOLLOW);
 						// setPlaying's startedThisBoundary is meant to be consumed by
 						// this very step (as a 2a/2b launch's is); we are already past
 						// it, so clear it now — otherwise the target skips its first
 						// wrap and plays one interval longer than a launch would.
 						tr.slots[fs].startedThisBoundary = false;
 					} else {
-						demote(sl);
+						demote(t, ps, LoopEvent::R_EXHAUSTED);
 						tr.playingSlot.store(-1, std::memory_order_relaxed);
 						if (fs >= 0 && fs < MAX_SLOTS)
 							refuse(tr.slots[fs], now); // grid-mismatched target: flash it, stop
@@ -658,6 +719,7 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, double now,
                         float& outL, float& outR, float& cueL, float& cueR, float* trackOutLR,
                         bool wantMix) {
+	curSession = c.sessionFrame; // before the drains: a CLEAR intent stamps its event with this
 	drainReplies();
 	drainIntents();
 	drainLoads();
@@ -782,10 +844,35 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 // Intents (audio thread)
 // ---------------------------------------------------------------------------------
 
+// Any explicit press on a track ends its rolling recording (Ableton-style: user action
+// wins — without this an auto-advance chain over a sustained input eats the column with
+// no way out but pressing the recording cell itself). The in-flight interval is
+// discarded; already-committed chain cells stay, and the chain is stamped closed.
+// `except` skips one slot (a press ON the recording cell keeps its own cancel path).
+void LooperEngine::cancelRecording(int t, int except) {
+	Track& tr = tracks[t];
+	for (int s = 0; s < MAX_SLOTS; s++) {
+		if (s == except) continue;
+		Slot& sl = tr.slots[s];
+		if (sl.state.load(std::memory_order_relaxed) == RECORDING) {
+			sl.state.store(EMPTY, std::memory_order_relaxed);
+			breakChain(tr, s);
+		}
+	}
+}
+
 void LooperEngine::pressSlot(int t, int s, bool overdubLatch) {
 	if (t < 0 || t >= MAX_TRACKS || s < 0 || s >= MAX_SLOTS) return;
 	Track& tr = tracks[t];
 	Slot& sl = tr.slots[s];
+	cancelRecording(t, s);
+	// One queued action per instrument, latest press wins: a press disarms every OTHER
+	// cell's pending on this track (same rule the scene commit applies across scenes).
+	// Without this, launches could be armed on several cells of one track and the
+	// boundary would pick the highest slot index — not what was pressed last.
+	for (int o = 0; o < MAX_SLOTS; o++)
+		if (o != s)
+			tr.slots[o].pending.store(NONE, std::memory_order_relaxed);
 	if (sl.pending.load(std::memory_order_relaxed) != NONE) {
 		sl.pending.store(NONE, std::memory_order_relaxed); // press again = cancel
 		dropOverdub(sl);
@@ -818,6 +905,7 @@ void LooperEngine::pressSlot(int t, int s, bool overdubLatch) {
 
 void LooperEngine::stopTrack(int t) {
 	if (t < 0 || t >= MAX_TRACKS) return;
+	cancelRecording(t, -1); // the stop button also disarms a rolling recording
 	int p = tracks[t].playingSlot.load(std::memory_order_relaxed);
 	if (p >= 0)
 		tracks[t].slots[p].pending.store(STOP, std::memory_order_relaxed);
@@ -841,10 +929,22 @@ void LooperEngine::pressScene(int row) {
 	for (int t = 0; t < MAX_TRACKS; t++) {
 		Slot& sl = tracks[t].slots[row];
 		switch ((SlotState) sl.state.load(std::memory_order_relaxed)) {
-			case EMPTY:     stopTrack(t); break; // Ableton default: an empty slot in the scene stops the track
-			case FILLED:    sl.pending.store(LAUNCH, std::memory_order_relaxed); break;
-			case PLAYING:
-			case RECORDING: break; // keep playing / let it finish
+			case EMPTY:
+				// Ableton default: an empty slot in the scene stops the track — an
+				// explicit stop, so it also disarms a rolling recording (stopTrack).
+				stopTrack(t);
+				break;
+			case FILLED:
+				// Launching this track: the launch wins over a rolling recording on
+				// some other row of the SAME track. Tracks the scene doesn't act on
+				// keep their recordings — a scene is a launch gesture, not a global
+				// disarm (a recording 45 s deep on another track must survive).
+				cancelRecording(t, -1);
+				sl.pending.store(LAUNCH, std::memory_order_relaxed);
+				break;
+			case PLAYING:    // already what the scene wants
+			case RECORDING:  // the scene points AT the recording: let it finish — it
+				break;       // commits at the boundary and starts playing by itself
 		}
 	}
 }
@@ -856,6 +956,18 @@ void LooperEngine::pressScene(int row) {
 void LooperEngine::requestClear(int t, int s) {
 	Intent i {};
 	i.kind = Intent::CLEAR; i.track = t; i.slot = s;
+	intents.push(i);
+}
+
+void LooperEngine::requestClearAll() {
+	Intent i {};
+	i.kind = Intent::CLEAR_ALL; i.track = 0; i.slot = 0;
+	intents.push(i);
+}
+
+void LooperEngine::requestCarrySpans() {
+	Intent i {};
+	i.kind = Intent::CARRY_SPANS; i.track = 0; i.slot = 0;
 	intents.push(i);
 }
 

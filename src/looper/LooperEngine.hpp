@@ -84,6 +84,38 @@ struct TakeMeta {
 	int followSlot = 0; // after done: 0 = stop, 1..8 = launch slot N (0 also = key absent in old manifests)
 };
 
+// One performance event: a grid cell audibly started or stopped playing, stamped on the
+// shared session timeline (docs §12 — the "timeline as it was played" reconstruction).
+// Emitted by the engine at the same commit points that flip a slot's PLAYING state and
+// shipped to the sink over the worker queue; Session appends them to events.jsonl.
+// `takeStartFrame` is the identity of the audio that was playing (a take's capture
+// position, stable across overdubs, changed by a re-record) — the exporter only maps a
+// span to a file when the manifest row still carries the same identity.
+struct LoopEvent {
+	enum Reason : uint8_t {
+		R_LAUNCH = 0,    // explicit launch commit
+		R_CAPTURE,       // capture committed and started playing
+		R_FOLLOW,        // follow action jumped here
+		R_REPLACED,      // another slot started on this track (monophonic)
+		R_STOP,          // explicit stop commit (button / scene column)
+		R_STEAL,         // a capture took over the track
+		R_CLEAR,         // the playing cell was cleared (mid-interval, UI intent)
+		R_REGRID,        // tempo/grid change demoted the playing cell
+		R_EXHAUSTED,     // repeats/decay done, follow = stop (or refused target)
+		R_CARRY,         // session re-pointed to a new folder; an already-playing cell
+		                 // re-opens its span in the new session's log
+	};
+	bool start = false;          // true = play begins, false = play ends
+	int track = 0, slot = 0;
+	uint64_t sessionFrame = 0;   // when, on the shared session timeline
+	uint64_t takeStartFrame = 0; // identity of the audio playing (0 for rest cells)
+	bool rest = false;           // no take: a silent "rest" step in a follow chain
+	int bpm = 0, bpi = 0;
+	float sampleRate = 0.f;
+	uint32_t gridGeneration = 0;
+	uint8_t reason = R_LAUNCH;
+};
+
 // The disk side of the Looper (M4): the worker hands committed takes here to be encoded
 // to OGG and indexed, and overwritten/cleared takes to be retired into history/. The
 // engine calls it ONLY from the worker thread (never the audio thread), so implementations
@@ -100,6 +132,9 @@ struct LooperSink {
 	// Worker thread — decoding + file I/O live here, off the audio thread.
 	virtual bool nextLoad(int& track, int& slot, std::vector<float>& pcm, int& frames,
 	                      TakeMeta& meta) { return false; }
+	// A performance event (cell started/stopped playing). Worker thread. Default no-op
+	// so sinks that don't record the timeline (tests, future sinks) need no change.
+	virtual void event(const LoopEvent&) {}
 };
 
 // A decoded take on its way from the worker into a slot (clip loader / BPI converter).
@@ -122,12 +157,13 @@ struct LoadInstall {
 
 // Audio → worker.
 struct Cmd {
-	enum Kind { ALLOC, OVERDUB_COPY, RELEASE, SAVE, CLEAR_FILE, CONVERT } kind;
+	enum Kind { ALLOC, OVERDUB_COPY, RELEASE, SAVE, CLEAR_FILE, CONVERT, EVENT } kind;
 	int track, slot, frames, upto; // CONVERT: frames = new N; upto = split target slot (−1 = tile)
 	uint32_t seq;
 	Buf* a;      // OVERDUB_COPY: the take to copy; RELEASE: the buffer; SAVE/CONVERT: the source take
 	Buf* b;      // OVERDUB_COPY: the rolling buffer whose [0, upto) is added
 	TakeMeta meta; // SAVE: the take's metadata; CONVERT: new-grid bpm/bpi + the ORIGINAL settings
+	LoopEvent ev;  // EVENT: the performance event (FIFO with SAVE keeps take-before-event order)
 };
 // Worker → audio.
 struct Reply {
@@ -138,8 +174,8 @@ struct Reply {
 };
 // UI → audio.
 struct Intent {
-	enum Kind { CLEAR } kind;
-	int track, slot;
+	enum Kind { CLEAR, CLEAR_ALL, CARRY_SPANS } kind;
+	int track, slot; // CLEAR_ALL / CARRY_SPANS ignore both
 };
 
 struct Take {
@@ -240,9 +276,19 @@ public:
 	void pressScene(int row);
 	void stopTrack(int t);
 	void stopAll();
+	// End the track's rolling recording (an explicit press on the track disarms it;
+	// `except` = a slot whose own press semantics handle the cancel).
+	void cancelRecording(int t, int except);
 
 	// ---- UI thread ----
 	void requestClear(int t, int s);
+	// Clear the whole grid as ONE intent (the per-cell queue holds only 63 — a 64-cell
+	// burst would silently drop the last).
+	void requestClearAll();
+	// UI thread: after the session migrated to a new folder (adoption), re-open the
+	// playing cells' spans in the new events log (files/rows travel via
+	// Session::migrateTo — the engine only re-anchors the as-played timeline).
+	void requestCarrySpans();
 	int pendingCount() const;
 	Slot& slotAt(int idx) { return tracks[idx / MAX_SLOTS].slots[idx % MAX_SLOTS]; }
 
@@ -283,13 +329,20 @@ private:
 	// halves (worker builds the buffers; guarded install through the load path).
 	void maybeConvert(Track& tr, int t, int s);
 	void release(Buf* b);
-	static void setPlaying(Track& tr, int s);
+	// Start slot `s` playing on track `t`, emitting a START event (reason = why) and a
+	// STOP(R_REPLACED) for the slot it displaces. A self-retrigger (follow → itself, or
+	// launching the already-playing slot) emits nothing — the span continues.
+	void setPlaying(int t, int s, uint8_t reason);
 	static void refuse(Slot& sl, double now) { sl.flashAt.store(now, std::memory_order_relaxed); }
 	// A playing cell steps down to FILLED — unless it has no take (an empty "rest" cell
-	// playing silence in a follow chain), which goes back to EMPTY.
-	static void demote(Slot& sl) {
-		sl.state.store(sl.take.buf ? FILLED : EMPTY, std::memory_order_relaxed);
-	}
+	// playing silence in a follow chain), which goes back to EMPTY. Emits a STOP event
+	// (reason = why) when the cell was actually PLAYING.
+	void demote(int t, int s, uint8_t reason);
+	// Push one performance event to the sink via the worker queue (audio thread; never
+	// blocks — a full queue drops the event and counts it).
+	void emitEvent(bool start, int t, int s, uint8_t reason);
+	// One cell's CLEAR (audio thread): stop + release + retire + reset settings.
+	void clearCell(int t, int s);
 	// The auto-advance chain involving slot `s` broke (its cell was cleared, cancelled,
 	// or replaced): if `s` was the armed cell, the predecessor becomes the performance's
 	// last cell (one pass on replay, follow stays Stop). Audio thread only. Every path
@@ -319,6 +372,10 @@ private:
 	uint32_t seqCounter = 1;
 	int lastFrameRecorded = -1; // frames [0, lastFrameRecorded] of the interval are in `rec`
 	int odTrack = -1, odSlot = -1; // the slot currently accumulating a continuous overdub
+	// The current frame's session-timeline position, cached at the top of tick() so
+	// mid-interval paths (a CLEAR intent) stamp events without the clock in scope.
+	uint64_t curSession = 0;
+	std::atomic<long> eventsDropped{0}; // diagnostics: events lost to a full queue
 };
 
 } // namespace looper

@@ -8,6 +8,9 @@
 #include <fstream>
 #include <sys/stat.h>
 #include <vector>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #ifdef _WIN32
 #include <direct.h>
@@ -24,6 +27,14 @@ namespace looper {
 static bool pathExists(const std::string& p) {
 	struct stat st;
 	return stat(p.c_str(), &st) == 0;
+}
+
+static void removeDirIfEmpty(const std::string& p) {
+#ifdef _WIN32
+	_rmdir(p.c_str());
+#else
+	rmdir(p.c_str());
+#endif
 }
 
 static void makeDir(const std::string& p) {
@@ -60,6 +71,9 @@ static bool writeAtomic(const std::string& path, const uint8_t* data, size_t n) 
 		if (n) f.write((const char*) data, (std::streamsize) n);
 		if (!f) { f.close(); (void) std::remove(tmp.c_str()); return false; }
 	}
+#ifdef _WIN32
+	std::remove(path.c_str()); // Windows rename won't overwrite (POSIX does)
+#endif
 	if (std::rename(tmp.c_str(), path.c_str()) != 0) {
 		(void) std::remove(tmp.c_str());  // best-effort cleanup
 		return false;
@@ -122,6 +136,60 @@ void Session::setDir(const std::string& looperDir) {
 	created_.clear();
 	everWrote_ = false;
 	dirty_ = false;
+	flushPendingEventsLocked();
+}
+
+// Byte-copy a file (atomic at the destination). False if the source can't be read.
+static bool copyFileBytes(const std::string& from, const std::string& to) {
+	std::ifstream f(from, std::ios::binary);
+	if (!f) return false;
+	std::vector<char> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+	if (bytes.empty()) return false;
+	return writeAtomic(to, (const uint8_t*) bytes.data(), bytes.size());
+}
+
+void Session::migrateTo(const std::string& newLooperDir, bool retireSource) {
+	std::lock_guard<std::mutex> lk(mu_);
+	if (newLooperDir.empty() || newLooperDir == dir_) return;
+	std::string oldDir = dir_;
+	dir_ = newLooperDir;
+	created_ = nowStamp("%Y-%m-%dT%H:%M:%S"); // a new jam starts now, not at the old stamp
+	bool rows = false;
+	makeDirs(dir_);
+	for (int t = 0; t < MAX_TRACKS; t++) {
+		for (int s = 0; s < MAX_SLOTS; s++) {
+			Rec& r = recs_[t][s];
+			if (!r.present && r.repeats == 0 && r.decayDb == 0.f && r.followSlot == 0)
+				continue;
+			rows = true;
+			// Defer the byte-copies to the worker (drained by flush()): a full grid is
+			// tens of MB and this runs on the UI thread at the arm moment.
+			if (r.present && !r.file.empty() && !oldDir.empty()) {
+				pendingCopies_.push_back({oldDir + "/" + r.file, dir_ + "/" + r.file});
+				if (retireSource)
+					retireFiles_.push_back(oldDir + "/" + r.file);
+			}
+		}
+	}
+	if (retireSource && !oldDir.empty()) {
+		retireDir_ = oldDir;
+		retireFiles_.push_back(oldDir + "/session.json");
+		retireFiles_.push_back(oldDir + "/events.jsonl");
+	}
+	if (rows) {
+		everWrote_ = true; // the new folder has a real manifest from the first moment
+		writeManifestLocked();
+		dirty_ = false;
+	}
+	flushPendingEventsLocked();
+}
+
+// mu_ held. Buffered pre-dir events land in the (now known) folder's log.
+void Session::flushPendingEventsLocked() {
+	if (dir_.empty() || pendingEvents_.empty()) return;
+	for (const LoopEvent& ev : pendingEvents_)
+		appendEventLocked(ev);
+	pendingEvents_.clear();
 }
 
 void Session::setRoom(const std::string& room) {
@@ -203,6 +271,14 @@ void Session::save(int track, int slot, const float* pcm, const TakeMeta& meta) 
 
 	{
 		std::lock_guard<std::mutex> lk(mu_);
+		// The session may have MIGRATED to a new folder while we encoded (adoption at
+		// the arm boundary — the exact moment takes commit): the file above landed in
+		// the OLD folder, but the manifest below writes to the new dir_. Heal by
+		// copying the fresh file into the current folder so row and file agree.
+		if (dir_ != outDir && !dir_.empty()) {
+			makeDirs(dir_);
+			(void) copyFileBytes(livePath, dir_ + "/" + name);
+		}
 		if (created_.empty()) created_ = nowStamp("%Y-%m-%dT%H:%M:%S");
 		Rec& r = recs_[track][slot];
 		r.present = true;
@@ -246,10 +322,80 @@ void Session::clear(int track, int slot) {
 }
 
 void Session::flush() {
+	// Deferred migration copies first (worker thread; I/O outside the lock). A cell
+	// re-recorded since the migration already has a fresh file at the destination —
+	// never clobber it with the old bytes.
+	std::vector<std::pair<std::string, std::string>> copies;
+	std::vector<std::string> retire;
+	std::string retireDir;
+	{
+		std::lock_guard<std::mutex> lk(mu_);
+		copies.swap(pendingCopies_);
+		retire.swap(retireFiles_);
+		retireDir.swap(retireDir_);
+	}
+	bool copiesOk = true;
+	for (const auto& c : copies) {
+		if (pathExists(c.second)) continue; // fresher file already there: never clobber
+		if (!pathExists(c.first)) continue; // ghost row (file long gone): nothing to lose
+		if (!copyFileBytes(c.first, c.second))
+			copiesOk = false;               // a REAL copy failed: retirement is cancelled
+	}
+	// Move semantics: only once every copy verified does the duplicate source retire.
+	// rmdir is best-effort — history/ or stray files simply keep the folder alive.
+	if (!retireDir.empty()) {
+		if (copiesOk) {
+			for (const auto& f : retire)
+				(void) std::remove(f.c_str());
+			removeDirIfEmpty(retireDir);                       // .../<jam>/looper
+			size_t sl = retireDir.find_last_of('/');
+			if (sl != std::string::npos)
+				removeDirIfEmpty(retireDir.substr(0, sl));     // .../<jam>
+		}
+	}
 	std::lock_guard<std::mutex> lk(mu_);
 	if (!dirty_ || !everWrote_ || dir_.empty()) return;
 	writeManifestLocked();
 	dirty_ = false;
+}
+
+// Performance event → events.jsonl (the as-played timeline). Worker thread; events are
+// human-rate (a handful per interval boundary), so open-append-close per line is fine.
+void Session::event(const LoopEvent& ev) {
+	std::lock_guard<std::mutex> lk(mu_);
+	if (dir_.empty()) {
+		// Folder not resolved yet (a restored session's first frames): hold on to a
+		// bounded backlog, oldest dropped — the log is best-effort, never a leak.
+		if (pendingEvents_.size() >= 256)
+			pendingEvents_.erase(pendingEvents_.begin());
+		pendingEvents_.push_back(ev);
+		return;
+	}
+	appendEventLocked(ev);
+}
+
+void Session::appendEventLocked(const LoopEvent& ev) {
+	static const char* reasons[] = {"launch", "capture", "follow", "replaced", "stop",
+	                                "steal", "clear", "regrid", "exhausted", "carry"};
+	const char* why = ev.reason < sizeof(reasons) / sizeof(reasons[0]) ? reasons[ev.reason] : "?";
+	char line[256];
+	int n = std::snprintf(line, sizeof(line),
+		"{\"ev\":\"%s\",\"t\":%d,\"s\":%d,\"sf\":%llu,\"take\":%llu,\"rest\":%s,"
+		"\"bpm\":%d,\"bpi\":%d,\"sr\":%ld,\"gen\":%lu,\"reason\":\"%s\"}\n",
+		ev.start ? "start" : "stop", ev.track, ev.slot,
+		(unsigned long long) ev.sessionFrame, (unsigned long long) ev.takeStartFrame,
+		ev.rest ? "true" : "false", ev.bpm, ev.bpi, (long) ev.sampleRate,
+		(unsigned long) ev.gridGeneration, why);
+	if (n <= 0 || n >= (int) sizeof(line)) return;
+	std::string path = dir_ + "/events.jsonl";
+	FILE* f = std::fopen(path.c_str(), "ab");
+	if (!f) { // folder not there yet: create it once, then retry
+		makeDirs(dir_);
+		f = std::fopen(path.c_str(), "ab");
+		if (!f) return;
+	}
+	(void) std::fwrite(line, 1, (size_t) n, f);
+	(void) std::fclose(f);
 }
 
 // ---- Clip loader ----------------------------------------------------------------

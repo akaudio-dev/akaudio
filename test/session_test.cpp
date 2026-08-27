@@ -179,6 +179,66 @@ int main(int argc, char** argv) {
 	empty.flush();
 	CHECK(!fileExists(base + "/empty/looper/session.json"), "no manifest for a session with no takes");
 
+	// --- migrateTo: the adoption move — live files byte-copied, manifest carried ---
+	{
+		s.save(2, 5, pcm.data(), meta(N, 28800, 0.4f, 0, 0.f)); // a live take to carry
+		std::string newDir = base + "/migrated/looper";
+		s.migrateTo(newDir);
+		s.flush(); // the byte-copies are deferred to the worker's flush pass
+		CHECK(fileExists(newDir + "/t2_s5.ogg"), "live take file copied into the new folder");
+		CHECK(fileExists(dir + "/t2_s5.ogg"), "original stays in the old folder");
+		std::string man2 = readAll(newDir + "/session.json");
+		CHECK(contains(man2, "\"file\": \"t2_s5.ogg\"") && contains(man2, "\"startFrame\": 28800"),
+		      "manifest rewritten at the destination with the carried rows");
+		CHECK(contains(man2, "\"file\": \"t1_s3.ogg\""),
+		      "a row whose file is gone still carries (tolerated like a restore)");
+		CHECK(!fileExists(newDir + "/history"), "history/ does not travel");
+		s.save(3, 1, pcm.data(), meta(N, 38400, 0.3f, 0, 0.f));
+		CHECK(fileExists(newDir + "/t3_s1.ogg") && !fileExists(dir + "/t3_s1.ogg"),
+		      "post-migration saves land in the new folder only");
+
+		// --- retireSource: move semantics — after the copies verify, the duplicate
+		// source folder is emptied and removed (a same-run own `_session` folder).
+		std::string dst = base + "/2026-01-01/0900_x/looper";
+		s.migrateTo(dst, true);
+		s.flush();
+		CHECK(fileExists(dst + "/t2_s5.ogg") && fileExists(dst + "/t3_s1.ogg"),
+		      "moved: take files at the destination");
+		CHECK(!fileExists(newDir + "/t2_s5.ogg") && !fileExists(newDir + "/session.json"),
+		      "moved: source files retired after verified copies");
+		CHECK(listDir(newDir).empty(), "moved: empty source folder removed");
+		CHECK(fileExists(dst + "/session.json"), "moved: manifest lives at the destination");
+	}
+
+	// --- Performance events → events.jsonl (append-only; pre-setDir buffering) ---
+	{
+		Session ev;
+		LoopEvent e {};
+		e.start = true; e.track = 0; e.slot = 3; e.sessionFrame = 9600;
+		e.takeStartFrame = 4800; e.bpm = 120; e.bpi = 4; e.sampleRate = 48000.f;
+		e.gridGeneration = 2; e.reason = LoopEvent::R_LAUNCH;
+		ev.event(e); // before setDir: buffered, no file anywhere
+		std::string evDir = base + "/evtest/looper";
+		ev.setDir(evDir);
+		std::string evPath = evDir + "/events.jsonl";
+		CHECK(fileExists(evPath), "buffered pre-setDir event flushed once the folder is known");
+		e.start = false; e.sessionFrame = 19200; e.reason = LoopEvent::R_STOP;
+		ev.event(e);
+		e.start = true; e.slot = 4; e.rest = true; e.takeStartFrame = 0;
+		e.sessionFrame = 19200; e.reason = LoopEvent::R_FOLLOW;
+		ev.event(e);
+		std::string log = readAll(evPath);
+		int lines = 0;
+		for (char ch : log)
+			if (ch == '\n') lines++;
+		CHECK(lines == 3, "events append, never truncate (%d lines)", lines);
+		CHECK(contains(log, "\"ev\":\"start\",\"t\":0,\"s\":3,\"sf\":9600,\"take\":4800,\"rest\":false")
+		      && contains(log, "\"reason\":\"launch\""), "start row carries position + identity + reason");
+		CHECK(contains(log, "\"ev\":\"stop\"") && contains(log, "\"sf\":19200"), "stop row present");
+		CHECK(contains(log, "\"rest\":true") && contains(log, "\"reason\":\"follow\""), "rest row marked");
+		CHECK(contains(log, "\"bpm\":120,\"bpi\":4,\"sr\":48000,\"gen\":2"), "grid stamped on rows");
+	}
+
 	std::printf("%s (%d failures)\n", fails ? "FAIL" : "PASS: Session", fails);
 	return fails ? 1 : 0;
 }
