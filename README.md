@@ -1,13 +1,62 @@
 # AK Audio
 
-A personal VCV Rack plugin (collection of modules) by Andrei Kozlov.
+A personal VCV Rack plugin (collection of modules) by Andrei Kozlov: network audio in
+and out of Rack — internet radio, live NINJAM jamming, an interval looper built for
+jamming, and a recorder that turns whole jams into Ableton Live sets. All modules share
+the networked-audio layer in `src/net/` (HTTP/Icecast streaming, codec decode,
+lock-free ring buffer feeding the audio thread). Full user manual: [docs/MANUAL.md](docs/MANUAL.md).
 
-Modules:
+## Modules
 
-- **Ninjam** — NINJAM online jamming client; streams collaborative audio from a NINJAM server into Rack. (Port of the ideas in the `jamauv3` AUv3 project to a Rack module.)
-- **Radio** — streaming internet radio (Icecast/HTTP) source feeding audio into a patch.
+### Radio
 
-Both modules share the networked-audio layer in `src/net/` (HTTP/Icecast streaming, codec decode, lock-free ring buffer feeding the audio thread).
+![Radio](docs/images/Radio.png)
+
+Streaming internet radio as a patch source. Point it at any Icecast/HTTP stream (MP3,
+AAC, HLS) and it decodes on a background thread and feeds your patch through a built-in
+level control — with a curated set of ambient, spoken-word, and scanner stations
+bundled as presets, and one-paste import of your own stream URLs (verified live,
+identified, and given artwork before anything is saved).
+[Manual →](docs/MANUAL.md#radio)
+
+### Ninjam
+
+![Ninjam](docs/images/Ninjam.png)
+
+A NINJAM online-jamming client in a Rack module. LISTEN to a room's public stream with
+zero setup, or JOIN with the real protocol: hear the live multi-user mix (arrival-locked
+for a uniform one-interval latency, with a live preview bridging the join gap) and
+transmit your own instruments, streamed interval-by-interval like the canonical client.
+In-panel room browser, room chat, and a voice mode for talkback.
+[Manual →](docs/MANUAL.md#ninjam)
+
+### Looper
+
+![Looper](docs/images/Looper.png)
+
+An 8×8 Ableton-Session-style interval looper that runs on the jam's own clock (an
+expander of Ninjam — every capture, launch, and stop commits exactly on the interval
+boundary; a simulated clock stands in when playing solo). Always-on rolling recording
+makes committing a take a pointer move: press an empty cell and the next interval is
+yours, keep playing through the downbeat and the recording rolls into the next cell and
+wires itself into a replayable chain. Per-cell repeats, decay, and follow actions;
+scenes; continuous overdub; tempo-change survival (takes re-pitch tape-style or re-tile
+across BPI changes); two-way track-name sync with a MindMeld MixMaster; and every take
+is saved to disk and restored with the patch.
+[Manual →](docs/MANUAL.md#looper)
+
+### Recorder
+
+![Recorder](docs/images/Recorder.png)
+
+The jam's black box, and the way out of Rack: as a Ninjam expander it archives every
+player's intervals and your transmitted mix to disk as the raw OGG bytes — no re-encode,
+nothing lost — and when recording stops it automatically reassembles the whole session
+as an **Ableton Live set**: the Looper grid in Session view, everyone's audio and your
+as-played loop timeline laid out in the Arrangement, tempo and loop braces set. A menu
+switch targets full Live (a track per player) or Live Lite's 8-track cap (players
+merged onto one lane).
+[Manual →](docs/MANUAL.md#recorder)
 
 ## Building
 

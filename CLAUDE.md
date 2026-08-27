@@ -55,9 +55,28 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
   `NjClient` owns an `NjArchive` (`src/net/ninjam/NjArchive.{hpp,cpp}`, Rack-free writer
   thread) that writes every received per-player interval and our TX mix to disk as the
   raw OGG bytes (`~/Music/jams/<stamp>_<room>/{players,tx}/*.ogg` (folder configurable via the Recorder menu)
-  + `index.jsonl`), no re-encode. The module is a pure panel reaching Ninjam via
+  + `index.jsonl`), no re-encode (a TX interval is archived only if its BEGIN happened
+  with the archive running — `txArchWhole` in `NjClient` — else the row would be a
+  headerless mid-stream slice nothing can decode). The module is a pure panel reaching
+  Ninjam via
   `RecorderLink` (`src/RecorderLink.hpp`, dynamic_cast on the neighbour); Ninjam gates
-  the archive on Recorder-adjacent + armed + joined (privacy). Offline test:
+  the archive on Recorder-adjacent + armed + joined (privacy). **The Recorder owns the
+  `.als` export** (`src/JamExport.{hpp,cpp}` → `akaudio::exportJamAls(jamRoot)`, the
+  Rack glue over `looper/AlsExport`): context-menu "Export Ableton Live set (.als)…"
+  (works with no Ninjam adjacent — export is offline) and an automatic export when
+  recording stops (menu-toggleable "Export .als when recording stops", short countdown
+  so the Looper's worker flushes the disarm take). The export reassembles the whole jam:
+  the Looper grid as Session-View clips, per-player + TX Arrangement lanes from
+  `index.jsonl`, and **"as played" per-track lanes** from the Looper's performance log
+  (`looper/events.jsonl`) — play-spans looping their take on the grid track's OWN
+  Arrangement lane (no cloned lane tracks), matched by the
+  `startFrame` take identity (re-recorded audio is skipped; overdubbed spans reference
+  the final audio). A persisted **"Target Live edition"** menu picks the flavor:
+  Standard/Suite (8 grid tracks + a cloned track per player + TX) or **Lite** (8-track
+  cap: 6 grid tracks — takes on 7-8 dropped with a warning — every player merged onto
+  ONE lane on template track 7, TX on track 8, zero clones; simultaneous player
+  intervals are decoded/summed/re-encoded into `<jamRoot>/mixdown/`, lone intervals
+  reference their original OGG untouched). Offline test:
   `make unittest` (or `test/archive_test.cpp`).
 - **Looper** (built through M4: `src/Looper.cpp` is the Rack glue over
   the Rack-free engine in `src/looper/` — `LooperEngine` (audio thread: always-record,
@@ -71,13 +90,16 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
   phrases survive the loop point), tempo conversion (a BPM change within 0.5×–2×
   re-pitches takes via windowed-sinc varispeed — menu-toggleable; BPI doubling tiles ×2,
   halving splits into two ×1-chained halves; combined changes decompose; all RAM-only +
-  guarded installs, disk keeps the originals), "Track names: follow
-  the mixer" (a MindMeld
-  MixMaster feeding MULTI names our tracks via its `trackLabels` JSON), gate, TX latch,
+  guarded installs, disk keeps the originals), always-on two-way track-name
+  sync with a MindMeld MixMaster feeding MULTI (commit-triggered: mixer label edits
+  pull only the changed `trackLabels` chunks, closing the Looper's 4-char label editor
+  pushes back via the mixer's own dataFromJson; no toggle — connecting a mixer makes it
+  the naming truth), gate, TX latch,
   submix + limiter), `LooperWorker` (the only thread that allocates/frees buffers;
   SPSC `Spsc.hpp` both ways — and the thread that runs the M4 disk jobs), and `Session`
   (Rack-free `LooperSink`: encodes each committed take to raw OGG under
-  `<base>/<stamp>_<room>/looper/` — `t<t>_s<s>.ogg` + `session.json`, overwritten/cleared
+  `<base>/<YYYY-MM-DD>/<HHMM>[_room]/looper/` (date-grouped; looper-only sessions use
+  `<HHMM>_session`) — `t<t>_s<s>.ogg` + `session.json`, overwritten/cleared
   takes retired into `history/`; base defaults to `~/Music/jams`, shares a Recorder's jam
   folder via `RecorderLink` when one is armed. The **clip loader restores the grid on patch
   reload**: the resolved session dir is persisted, and on load the Session decodes each
@@ -90,8 +112,30 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
   mtime-preserving, so an unchanged grid writes nothing — and a load whose session folder
   is gone (shared patch, deleted jams dir) hydrates a fresh folder from that snapshot; the
   session folder on disk stays the single source of truth, patch storage is transport only).
-  DAW project export (`.als`/`.rpp`) is deferred (an `.als` attempt was removed —
-  no official SDK, reverse-engineering only; see `docs/LOOPER_DESIGN.md` §12). It takes
+  Adopting a same-run own `_session` folder is a MOVE (source retired after verified
+  copies; restored/Recorder folders never touched).
+  A restored session keeps its folder across reloads — but a Recorder that starts
+  recording over a restored-but-**untouched** grid **auto-adopts** the new jam folder,
+  carrying the takes (engine `RESAVE_ALL` → re-encode into the new folder; playing
+  cells re-open their spans, reason "carry"), so one jam folder holds grid + events +
+  wire archive; context menu also offers "New session (keep loops / clear grid)".
+  The engine also emits a **performance event log** (`LoopEvent` at every play
+  start/stop commit, over the worker queue into `Session` → append-only
+  `looper/events.jsonl` — the "timeline as played", consumed by the Recorder's export).
+  **Ableton `.als` export is built and validated in real Live 11 Lite** (owned by the
+  **Recorder** module — see its bullet; the Looper has no export menu item;
+  `src/looper/AlsExport.{hpp,cpp}`, attempt #2 — **template surgery** on a real set Live
+  11.2 itself saved, shipped as `res/als/Live11Template.xml` from `refs/Live11 Project/`:
+  rename the 8 tracks, clear the demo clips + scrub the template's home-dir preset
+  paths, splice warped looping take clips (raw OGGs referenced, no re-encode) into
+  their slots, patch tempo, clone the donor track per Recorder-archived player with
+  full pointee-space renumbering. The export also drops an empty `Ableton Project
+  Info/` marker folder in the jam root — without it Live won't resolve the
+  project-relative sample paths (every OGG "missing"). Attempt #1 — synthesizing the
+  XML — crashed Live's loader and
+  was reverted; never go back to that. Details + the schema rules Live actually
+  enforces (learned by iterating against real Live): `docs/LOOPER_DESIGN.md`
+  §12; offline test `test/als_export_test.cpp` in `make unittest`). It takes
   the **real interval grid** from an adjacent Ninjam
   via expander messages — `src/JamClock.hpp` holds `JamClockMessage` + the
   integer-frame `JamClock` that Ninjam's beat clock now runs on and publishes to every
@@ -439,6 +483,13 @@ with undo).
   sync, 0-writes-when-unchanged, mtime-preserving hydration round-trip, stale-cell removal,
   history/ untouched, no-manifest guard). No Rack, no encoder:
   `c++ -std=c++11 -I src test/session_mirror_test.cpp src/looper/SessionMirror.cpp -o build/session_mirror_test && build/session_mirror_test build/mirror_test_out`
+- `als_export_test.cpp` — offline check of `looper/AlsExport` against the real shipped
+  template (tracks renamed, demo clips + home-dir preset paths scrubbed, clips in the
+  right slots with bpi-beat warped loops, cloned arrangement tracks with fresh
+  non-colliding pointee ids, tempo patch, gzip round-trip). In `make unittest`, or:
+  `c++ -std=c++11 -I src test/als_export_test.cpp src/looper/AlsExport.cpp -o build/als_export_test && build/als_export_test`
+  (run from the repo root — it reads `res/als/Live11Template.xml`; artifacts land in
+  `build/als_export_out/` for xmllint / opening in Live)
 - `jamclock_test.cpp` — offline check of `JamClock` (integer interval length vs NjAudio's
   formula, one downbeat + `bpi` beats per interval, session timeline across a tempo
   change, new session on rejoin). Header-only, no deps:

@@ -86,6 +86,43 @@ Remaining polish:
 - Unify NINJAM's left/right content margins: OUT plates now use Radio's 3.9 mm margin
   while the chat/browser cards above still use a 6 px inset — pick one and apply it.
 
+## Looper
+
+- [x] **Validate the `.als` export in real Live 11** — done 2026-08-25: the 15-take
+      `2026-08-24_0925_session` opens and plays in Live 11 Lite (grid, names, tempo,
+      loops). Took 3 fixes, each documented in `docs/LOOPER_DESIGN.md` §12 (FileRef
+      Type=2 + mtime; unique Events clip ids + full pointee-space renumber in clones;
+      the `Ableton Project Info/` marker folder).
+- [x] **Validate the Arrangement side** — done 2026-08-25, live-fire: armed the
+      Recorder in a real jam, disarm auto-exported the .als, and Live shows the
+      player's channel + our TX as contiguous Arrangement clips at their session
+      positions, audio decoded. (Along the way: the first tx row of a mid-interval-
+      armed archive was a headerless slice — fixed in NjClient (`txArchWhole`), and
+      the exporter skips such pre-fix rows.)
+- [ ] **Validate the as-played lanes in real Live** (Recorder takeover, 2026-08-25):
+      jam with the Looper + armed Recorder, let the auto-export fire on disarm, open
+      the set — per-track lanes should show looping clips at the played positions.
+      (The restored-session folder split that blocked this is fixed — auto-adopt
+      below — so the next armed jam should produce the full set: grid + as-played
+      lanes + wire lanes.)
+- [x] **"New session" + auto-adopt on arm** — built 2026-08-25 (same day as found):
+      a Recorder starting to record over a restored-but-untouched grid re-points the
+      Looper session into the new jam folder, carrying the loaded takes (engine
+      RESAVE_ALL re-encodes them there; playing cells re-open their spans with reason
+      "carry"; rest-cell settings re-register). Plus two context-menu actions: "New
+      session (keep loops)" / "New session (clear grid)". Non-destructive — the old
+      folder keeps everything.
+- [ ] Map Looper follow actions onto Live clip follow actions in the export (After:
+      chain to slot N → "Jump"; repeats → Loop Iterations) — nice-to-have now that the
+      basic set opens.
+- [ ] `history/` span recovery: retired takes carry no metadata, so as-played spans of
+      re-recorded cells are skipped; give history files manifest rows (or sidecar
+      metadata) and the exporter could reference them.
+- [ ] Gen-aware event filtering on export (a mid-session clock-source switch makes
+      `sf` discontinuous; `gen` is logged but unused).
+- [ ] MANUAL.md sections for Looper + Recorder before Library publication (neither
+      module is documented in the user manual yet).
+
 ## Parked
 
 - **LiveATC** — `.pls` resolves but the feed blocks non-browser clients (would need

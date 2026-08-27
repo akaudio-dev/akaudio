@@ -20,8 +20,9 @@ committed take is encoded to OGG + indexed under `<base>/<stamp>_<room>/looper/`
 overwritten/cleared takes retired into `history/`. The **Recorder** module and its wire
 archive (§4 items 3-4, §7, M3) are also built, and the **clip loader** restores the grid
 on patch reload (§11 — the saved OGGs decode back into their slots). Still on paper, marked
-*(planned)*: the timeline refinements in §7.3 and the **DAW project generators** (§12) — a
-first `.als` exporter was attempted and removed (see §12). §13 tracks per-milestone status.
+*(planned)*: the timeline refinements in §7.3. The **Ableton `.als` exporter** (§12) is
+built (2026-08-25, attempt #2 — template-based); REAPER `.rpp` stays open. §13 tracks
+per-milestone status.
 
 ---
 
@@ -677,22 +678,103 @@ auto-rejoins — it records nothing otherwise).
 
 ## 12. DAW export + deferred (v2+)
 
-**DAW project generators — deferred.** The payoff of the shared timeline is a DAW project
+**DAW project generators.** The payoff of the shared timeline is a DAW project
 (`.rpp` / `.als`) that reassembles the jam: the 8 Looper tracks with their takes, plus one
 track per remote player and our TX with every interval at its `sessionFrame`, all
 referencing the raw OGGs. The data on disk (`session.json` + `index.jsonl` + the OGGs) is
 everything a generator needs.
 
-An **Ableton `.als`** exporter was attempted (2026-08-23) and **removed** (commit history):
-`.als` is gzipped XML with **no official SDK** — pure reverse-engineering. Header/scene/clip
-schema was matched to a real Live 12.4 set, but a Live-openable file needs each track to
+The **Ableton `.als` exporter is built** (2026-08-25, `src/looper/AlsExport.{hpp,cpp}`,
+offline test `test/als_export_test.cpp`) and — since the Recorder takeover the same
+day — **owned by the Recorder module** (`src/JamExport.{hpp,cpp}` →
+`akaudio::exportJamAls(jamRoot)`): a context-menu "Export Ableton Live set (.als)…"
+(usable with no Ninjam adjacent — export only reads the jam folder) plus an automatic
+export on recording stop (menu-toggleable; a ~1 s countdown lets the Looper worker
+flush the disarm-boundary take — NjArchive::stop() already joins its writer, so
+index.jsonl is complete). The Looper's own export menu item was removed: one owner.
+
+**The as-played timeline.** The Looper engine emits a `LoopEvent` at every commit that
+flips a cell's PLAYING state (launch, capture commit, follow jump, replaced, stop,
+capture steal, mid-interval clear, regrid, exhaustion), stamped with
+`ClockFrame::sessionFrame` — the same `JamClock::session` timeline `index.jsonl` rows
+carry — plus the playing take's identity (`takeStartFrame`, its capture position).
+Events ride the existing audio→worker SPSC queue (`Cmd::EVENT`, never blocks; a full
+queue drops + counts) into `LooperSink::event` → `Session` appends JSONL rows to
+`looper/events.jsonl` (`{"ev","t","s","sf","take","rest","bpm","bpi","sr","gen",
+"reason"}`; pre-setDir events buffer bounded). The exporter (`buildLooperLanes`,
+Rack-free) reconstructs per-track Arrangement lanes: tracks are monophonic (a START
+closes any open span; an unpaired START closes at timeline end), a span becomes a clip
+only when the manifest still holds a take with the same `(track, slot, startFrame)`
+identity — re-recorded audio (retired to `history/` without metadata) is skipped, and
+overdubbed spans deliberately reference the final overdubbed audio (Live's "clip as it
+now is" semantics; overdubs keep `startFrame`). Rest spans (silence steps in follow
+chains) are logged (`rest:true`) but produce no clip. Span clips loop their take
+inside the span extent (`ClipSpec::spanBeats` vs `lenBeats`) — the exact shape Live's
+own session→arrangement recording produces.
+
+**Jam folder layout (2026-08-26):** date-grouped —
+`<base>/<YYYY-MM-DD>/<HHMM>[_room]/` for Recorder jams and
+`<base>/<YYYY-MM-DD>/<HHMM>_session/` for looper-only sessions.
+`RecorderLink::recSessionName()` returns the jam folder RELATIVE to the base (it may
+contain the date directory), and callers compose `base + "/" + name`. Adoption of a
+same-run own `_session` folder uses **move semantics**: once the worker's byte-copies
+all verify, the duplicate source's live files + manifest + events log are deleted and
+its empty folders removed (`Session::migrateTo(dir, retireSource)`); restored sessions
+and Recorder jam folders are never retired, a `history/` simply keeps the folder alive,
+and any real copy failure cancels the retirement. The `.asd` files that appear beside
+samples after opening a set are **Ableton's analysis cache**, not ours (disable via
+Live Settings → File/Folder → "Create Analysis Files" if unwanted).
+
+Arrangement positions are **rebased**:
+the earliest archived frame (rounded down to a whole interval, so downbeats stay on
+bars) becomes bar 1 — the session clock runs from the JOIN, and a jam armed minutes
+into a room would otherwise start 100+ empty bars in (found 2026-08-25: first interval
+at frame 17.5M ⇒ bar ~122, an "empty-looking" arrangement).
+It is **attempt #2 — template surgery**, and the history matters: attempt #1 (2026-08-23,
+commits `c74279c`/`a64f264`) synthesized the whole XML from scratch and was removed —
+`.als` is gzipped XML with no official SDK, and a Live-openable file needs each track to
 reproduce Live's full ~1000-line device serialization (`Mixer`, four routings, `Devices`,
-`TakeLanes`, `FreezeSequencer`, `AudioSequencer`) with a consistent 700+-ID graph;
-short of that, Live's loader crashes building the tracks. That's either embedding a real
-Live project's XML (proprietary, version-pinned) or hand-coding ~1000 fragile lines — not
-worth it. **REAPER `.rpp` is the recommended target** if/when this is revisited: plain
-text, ~100 lines, stable, imports Ogg Vorbis, and the arrangement timeline maps directly;
-REAPER can then render stems for any DAW.
+`TakeLanes`, `FreezeSequencer`, `AudioSequencer`) with a consistent 700+-ID pointee graph;
+short of that, Live's loader crashes building the tracks. Attempt #2 sidesteps all of
+that: a real set saved by **Live 11.2 itself** — 8 audio tracks × 8 scenes + 2 returns,
+exactly the Looper grid, authored for this purpose (`refs/Live11 Project/`) — ships
+gunzipped as `res/als/Live11Template.xml`, and the exporter performs **targeted string
+surgery** on it: rename the 8 tracks (session.json track names), clear the template's
+demo clips (its Core-Library sample refs and the return-track preset paths — a home-dir
+leak — are scrubbed; verified by test), splice our take clips into their `<ClipSlot>`s
+(warped, `LoopOn`, two warp markers pinning `bpi` beats to the OGG's real duration —
+Live imports Ogg Vorbis, so the raw takes are referenced with no re-encode; paths
+project-relative with absolute backup), patch the master tempo, and — when the Recorder's
+`index.jsonl` is present — append one Arrangement track per player + our TX by **cloning
+the (cleared) donor track**, renumbering only its `AutomationTarget`/`ModulationTarget`
+ids from `NextPointeeId`, every interval clip at its `sessionFrame`. Everything Live is
+strict about stays Live's own bytes. Output: `<jamRoot>/<name>.als` beside `looper/`,
+plus an empty **`Ableton Project Info/`** marker folder — without it Live doesn't treat
+the jam root as a Project, won't resolve the project-relative sample paths, and reports
+every OGG as missing media (it ignores the absolute `Path` backup too).
+
+**Validated in real Live 11 Lite (2026-08-25)**: a 15-take session opens and plays —
+grid, names, tempo, loops. Same day, the Arrangement side validated live-fire: an armed
+Recorder's disarm auto-exported a set whose player + TX lanes appear in Live as
+contiguous clips on the session timeline, audio decoded. Three iterations it took, each a Live error message:
+(1) samples "missing" → FileRef `Type` must be `2` (audio file; `1` is wrong) and
+`LastModDate` the file's real mtime; (2) "corrupt (Non-unique list ids)" → clip `Id`s
+inside one Arrangement `<Events>` list must be sequential-unique, and a cloned track
+must renumber its **whole pointee-space** — not just `AutomationTarget`/
+`ModulationTarget` but `Pointee` and every `*ModulationTarget`
+(Volume/Transposition/GrainSize/Flux/SampleOffset), all doc-globally unique;
+(3) still "missing" → the `Ableton Project Info/` marker above; (4) "could not be
+decoded using OggFLAC" on the first tx row → an archive armed **mid-interval** had
+captured a headerless tail of the in-flight TX stream (the Ogg header pages went out
+before the archive started). Fixed at the source — `NjClient` archives a TX interval
+only if its BEGIN happened with the archive running (`txArchWhole`) — and the exporter
+also skips any pre-fix on-disk row that doesn't start with a BOS + Vorbis ID header
+(`standaloneOggFile`).
+Schema notes (reverse-engineered, Live 11.2): unwarped clip Loop values are in seconds,
+warped in beats; `CurrentStart/End` always beats; the first `<ClipSlotList>` per track is
+the MainSequencer's (the FreezeSequencer has a second); the only `<Tempo><Manual>` lives
+in the MasterTrack mixer. **REAPER `.rpp`** (plain text, ~100 lines) remains the sane
+second target if another DAW is ever wanted; REAPER renders stems for anything.
 
 **Deferred (v2+).** Loading clips from arbitrary files (the on-reload restore is built,
 §11; loading a chosen OGG into a slot is not). Standalone clocking with per-track/per-take
