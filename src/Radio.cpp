@@ -662,7 +662,9 @@ struct StationArt : Widget {
 		const float w = box.size.x, h = box.size.y;
 		// Stream error: show the reason in place of the artwork, so a dead station
 		// isn't a silent mystery — the user sees why (e.g. "HLS needs macOS" on a
-		// non-mac build, "Connection failed", "Bad URL"). State stays Error until
+		// non-mac build, "Connection refused", "Connection timed out" — the
+		// diagnostic strings from netResolveConnect, keyed to MANUAL.md →
+		// Troubleshooting — or "Bad URL"). State stays Error until
 		// the next start() (stop() deliberately preserves it), so this self-clears
 		// when the user picks or plays another station.
 		if (module && module->stream.getState() == akaudio::StreamClient::State::Error) {

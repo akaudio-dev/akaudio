@@ -168,6 +168,44 @@ inline bool netInterrupted() {
 #endif
 }
 
+// The raw last socket error code (errno / WSAGetLastError domain — the same domain
+// SO_ERROR reports in, so one classifier below covers both capture paths).
+inline int netLastError() {
+#ifdef _WIN32
+	return WSAGetLastError();
+#else
+	return errno;
+#endif
+}
+
+// Why a connect failed, classified from an errno/WSA/SO_ERROR code. The distinction
+// is user-facing diagnosis, not decoration: Refused means the host is reachable and
+// answered with an RST (server down / wrong port), Unreachable means routing is
+// broken (network/VPN down), TimedOut means packets silently vanished — on a host
+// that resolves fine, the signature of a firewall dropping this app's traffic (see
+// MANUAL.md → Troubleshooting; the classic case is Rack-as-plugin inside a DAW the
+// firewall never approved, while standalone Rack works).
+enum class NetConnectFail { TimedOut, Refused, Unreachable, Other };
+
+inline NetConnectFail netClassifyConnectErr(int err) {
+	switch (err) {
+#ifdef _WIN32
+		case WSAECONNREFUSED: return NetConnectFail::Refused;
+		case WSAENETUNREACH:
+		case WSAEHOSTUNREACH:
+		case WSAENETDOWN: return NetConnectFail::Unreachable;
+		case WSAETIMEDOUT: return NetConnectFail::TimedOut;
+#else
+		case ECONNREFUSED: return NetConnectFail::Refused;
+		case ENETUNREACH:
+		case EHOSTUNREACH:
+		case ENETDOWN: return NetConnectFail::Unreachable;
+		case ETIMEDOUT: return NetConnectFail::TimedOut;
+#endif
+		default: return NetConnectFail::Other;
+	}
+}
+
 // Non-blocking connect across a getaddrinfo result that polls `abort` every
 // 100 ms, within ~timeoutMs TOTAL. Candidates are raced in PARALLEL with a
 // 300 ms stagger (happy-eyeballs, RFC 8305 in spirit): the first handshake to
@@ -177,13 +215,20 @@ inline bool netInterrupted() {
 // the whole timeout serially. Returns the connected fd (restored to blocking
 // mode) or -1. This is THE way to connect in this plugin: a dead/slow host can
 // never wedge a stop()/join() on the UI thread, because the loop notices
-// `abort` within 100 ms. Sets SO_NOSIGPIPE where available. Defined in
+// `abort` within 100 ms. Sets SO_NOSIGPIPE where available. On failure,
+// *failErrOut (if given) receives the most informative error code seen across
+// the race — a refusal beats unreachable beats other beats bare deadline expiry
+// (reported as ETIMEDOUT/WSAETIMEDOUT) — for netClassifyConnectErr. Defined in
 // Socket.cpp; shared by Http, StreamClient, and NjClient.
-int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeoutMs = 6000);
+int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeoutMs = 6000,
+                        int* failErrOut = nullptr);
 
 // Resolve host:port and connect abortably (getaddrinfo + netConnectAbortable).
 // Returns the connected fd, or -1 with a human-readable reason in *errOut
-// ("Cannot resolve host" / "Connection failed"; check `abort` yourself to tell
+// ("Cannot resolve host" / "Connection refused" / "Connection timed out" /
+// "Network unreachable" / "Connection failed"; these exact strings surface on the
+// panels and are named in MANUAL.md → Troubleshooting — keep them in sync; check
+// `abort` yourself to tell
 // an abort apart). Failures netLog with timings; success is silent (we log only
 // the abnormal). Defined in Socket.cpp; the single resolve+connect preamble
 // shared by Http, StreamClient, and NjClient.
@@ -243,14 +288,17 @@ inline std::string netStrerrorResult(const char* s, const char*) {
 }
 #endif
 
-// Human-readable last socket error (for logs).
-inline std::string netErrorStr() {
+// Human-readable socket error (for logs) — from an explicit code, or the last one.
+inline std::string netErrorStr(int err) {
 #ifdef _WIN32
-	return "socket error " + std::to_string(WSAGetLastError());
+	return "socket error " + std::to_string(err);
 #else
 	char buf[128] = {};
-	return netStrerrorResult(strerror_r(errno, buf, sizeof(buf)), buf);
+	return netStrerrorResult(strerror_r(err, buf, sizeof(buf)), buf);
 #endif
+}
+inline std::string netErrorStr() {
+	return netErrorStr(netLastError());
 }
 
 } // namespace akaudio

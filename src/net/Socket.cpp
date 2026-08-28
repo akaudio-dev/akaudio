@@ -37,7 +37,8 @@ void netStartup() {
 	(void) once;
 }
 
-int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeoutMs) {
+int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeoutMs,
+		int* failErrOut) {
 	// Staggered PARALLEL connect ("happy eyeballs", RFC 8305 in spirit): launch a
 	// new candidate every kStaggerMs while earlier attempts stay in flight, and
 	// take the first that completes. Serial per-address attempts are hopeless
@@ -51,6 +52,33 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 	const clock::time_point deadline = clock::now()
 		+ std::chrono::milliseconds(timeoutMs > 0 ? timeoutMs : 1);
 	constexpr int kStaggerMs = 300; // RFC 8305 suggests 100-2000 ms; SYN RTTs are ~10-300 ms
+
+	// On total failure, report the most informative error seen across the race:
+	// a refusal (host answered with an RST — server down / wrong port) beats
+	// unreachable (no route) beats any other code beats bare deadline expiry.
+	// This is what lets netResolveConnect tell the user "refused" vs "timed out"
+	// instead of one flat "Connection failed".
+	int failErr = 0;
+	auto failRank = [](int e) {
+		if (!e)
+			return 0;
+		switch (netClassifyConnectErr(e)) {
+			case NetConnectFail::Refused: return 4;
+			case NetConnectFail::Unreachable: return 3;
+			case NetConnectFail::Other: return 2;
+			case NetConnectFail::TimedOut: return 1;
+		}
+		return 0;
+	};
+	auto noteFail = [&](int e) {
+		if (failRank(e) > failRank(failErr))
+			failErr = e;
+	};
+	auto failedOut = [&]() {
+		if (failErrOut)
+			*failErrOut = failErr;
+		return -1;
+	};
 
 	int pending[FD_SETSIZE];
 	int pendingIdx[FD_SETSIZE];
@@ -127,6 +155,7 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 				return fd;
 			}
 			if (!netConnectInProgress()) {
+				noteFail(netLastError()); // before netClose/getnameinfo can clobber it
 				netClose(fd); // synchronous refusal; move on within this slot
 				if (next || npending)
 					logCandidateFailed(idx, ai, "refused, trying next");
@@ -140,7 +169,7 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 		}
 
 		if (npending == 0 && !next)
-			return -1; // every candidate failed synchronously
+			return failedOut(); // every candidate failed synchronously
 
 		// Poll all in-flight attempts for up to 100 ms (also the abort/stagger tick).
 		fd_set wf, ef;
@@ -198,6 +227,7 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 					return fd;
 				}
 				// This candidate failed (RST etc.); drop it and keep racing.
+				noteFail(soErr);
 				addrinfo* ai = addrAt(pendingIdx[i]);
 				if (ai && (next || npending > 1))
 					logCandidateFailed(pendingIdx[i], ai, "failed, still racing others");
@@ -208,13 +238,21 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 				i--;
 			}
 			if (npending == 0 && !next)
-				return -1; // the last racer just failed
+				return failedOut(); // the last racer just failed
 		}
 	}
 
-	// Deadline or abort: nobody completed.
+	// Deadline or abort: nobody completed. On a real deadline (not an abort) with
+	// nothing better recorded, the reason is a timeout — attempts were still in
+	// flight when the clock ran out, i.e. SYNs going unanswered.
 	closeAllPending();
-	return -1;
+	if (!aborted())
+#ifdef _WIN32
+		noteFail(WSAETIMEDOUT);
+#else
+		noteFail(ETIMEDOUT);
+#endif
+	return failedOut();
 }
 
 namespace {
@@ -360,16 +398,29 @@ int netResolveConnect(const std::string& host, const std::string& port,
 		}
 	}
 
-	int fd = netConnectAbortable(res, abort, timeoutMs);
+	int connErr = 0;
+	int fd = netConnectAbortable(res, abort, timeoutMs, &connErr);
 	::freeaddrinfo(res);
 	const clock::time_point t2 = clock::now();
 	if (fd < 0) {
 		bool wasAborted = abort && abort->load(std::memory_order_acquire);
+		// The exact strings surface on the panels (Radio artwork overlay, Ninjam
+		// status line) and are named in MANUAL.md → Troubleshooting; keep in sync.
+		// "Connection timed out" here means DNS worked but SYNs vanished — on a
+		// known-good host that's the per-app-firewall signature the manual explains.
+		const char* reason = "Connection failed";
+		switch (netClassifyConnectErr(connErr)) {
+			case NetConnectFail::Refused: reason = "Connection refused"; break;
+			case NetConnectFail::Unreachable: reason = "Network unreachable"; break;
+			case NetConnectFail::TimedOut: reason = "Connection timed out"; break;
+			case NetConnectFail::Other: break;
+		}
 		netLog("connect " + host + ":" + port + " FAILED after " + std::to_string(ms(t1, t2))
 			+ " ms (resolve " + std::to_string(ms(t0, t1)) + " ms)"
-			+ (wasAborted ? " (aborted)" : ": " + netErrorStr()));
+			+ (wasAborted ? " (aborted)"
+			              : ": " + std::string(reason) + " (" + netErrorStr(connErr) + ")"));
 		if (errOut)
-			*errOut = "Connection failed";
+			*errOut = reason;
 		return -1;
 	}
 	// Success is silent: we log only the abnormal, so a quiet log.txt means a

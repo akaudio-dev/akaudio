@@ -9,6 +9,7 @@ explicitly transmits (only Ninjam's JOIN does). See the
 - [Ninjam](#ninjam) — listen to, or jam in, a NINJAM room.
 - [Looper](#looper) — 8×8 interval looper on the jam's clock.
 - [Recorder](#recorder) — archive the jam; export it as an Ableton Live set.
+- [Troubleshooting](#troubleshooting) — what the panel error messages mean.
 
 ---
 
@@ -177,6 +178,48 @@ intervals get a proper audio mixdown — and your TX on the eighth).
 
 Recording is deliberately gated on your explicit arm — nothing is written to disk, and
 nothing of the room is captured, unless the Recorder sits armed next to a joined Ninjam.
+
+---
+
+## Troubleshooting
+
+When a connection fails, the reason is shown where you're already looking — Radio
+prints it in place of the station artwork, Ninjam in its status line. What the
+messages mean:
+
+| Message | What it means | What to try |
+|---|---|---|
+| **Cannot resolve host** | The name lookup (DNS) failed — the URL's hostname doesn't exist, or your machine is offline. | Check the URL for typos; check your internet connection / VPN. |
+| **Connection refused** | The host is reachable and answered — but nothing is listening on that port. The server is down, or the port in the URL is wrong. | Try again later; verify the port (NINJAM servers usually use 2049). |
+| **Connection timed out** | The name resolved, but the connection attempts got no answer at all — the packets silently vanished. If the same station or room works elsewhere, something *on your machine or network* is dropping this app's traffic — see below. | See [Works standalone, not in your DAW](#works-in-standalone-rack-but-not-inside-your-daw). |
+| **Network unreachable** | Your machine has no route to the host — typically the network or a VPN just went down. | Check your connection / VPN state. |
+| **HTTP: …** | The server answered but rejected the request (e.g. a 404 — the stream mount no longer exists). | The station likely moved; find its current stream URL. |
+
+### Works in standalone Rack, but not inside your DAW
+
+The tell-tale: a station or room that plays fine in Rack standalone shows
+**Connection timed out** when Rack runs as a plugin inside your DAW (Ableton Live,
+Bitwig, …).
+
+Firewalls grant network access **per application**. When Rack runs standalone, the
+connection comes from Rack's own executable — which you (or a prompt you clicked long
+ago) allowed. When Rack runs as a plugin, the very same connection comes from **your
+DAW's process**, which may never have been granted access, so the firewall silently
+drops it. DNS still works (lookups go through a system service), which is why the
+name resolves and *then* the connection times out.
+
+The usual culprit is a third-party "internet security" suite (Norton, Avast, McAfee,
+Kaspersky, …) — many block programs they don't recognize without showing any prompt.
+Open its firewall / network-protection settings and **allow your DAW's executable**
+(e.g. `Ableton Live 12 Suite.exe`), then retry. If you don't run one of those, check
+the operating system's own firewall for a per-app rule the same way.
+
+### The log file
+
+akaudio logs every network failure — with the reason and timings — into Rack's log:
+`log.txt` in the Rack user folder (Rack menu → *Help* → *Open user folder*), on lines
+prefixed `akaudio.net:`. The healthy path is silent, so a quiet log means a healthy
+plugin — whatever *is* there is worth reading, and worth pasting into a bug report.
 
 ---
 
