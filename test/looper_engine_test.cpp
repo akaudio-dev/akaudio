@@ -82,6 +82,7 @@ struct Sim {
 	int sineHz = -1;    // input override: a pure sine (varispeed tests need a smooth signal)
 	bool tx_ = false;   // TX latch fed to the track this interval
 	int quietFrom = -1; // input silent from this frame on (tail-gate tests); -1 = full interval
+	float inGain = 1.f; // input scale (finish tests: a faint bar between the −70/−40 dB gates)
 	std::vector<float> outL, outR, cueL_, cueR_; // last interval's MIX + CUE
 
 	// The synthetic signal is hot to the last frame, which would make every capture
@@ -114,8 +115,8 @@ struct Sim {
 			in.present = present; in.tx = tx_;
 			bool live = (k >= 0 || sineHz > 0) && (quietFrom < 0 || f < quietFrom);
 			float v = sineHz > 0 ? 0.3f * std::sin(2.f * (float) M_PI * sineHz * f / SR) : (k >= 0 ? sig(k, f) : 0.f);
-			in.l = live ? v : 0.f;
-			in.r = live ? -v : 0.f;
+			in.l = live ? v * inGain : 0.f;
+			in.r = live ? -v * inGain : 0.f;
 			float l = 0.f, r = 0.f, cl = 0.f, cr = 0.f;
 			eng.tick(clock(), &in, 1, now += 1.0 / SR, l, r, cl, cr);
 			outL[f] = l; outR[f] = r; cueL_[f] = cl; cueR_[f] = cr;
@@ -275,12 +276,23 @@ int main() {
 	sim.interval(-1);
 	CHECK(s1.state.load() == PLAYING && s0.state.load() == FILLED, "new take plays; the old cell keeps its take");
 	CHECK(sim.outputIs(6), "new loop plays interval 6");
-	// Pressing a recording cell cancels it.
+	// Pressing a recording cell queues a FINISH: the take commits at the boundary and
+	// plays (Ableton: clicking a recording clip takes it). Pressing again cancels the
+	// queued finish and the recording rolls on; the track STOP button is the discard.
 	sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressSlot(0, 4, false); });
-	sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressSlot(0, 4, false); });
-	CHECK(sim.slot(4).state.load() == EMPTY, "press while recording cancels");
-	sim.interval(-1);
-	CHECK(sim.slot(4).state.load() == EMPTY, "cancelled recording never commits");
+	int pFinish = -1, pCancel = -1;
+	sim.interval(7, true, [&](int f) {
+		if (f == 10) { sim.eng.pressSlot(0, 4, false); pFinish = sim.slot(4).pending.load(); }
+		if (f == 20) { sim.eng.pressSlot(0, 4, false); pCancel = sim.slot(4).pending.load(); }
+		if (f == 30) sim.eng.pressSlot(0, 4, false); // re-queue: this one holds
+	});
+	CHECK(pFinish == FINISH, "press while recording queues a finish (got %d)", pFinish);
+	CHECK(pCancel == NONE, "pressing again cancels the queued finish (got %d)", pCancel);
+	CHECK(sim.slot(4).state.load() == RECORDING && sim.slot(4).pending.load() == FINISH,
+		"the re-queued finish holds; the recording rolls on");
+	sim.interval(-1); // boundary: the finish commits + plays
+	CHECK(sim.slot(4).state.load() == PLAYING, "finished take committed and playing");
+	CHECK(sim.outputIs(7), "finished take plays sample-exactly");
 	// Back to slot 0 for the scene test.
 	sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressSlot(0, 0, false); });
 	sim.interval(-1);
@@ -698,6 +710,114 @@ int main() {
 		CHECK(v.slot(2).state.load() == EMPTY && v.slot(2).followSlot.load() == 0
 			&& v.slot(2).repeats.load() == 0, "clear-predecessor: no ghost settings in the cleared cell");
 		v.eng.stop();
+	}
+
+	// ---- Finish press: clicking the recording cell commits the bar at the boundary
+	// and replays — an auto-advance chain closes and cycles from its head; a final bar
+	// below the −40 dB tail gate is dropped (no dead bar in the loop); a hot tail does
+	// NOT chain (the press means "this bar is the last"). ----
+	{
+		Sim p;
+		p.eng.autoAdvance.store(true);
+		p.eng.declickEnabled.store(false);
+		p.eng.start();
+		p.interval(0); // warm-up
+
+		// Unchained finish with a hot tail: no chain — the take loops at once.
+		p.interval(-1, true, [&](int f) { if (f == 10) p.eng.pressSlot(0, 0, false); });
+		p.interval(1, true, [&](int f) { if (f == 100) p.eng.pressSlot(0, 0, false); }); // hot to the end
+		CHECK(p.slot(0).state.load() == RECORDING && p.slot(0).pending.load() == FINISH,
+			"finish: queued on the recording cell");
+		p.interval(-1);
+		CHECK(p.slot(0).state.load() == PLAYING, "finish: hot tail did NOT chain — take plays");
+		CHECK(p.slot(1).state.load() == EMPTY, "finish: no cell armed below");
+		CHECK(p.outputIs(1), "finish: the finished take plays sample-exactly");
+		p.eng.stopTrack(0);
+		p.interval(-1);
+		p.eng.requestClear(0, 0);
+		p.interval(-1);
+
+		// Chained finish, audible final bar: the chain closes at the pressed cell,
+		// which is wired back to the head — the whole performance cycles, starting at
+		// the very same boundary the final bar commits on.
+		p.interval(-1, true, [&](int f) { if (f == 10) p.eng.pressSlot(0, 0, false); });
+		p.interval(1); // records sig 1, hot → will chain
+		p.interval(2); // slot 0 commits + chains; slot 1 records sig 2
+		p.interval(3, true, [&](int f) { if (f == 100) p.eng.pressSlot(0, 2, false); }); // slot 1 commits + chains; slot 2 records sig 3; finish pressed on it
+		CHECK(p.slot(2).state.load() == RECORDING && p.slot(2).pending.load() == FINISH,
+			"chain finish: queued on the chain's recording cell");
+		p.interval(-1); // boundary: final bar commits, head launches
+		CHECK(p.slot(2).state.load() == FILLED, "chain finish: final bar committed");
+		CHECK(p.slot(0).state.load() == PLAYING, "chain finish: head replays at the same boundary");
+		CHECK(p.outputIs(1), "chain finish: replay interval 1 = head");
+		CHECK(p.slot(0).repeats.load() == 1 && p.slot(0).followSlot.load() == 2,
+			"chain finish: head wired x1 -> next");
+		CHECK(p.slot(1).repeats.load() == 1 && p.slot(1).followSlot.load() == 3,
+			"chain finish: middle wired x1 -> next");
+		CHECK(p.slot(2).repeats.load() == 1 && p.slot(2).followSlot.load() == 1,
+			"chain finish: final bar follows back to the head");
+		p.interval(-1);
+		CHECK(p.outputIs(2), "chain finish: replay follows to the middle");
+		p.interval(-1);
+		CHECK(p.outputIs(3), "chain finish: replay reaches the final bar");
+		p.interval(-1);
+		CHECK(p.outputIs(1), "chain finish: the performance cycles back to the head");
+		p.eng.stopTrack(0);
+		p.interval(-1);
+
+		// Chained finish, faint final bar (between the −70 dB silence gate and the
+		// −40 dB tail gate — a decay tail, not playing): the bar is dropped, the chain
+		// closes at the previous cell, and the performance still cycles from the head.
+		p.eng.requestClearAll();
+		p.interval(-1);
+		p.interval(-1, true, [&](int f) { if (f == 10) p.eng.pressSlot(0, 0, false); });
+		p.interval(4); // records sig 4, hot → will chain
+		p.interval(5); // slot 0 commits + chains; slot 1 records sig 5
+		p.inGain = 0.01f; // peak ~0.003: above −70 dB, below the −40 dB tail gate
+		p.interval(6, true, [&](int f) { if (f == 100) p.eng.pressSlot(0, 2, false); });
+		p.inGain = 1.f;
+		p.interval(-1); // boundary: the faint bar is dropped; head launches
+		CHECK(p.slot(2).state.load() == EMPTY, "faint finish: dead final bar dropped");
+		CHECK(p.slot(2).flashAt.load() < 0, "faint finish: the drop is not an error (no flash)");
+		CHECK(p.slot(1).repeats.load() == 1 && p.slot(1).followSlot.load() == 1,
+			"faint finish: chain closed at the previous cell, wired back to the head");
+		CHECK(p.slot(0).state.load() == PLAYING, "faint finish: head replays");
+		CHECK(p.outputIs(4), "faint finish: replay interval 1 = head");
+		p.interval(-1);
+		CHECK(p.outputIs(5), "faint finish: replay follows to the last kept bar");
+		p.interval(-1);
+		CHECK(p.outputIs(4), "faint finish: the two-bar performance cycles");
+		p.eng.stopTrack(0);
+		p.interval(-1);
+
+		// Press-again cancels the queued finish: the chain keeps rolling.
+		p.eng.requestClearAll();
+		p.interval(-1);
+		p.interval(-1, true, [&](int f) { if (f == 10) p.eng.pressSlot(0, 0, false); });
+		p.interval(7); // records sig 7, hot → will chain
+		p.interval(8, true, [&](int f) {
+			if (f == 100) p.eng.pressSlot(0, 1, false); // queue finish on the chained recording
+			if (f == 200) p.eng.pressSlot(0, 1, false); // press again = cancel it
+		});
+		p.interval(9); // boundary: no finish → the hot tail chains on as usual
+		CHECK(p.slot(1).state.load() == FILLED && p.slot(2).state.load() == RECORDING
+			&& p.eng.tracks[0].playingSlot.load() == -1,
+			"finish cancel: chain keeps rolling, nothing plays");
+		p.eng.stopTrack(0);
+		p.interval(-1);
+
+		// The track STOP button remains the discard: it wins over a queued finish.
+		p.interval(-1, true, [&](int f) { if (f == 10) p.eng.pressSlot(0, 3, false); });
+		p.interval(1, true, [&](int f) {
+			if (f == 100) p.eng.pressSlot(0, 3, false); // queue finish
+			if (f == 200) p.eng.stopTrack(0);           // discard wins, immediately
+		});
+		CHECK(p.slot(3).state.load() == EMPTY && p.slot(3).pending.load() == NONE,
+			"finish vs stop: discarded at once, finish disarmed");
+		p.interval(-1);
+		CHECK(p.slot(3).state.load() == EMPTY && p.eng.tracks[0].playingSlot.load() == -1,
+			"finish vs stop: nothing commits or plays");
+		p.eng.stop();
 	}
 
 	// ---- Any press disarms the rolling recording (chain included); committed chain

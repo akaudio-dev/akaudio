@@ -1153,6 +1153,7 @@ struct SlotButton : HoverSwitch {
 			NVGcolor c = overdubbing ? lpAmber()
 			           : pending == akaudio::looper::CAPTURE ? lpRed()
 			           : pending == akaudio::looper::LAUNCH ? lpGreen()
+			           : pending == akaudio::looper::FINISH ? lpGreen() // finish = about to play
 			           : lpTextDim();
 			nvgBeginPath(vg);
 			nvgRoundedRect(vg, 1.f, 1.f, w - 2.f, h - 2.f, 2.5f);

@@ -17,7 +17,10 @@
 // Capture has Ableton clip semantics: pressing an empty slot arms it; at the next
 // boundary it starts RECORDING (the interval is recorded into the rolling buffer as
 // always); at the boundary after that the completed interval becomes its take and it
-// starts playing, replacing the slot that was playing. Pressing again cancels.
+// starts playing, replacing the slot that was playing. Pressing an ARMED slot cancels
+// the arm; pressing a RECORDING slot queues a FINISH — at the boundary the take
+// commits and replays (a chain closes and cycles from its head); pressing again
+// cancels the finish (the recording rolls on). The track STOP button is the discard.
 //
 // Buffer accounting per track: `rec` (recording), `last` (the interval just
 // completed — what a RECORDING slot takes), `spare` (pre-fetched replacement); per
@@ -50,7 +53,7 @@ struct Buf {
 };
 
 enum SlotState { EMPTY = 0, FILLED = 1, PLAYING = 2, RECORDING = 3 };
-enum Pending { NONE = 0, CAPTURE = 1, LAUNCH = 2, STOP = 3, OVERDUB = 4 };
+enum Pending { NONE = 0, CAPTURE = 1, LAUNCH = 2, STOP = 3, OVERDUB = 4, FINISH = 5 };
 
 // One frame of clock, as the engine needs it (a strict subset of JamClockMessage).
 struct ClockFrame {
@@ -228,6 +231,7 @@ struct Track {
 	Buf* last = nullptr;
 	Buf* spare = nullptr;
 	int chainFrom = -1;   // predecessor of the auto-advance chain's armed cell (−1 = no chain)
+	int chainHead = -1;   // the chain's first cell — a FINISH press launches the replay here
 	bool recPrevOk = false; // post-rotation `rec` still holds the immediately-previous
 	                        // completed interval (pickup source), not a fresh spare
 	bool recPending = false;
@@ -277,7 +281,8 @@ public:
 	void stopTrack(int t);
 	void stopAll();
 	// End the track's rolling recording (an explicit press on the track disarms it;
-	// `except` = a slot whose own press semantics handle the cancel).
+	// `except` = a slot whose own press semantics handle the press — a press ON the
+	// recording cell queues a FINISH instead of discarding).
 	void cancelRecording(int t, int except);
 
 	// ---- UI thread ----
@@ -353,6 +358,7 @@ private:
 		if (s == tr.chainFrom + 1)
 			tr.slots[tr.chainFrom].repeats.store(1, std::memory_order_relaxed);
 		tr.chainFrom = -1;
+		tr.chainHead = -1;
 	}
 	void dropOverdub(Slot& sl);
 

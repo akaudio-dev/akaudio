@@ -385,7 +385,7 @@ void LooperEngine::regrid(const ClockFrame& c) {
 	curBpm = c.bpm;
 	curBpi = c.bpi;
 	haveGrid = true;
-	for (int t = 0; t < MAX_TRACKS; t++) tracks[t].chainFrom = -1; // chains die with the old grid
+	for (int t = 0; t < MAX_TRACKS; t++) { tracks[t].chainFrom = -1; tracks[t].chainHead = -1; } // chains die with the old grid
 	intervalFrames.store(N, std::memory_order_relaxed);
 	gateDecay = sr > 0.f ? std::exp(-1.f / (0.1f * sr)) : 0.f; // ~100 ms release
 	declickN = N > 0 ? std::max(1, std::min(N / 4, (int) (sr * 0.0015f))) : 0; // ~1.5 ms loop-end fade
@@ -468,12 +468,48 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 			Slot& sl = tr.slots[s];
 			if (s == armedThisBoundary) continue;
 			if (sl.state.load(std::memory_order_relaxed) != RECORDING) continue;
-			if (!present || !lastOk || tr.lastPeak < GATE) {
-				refuse(sl, now);
+			// A press on the recording cell queued a FINISH: commit this interval as the
+			// take's last bar and replay now — the chain (if any) closes and cycles from
+			// its head instead of rolling on. (A RECORDING slot's pending can only be
+			// FINISH: CAPTURE was consumed when the state flipped, and every other press
+			// path disarms the recording outright.)
+			const bool finishing = sl.pending.exchange(NONE, std::memory_order_relaxed) == FINISH;
+			// A chained finish demands real content in the final bar (the −40 dB tail
+			// gate, not the −70 dB silence gate): the common gesture is "stop playing,
+			// then click", and by then the in-flight interval holds only room noise or
+			// decay — committing it would append a dead bar to the loop and break its
+			// meter. Dropping it closes the chain at the previous cell instead.
+			const bool commitOk = present && lastOk && tr.lastPeak >= GATE
+			        && (!finishing || tr.chainFrom < 0 || tr.lastPeak >= TAIL_GATE);
+			if (!commitOk) {
 				sl.state.store(EMPTY, std::memory_order_relaxed);
-				// The chain's armed cell caught only silence: chain over (breakChain
-				// stamps the predecessor as the performance's last cell).
-				breakChain(tr, s);
+				if (finishing && tr.chainFrom >= 0) {
+					// Finish with an empty final bar: no flash (the drop is the expected
+					// outcome), close the chain at the predecessor and cycle the
+					// performance from its head, starting this boundary.
+					const int head = tr.chainHead >= 0 ? tr.chainHead : tr.chainFrom;
+					const int pred = tr.chainFrom;
+					breakChain(tr, s); // predecessor stamped ×1, chain closed
+					Slot& pd = tr.slots[pred];
+					if (pred == head) {
+						// The whole performance is one bar: a plain looping take, no
+						// follow indirection.
+						pd.repeats.store(0, std::memory_order_relaxed);
+						pd.followSlot.store(0, std::memory_order_relaxed);
+					} else {
+						pd.followSlot.store(head + 1, std::memory_order_relaxed); // 1-based
+					}
+					if (tr.slots[head].take.buf && tr.slots[head].take.frames == N)
+						setPlaying(t, head, LoopEvent::R_LAUNCH);
+					else
+						refuse(tr.slots[head], now); // head cleared mid-chain: nothing to replay
+				} else {
+					// The chain's armed cell caught only silence (or the cable is gone):
+					// refuse with a flash; breakChain stamps the predecessor as the
+					// performance's last cell.
+					refuse(sl, now);
+					breakChain(tr, s);
+				}
 				continue;
 			}
 			if (sl.take.buf) release(sl.take.buf);
@@ -509,8 +545,10 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 			bool chain = false;
 			// The OVERDUB latch suppresses the chain: playing through the downbeat then
 			// layers onto the committed cell (the continuous overdub arms on it below)
-			// instead of rolling into the next one.
-			if (autoAdvance.load(std::memory_order_relaxed)
+			// instead of rolling into the next one. A FINISH press suppresses it too —
+			// the press means "this bar is the last", hot tail or not.
+			if (!finishing
+			        && autoAdvance.load(std::memory_order_relaxed)
 			        && !overdubMode.load(std::memory_order_relaxed)
 			        && s + 1 < MAX_SLOTS && tr.rec
 			        && tr.slots[s + 1].state.load(std::memory_order_relaxed) == EMPTY) {
@@ -548,10 +586,26 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 				}
 				sl.take.peak = pk;
 			}
-			if (chain) {
+			if (finishing && chainedIn) {
+				// The finish closes the chain: this cell is the performance's final
+				// bar — wire it back to the head so the whole take cycles, and start
+				// the replay from the top on this same boundary.
+				const int head = tr.chainHead >= 0 ? tr.chainHead : tr.chainFrom;
+				sl.repeats.store(1, std::memory_order_relaxed);
+				sl.followSlot.store(head + 1, std::memory_order_relaxed); // 1-based
+				sl.state.store(FILLED, std::memory_order_relaxed);
+				tr.chainFrom = -1;
+				tr.chainHead = -1;
+				if (tr.slots[head].take.buf && tr.slots[head].take.frames == N)
+					setPlaying(t, head, LoopEvent::R_LAUNCH);
+				else
+					refuse(tr.slots[head], now); // head cleared mid-chain: nothing to replay
+			} else if (chain) {
 				sl.state.store(FILLED, std::memory_order_relaxed);
 				tr.slots[s + 1].state.store(RECORDING, std::memory_order_relaxed);
 				armedThisBoundary = s + 1;
+				if (!chainedIn)
+					tr.chainHead = s; // a chain just started: this cell is the performance's first bar
 				tr.chainFrom = s;
 			} else if (chainedIn) {
 				// A quiet tail ends the chain here: this cell is the performance's
@@ -560,7 +614,10 @@ void LooperEngine::boundary(const ClockFrame& c, double now) {
 				sl.repeats.store(1, std::memory_order_relaxed);
 				sl.state.store(FILLED, std::memory_order_relaxed);
 				tr.chainFrom = -1;
+				tr.chainHead = -1;
 			} else {
+				// Plain capture — and an unchained FINISH lands here too: commit + play,
+				// exactly the Ableton "click the recording clip" gesture.
 				setPlaying(t, s, LoopEvent::R_CAPTURE);
 			}
 			saveTake(t, s); // encode + index the captured interval (M4)
@@ -846,9 +903,9 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 
 // Any explicit press on a track ends its rolling recording (Ableton-style: user action
 // wins — without this an auto-advance chain over a sustained input eats the column with
-// no way out but pressing the recording cell itself). The in-flight interval is
-// discarded; already-committed chain cells stay, and the chain is stamped closed.
-// `except` skips one slot (a press ON the recording cell keeps its own cancel path).
+// no way out but the track STOP button). The in-flight interval is discarded;
+// already-committed chain cells stay, and the chain is stamped closed. `except` skips
+// one slot (a press ON the recording cell queues a FINISH instead — see pressSlot).
 void LooperEngine::cancelRecording(int t, int except) {
 	Track& tr = tracks[t];
 	for (int s = 0; s < MAX_SLOTS; s++) {
@@ -856,6 +913,7 @@ void LooperEngine::cancelRecording(int t, int except) {
 		Slot& sl = tr.slots[s];
 		if (sl.state.load(std::memory_order_relaxed) == RECORDING) {
 			sl.state.store(EMPTY, std::memory_order_relaxed);
+			sl.pending.store(NONE, std::memory_order_relaxed); // a queued FINISH dies with the recording
 			breakChain(tr, s);
 		}
 	}
@@ -886,8 +944,12 @@ void LooperEngine::pressSlot(int t, int s, bool overdubLatch) {
 			sl.armFrame = lastFrameRecorded >= 0 ? lastFrameRecorded : 0;
 			break;
 		case RECORDING:
-			sl.state.store(EMPTY, std::memory_order_relaxed); // cancel the recording
-			breakChain(tr, s); // cancelling a chain member ends the chain
+			// Finish, don't discard (Ableton: clicking a recording clip takes it): at
+			// the boundary the bar commits — if it has audible content — and the take
+			// replays; a chain closes and cycles from its head. Pressing again cancels
+			// the queued finish (the "press again = cancel" path above — the recording
+			// rolls on); the track STOP button remains the discard.
+			sl.pending.store(FINISH, std::memory_order_relaxed);
 			break;
 		case FILLED:
 			sl.pending.store(LAUNCH, std::memory_order_relaxed);

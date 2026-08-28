@@ -252,7 +252,7 @@ Track     { Buf* rec, *last, *spare (rolling: recording / just-completed / pre-f
 
 ```
 state:   Empty | Filled | Playing | Recording
-pending: None | Capture | Launch | Stop | Overdub     (committed at the boundary)
+pending: None | Capture | Launch | Stop | Overdub | Finish   (committed at the boundary)
 ```
 
 Button semantics (edges detected in `process()`; "armed" = pending set, light blinks;
@@ -260,7 +260,7 @@ pressing again cancels):
 
 | gesture | Empty | Filled | Playing | Recording |
 |---|---|---|---|---|
-| slot press | arm **Capture** (→ Recording at the boundary → Playing at the next) | arm **Launch** | arm **Stop** (or **Overdub** if the OVERDUB latch is on) | **cancel** (→ Empty) |
+| slot press | arm **Capture** (→ Recording at the boundary → Playing at the next) | arm **Launch** | arm **Stop** (or **Overdub** if the OVERDUB latch is on) | arm **Finish** (commit the bar at the boundary + replay — a chain closes and cycles from its head; press again cancels the finish; the track STOP button discards) |
 | scene press (row) | track **stops** (empty slot in the row) | arm Launch | no-op if already the playing slot | leave it |
 | track STOP / STOP ALL | — | — | arm Stop | — |
 
@@ -291,7 +291,15 @@ successor's commit, so a follow never dangles on a refused cell). The chain ends
 an interval is fully silent (the −70 dB gate refuses it — cells sit FILLED, wired,
 nothing auto-plays), when a chain member ends with a quiet tail (that outro cell
 commits FILLED + `repeats 1` instead of looping alone), when the next slot is occupied,
-or at the bottom of the column (those two commit-and-play as usual). **The OVERDUB
+or at the bottom of the column (those two commit-and-play as usual). **Pressing the
+recording cell finishes the chain deliberately** (pending *Finish*): at the boundary
+the in-flight bar commits as the performance's last cell — *if* it has real content
+(the −40 dB tail gate; the usual gesture is "stop playing, then click", and by then
+the bar holds only decay — such a dead bar is dropped rather than break the loop's
+meter) — the last cell is wired `follow → head`, and the whole performance starts
+cycling from its head on that same boundary (an unchained finish just commits and
+loops the take, hot tail or not — Ableton's "click the recording clip"). Pressing
+again cancels the queued finish; the track STOP button discards the recording. **The OVERDUB
 latch suppresses the chain**: playing through the downbeat then layers onto the
 committed cell (the continuous overdub arms on it) instead of rolling into the next
 one. A quiet tail on a
@@ -301,7 +309,8 @@ install landing on one, or capturing elsewhere ends the chain the same way
 (`breakChain`: predecessor stamped `repeats 1` when its armed cell dies). The −40 dB tail
 gate is deliberately much hotter than the −70 dB silence gate so a released chord's
 decay/reverb tail doesn't chain; a drone that never goes silent is what the toggle is
-for (cancel a runaway chain by pressing the recording cell). Scenes use Ableton's default semantics (a
+for (a runaway chain is ended by pressing the recording cell — finish + replay — or
+discarded with the track STOP button). Scenes use Ableton's default semantics (a
 scene is a complete state of the band), and **arming a scene disarms every launch queued
 outside its row** (an earlier scene, a single cell) — only the latest scene fires at the
 boundary.
@@ -343,6 +352,11 @@ boundary.
    - **Stop**: Filled.
    - **Overdub**: staging (take + this interval's input, folded in progressively by
      `process()`) swaps in as the new take.
+   - **Finish** (a press on the Recording cell): the just-completed bar commits as the
+     take's last cell and the replay starts on this same boundary — a chain closes
+     (a dead final bar, below the −40 dB tail gate, is dropped) and cycles from its
+     head via `follow → head`; an unchained finish commits-and-plays like a normal
+     capture, hot tail or not.
    *(The `Committed`/`Overwritten` encode-and-write steps are M4; the M1 engine keeps
    takes in RAM only.)*
 3. Playing slots wrap: `repCount++`; `gain = decay^repCount`; **done** if `repeats &&
