@@ -177,11 +177,20 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 		FD_ZERO(&ef);
 		int maxFd = -1;
 		for (int i = 0; i < npending; i++) {
-			// Bound re-check before indexing the fd_set bitmap. Unreachable (every
-			// entry was guarded at insert), but keeps the invariant provable locally.
 			const int f = pending[i];
+			// Bound re-check before indexing the fd_set BITMAP — POSIX only, mirroring
+			// the insert guard: there the fd VALUE is the index. On Windows fd_set is a
+			// count-bounded ARRAY of handles, and handle values are unbounded (they
+			// exceeded the raised FD_SETSIZE=8192 in a churny session, 2026-08-29) —
+			// applying the value bound there skipped VALID in-flight sockets, sent
+			// select() empty sets, and failed every connect with WSAEINVAL 10022.
+#ifdef _WIN32
+			if (f < 0)
+				continue;
+#else
 			if (f < 0 || f >= FD_SETSIZE)
 				continue;
+#endif
 			FD_SET(f, &wf);
 			FD_SET(f, &ef); // Windows: failed connects are reported as exceptions
 			if (f > maxFd)
@@ -200,8 +209,13 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 			netLog("select returned " + std::to_string(s) + " (npending=" + std::to_string(npending) + ")");
 			for (int i = 0; i < npending; i++) {
 				int fd = pending[i];
+#ifdef _WIN32
+				if (fd < 0)
+					continue; // see bound re-check above
+#else
 				if (fd < 0 || fd >= FD_SETSIZE)
 					continue; // see bound re-check above
+#endif
 				bool isWritable = FD_ISSET(fd, &wf) != 0;
 				bool isException = FD_ISSET(fd, &ef) != 0;
 				if (!isWritable && !isException)

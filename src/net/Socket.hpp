@@ -28,9 +28,11 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-// Windows socket handles can exceed the default FD_SETSIZE (64); set it high enough.
-// On this system, handles reach 3000+. Set to 8192 as a safe upper bound for the entire
-// process lifetime (socket handles don't shrink, only grow as new sockets are created).
+// On Windows, FD_SETSIZE only bounds how many handles an fd_set ARRAY holds (handle
+// VALUES are unbounded and never index anything — no code may value-bound-check them
+// against FD_SETSIZE here; that bug skipped valid sockets and broke every connect once
+// handles grew past the limit, fixed 2026-08-29 in Socket.cpp). 8192 is kept from the
+// earlier mitigation era; it merely gives the connect race generous array headroom.
 #ifndef FD_SETSIZE
 #define FD_SETSIZE 8192
 #endif
