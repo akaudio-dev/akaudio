@@ -326,6 +326,20 @@ int main() {
 	CHECK(s0.state.load() == FILLED, "scene row with empty slot stops the playing track");
 	CHECK(sim.outputIs(-1), "silent after scene stop");
 
+	// ---- A scene acting on a track disarms its armed captures (latest press wins —
+	// otherwise the surviving capture's R_STEAL demote would land on the very beat of
+	// the scene's launch, hard-cutting it) ----
+	sim.interval(-1, true, [&](int f) {
+		if (f == 10) sim.eng.pressSlot(0, 5, false); // arm a capture on empty slot 5
+		if (f == 20) sim.eng.pressScene(0);          // the scene launches row 0 (FILLED)
+	});
+	CHECK(sim.slot(5).pending.load() == NONE, "scene on the track disarms its armed capture");
+	sim.interval(-1);
+	CHECK(s0.state.load() == PLAYING && sim.slot(5).state.load() == EMPTY,
+		"scene launch commits; the disarmed capture never starts");
+	sim.eng.stopTrack(0);
+	sim.interval(-1);
+
 	// ---- Clear (UI intent): empties the slot AND resets its settings (an empty cell's
 	// settings are visible now — a rest step — so Clear must not leave a ghost) ----
 	s0.repeats.store(4); s0.decayDb.store(-3.f); s0.followSlot.store(2);

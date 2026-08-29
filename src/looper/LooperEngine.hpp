@@ -226,6 +226,12 @@ struct Slot {
 	int preW = 0;           // pre-roll (pickup) frames written at the staging tail
 	uint64_t recStart = 0;  // session frame of the recording's first frame
 	float recPeak = 0.f;    // running peak of the recording (commit gate)
+	// Stop/replace fade-out frames left (~1.5 ms): a beat-quantized cut lands anywhere
+	// in a free-running loop, so the demoted slot keeps rendering, faded, until this
+	// reaches 0. PER SLOT — two demotes on one track within the fade window (scene
+	// launch + capture steal on one beat, a wrap-follow near a beat) each fade cleanly
+	// instead of the second hard-cutting the first.
+	int dieFade = 0;
 	uint32_t odSeq = 0;
 	float odPeak = 0.f;     // running peak of overdubbed input (merged at commit)
 	bool odReady = false;
@@ -243,11 +249,7 @@ struct Track {
 	bool sparePending = false;
 	int chainFrom = -1;   // predecessor of the auto-advance chain's armed cell (−1 = no chain)
 	int chainHead = -1;   // the chain's first cell — a FINISH press launches the replay here
-	// A stopped/replaced loop fades out over ~1.5 ms instead of hard-cutting mid-cycle
-	// (beat-quantized stops land anywhere in a free-running loop): the demoted slot
-	// keeps rendering, faded, until the fade or its take ends.
-	int dyingSlot = -1;
-	int dyingFade = 0;
+	bool anyDying = false; // a slot on this track has dieFade > 0 (gates the render scan)
 	float txGain = 1.f;   // smoothed TX latch (no click)
 	float gateEnv = 0.f;  // live-thru gate envelope
 };

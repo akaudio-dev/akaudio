@@ -163,8 +163,7 @@ void LooperEngine::setPlaying(int t, int s, uint8_t reason) {
 	if (prev >= 0 && prev != s)
 		demote(t, prev, LoopEvent::R_REPLACED);
 	Slot& sl = tr.slots[s];
-	// A relaunch of a slot that is still fading out would render it twice — cut the fade.
-	if (tr.dyingSlot == s) { tr.dyingSlot = -1; tr.dyingFade = 0; }
+	sl.dieFade = 0; // a relaunch of a still-fading slot would render it twice — cut the fade
 	// A self-retrigger (follow → itself, or launching the playing slot) restarts the
 	// repeat counter but the audible span continues — no STOP/START pair.
 	const bool retrigger = prev == s && sl.state.load(std::memory_order_relaxed) == PLAYING;
@@ -184,11 +183,12 @@ void LooperEngine::demote(int t, int s, uint8_t reason) {
 	if (sl.state.load(std::memory_order_relaxed) == PLAYING) {
 		emitEvent(false, t, s, reason);
 		// Beat-quantized stops land anywhere in a free-running loop: fade the cut loop
-		// out over ~1.5 ms (the slot keeps rendering as dyingSlot) instead of clicking.
+		// out over ~1.5 ms (the slot keeps rendering while dieFade drains) instead of
+		// clicking. Per slot, so overlapping demotes on one track each fade cleanly.
 		if (sl.take.buf && declickN > 0 && sl.playPos < sl.take.frames
 		        && declickEnabled.load(std::memory_order_relaxed)) {
-			tr.dyingSlot = s;
-			tr.dyingFade = declickN;
+			sl.dieFade = declickN;
+			tr.anyDying = true;
 		}
 	}
 	sl.state.store(sl.take.buf ? FILLED : EMPTY, std::memory_order_relaxed);
@@ -272,7 +272,7 @@ void LooperEngine::clearCell(int t, int s) {
 	dropCapture(sl);
 	sl.overdubbing.store(false, std::memory_order_relaxed);
 	if (odTrack == t && odSlot == s) { odTrack = odSlot = -1; }
-	if (tr.dyingSlot == s) { tr.dyingSlot = -1; tr.dyingFade = 0; } // its buffer dies now
+	sl.dieFade = 0; // a relaunch of a still-fading slot would render it twice // its buffer dies now
 	if (sl.state.load(std::memory_order_relaxed) == RECORDING)
 		sl.state.store(EMPTY, std::memory_order_relaxed);
 	if (tr.playingSlot.load(std::memory_order_relaxed) == s) {
@@ -340,7 +340,7 @@ void LooperEngine::drainLoads() {
 		}
 		Track& ltr = tracks[li.track];
 		Slot& sl = ltr.slots[li.slot];
-		if (ltr.dyingSlot == li.slot) { ltr.dyingSlot = -1; ltr.dyingFade = 0; } // buffer replaced
+		sl.dieFade = 0; // buffer replaced — stop rendering the fade
 		// A load can land on a slot the user started using meanwhile (restore decodes
 		// arrive seconds after patch load): tear the slot down the way clearCell
 		// would — close a playing span, disarm capture/overdub, release stagings —
@@ -396,8 +396,7 @@ void LooperEngine::regrid(const ClockFrame& c) {
 	for (int t = 0; t < MAX_TRACKS; t++) {
 		Track& tr = tracks[t];
 		if (tr.spare && tr.spare->frames != N) { release(tr.spare); tr.spare = nullptr; }
-		tr.dyingSlot = -1;
-		tr.dyingFade = 0;
+		tr.anyDying = false;
 		for (int s = 0; s < MAX_SLOTS; s++) {
 			Slot& sl = tr.slots[s];
 			sl.pending.store(NONE, std::memory_order_relaxed);
@@ -871,22 +870,27 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 				sl->phaseA.store((float) sl->playPos / (float) sl->take.frames, std::memory_order_relaxed);
 			}
 		}
-		// A stopped/replaced loop fades out (~1.5 ms) instead of hard-cutting: render
-		// the dying slot on top until the fade (or its take) ends.
-		if (tr.dyingSlot >= 0) {
-			Slot& ds = tr.slots[tr.dyingSlot];
-			if (ds.take.buf && ds.playPos < ds.take.frames && tr.dyingFade > 0 && declickN > 0) {
-				float ft = (float) tr.dyingFade / (float) declickN;
-				float g = ds.gain.load(std::memory_order_relaxed) * ft * ft * (3.f - 2.f * ft);
-				loopL += ds.take.buf->pcm[(size_t) ds.playPos * 2] * g;
-				loopR += ds.take.buf->pcm[(size_t) ds.playPos * 2 + 1] * g;
-				ds.playPos++;
-				tr.dyingFade--;
+		// Stopped/replaced loops fade out (~1.5 ms) instead of hard-cutting: every slot
+		// with fade left keeps rendering on top. The scan runs only while a fade is
+		// live (anyDying), i.e. for ~72 frames after a demote — not per idle frame.
+		if (tr.anyDying) {
+			bool any = false;
+			for (int ss = 0; ss < MAX_SLOTS; ss++) {
+				Slot& ds = tr.slots[ss];
+				if (ds.dieFade <= 0) continue;
+				if (ds.take.buf && ds.playPos < ds.take.frames && declickN > 0) {
+					float ft = (float) ds.dieFade / (float) declickN;
+					float g = ds.gain.load(std::memory_order_relaxed) * ft * ft * (3.f - 2.f * ft);
+					loopL += ds.take.buf->pcm[(size_t) ds.playPos * 2] * g;
+					loopR += ds.take.buf->pcm[(size_t) ds.playPos * 2 + 1] * g;
+					ds.playPos++;
+					ds.dieFade--;
+					if (ds.dieFade > 0 && ds.playPos < ds.take.frames) any = true;
+				} else {
+					ds.dieFade = 0;
+				}
 			}
-			if (tr.dyingFade <= 0 || !ds.take.buf || ds.playPos >= ds.take.frames) {
-				tr.dyingSlot = -1;
-				tr.dyingFade = 0;
-			}
+			tr.anyDying = any;
 		}
 
 		// Live-thru: gated to exact zero (−70 dBFS, ~100 ms release) so idle tracks cost
@@ -1091,12 +1095,27 @@ void LooperEngine::pressScene(int row) {
 			if (s != row && o.pending.load(std::memory_order_relaxed) == LAUNCH)
 				o.pending.store(NONE, std::memory_order_relaxed);
 		}
+	// The scene ACTS on a track (launch or stop): latest press wins there, exactly as a
+	// cell press would — armed captures on other rows of that track disarm (with their
+	// staging released), or their R_STEAL demote would land on the same beat as the
+	// scene's launch and hard-cut its fade. Tracks the scene doesn't act on keep
+	// everything.
+	auto disarmOthers = [&](int t) {
+		for (int o = 0; o < MAX_SLOTS; o++) {
+			if (o == row) continue;
+			Slot& oo = tracks[t].slots[o];
+			if (oo.pending.load(std::memory_order_relaxed) == CAPTURE)
+				dropCapture(oo);
+			oo.pending.store(NONE, std::memory_order_relaxed);
+		}
+	};
 	for (int t = 0; t < MAX_TRACKS; t++) {
 		Slot& sl = tracks[t].slots[row];
 		switch ((SlotState) sl.state.load(std::memory_order_relaxed)) {
 			case EMPTY:
 				// Ableton default: an empty slot in the scene stops the track — an
 				// explicit stop, so it also disarms a rolling recording (stopTrack).
+				disarmOthers(t);
 				stopTrack(t);
 				break;
 			case FILLED:
@@ -1104,6 +1123,7 @@ void LooperEngine::pressScene(int row) {
 				// some other row of the SAME track. Tracks the scene doesn't act on
 				// keep their recordings — a scene is a launch gesture, not a global
 				// disarm (a recording 45 s deep on another track must survive).
+				disarmOthers(t);
 				cancelRecording(t, -1);
 				sl.pending.store(LAUNCH, std::memory_order_relaxed);
 				break;
