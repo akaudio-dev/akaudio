@@ -280,13 +280,16 @@ void NjAudio::writeInterval(const uint8_t guid[16], const uint8_t* data, size_t 
 			nDecoded.fetch_add(1, std::memory_order_relaxed);
 	}
 	// On failure / unsupported codec, pcm stays empty => a silence interval (keeps cadence).
-	// The raw wire bytes ride the queue: the archive listener (the Recorder) is handed
-	// them when the interval's chained playout STARTS (mixLoop), stamped with that
-	// playout start on the session timeline — not here at network arrival (§7.3).
+	// The raw wire bytes ride the queue — only while a Recorder is listening — and the
+	// archive is handed them when the interval's chained playout STARTS (mixLoop),
+	// stamped with that playout start on the session timeline — not here at network
+	// arrival (§7.3).
 	int b, i;
 	{ std::lock_guard<std::mutex> lock(mu); b = bpm; i = bpi; }
 	enqueue(t.chanKey, std::move(pcm),
-	        t.ogg ? std::move(t.bytes) : std::vector<uint8_t>(), b, i, frames);
+	        t.ogg && archiveOn.load(std::memory_order_relaxed)
+	            ? std::move(t.bytes) : std::vector<uint8_t>(),
+	        b, i, frames);
 	closeTransfer(t); // a preview transfer holds a pushdata decoder
 	transfers.erase(it);
 }

@@ -120,6 +120,13 @@ public:
 	// with len 0 && last to close an interval with no residual bytes).
 	std::function<void(int chidx, const uint8_t* data, size_t len, bool last)> onUploadData;
 
+	// UI thread: does anyone want the raw interval bytes? While OFF (no Recorder armed —
+	// the common case) writeInterval doesn't carry the wire bytes into the ready queue
+	// at all, saving up to kMaxReady×interval-size of standing RAM per busy channel and
+	// the per-interval archive round-trip. An interval in flight when this flips ON is
+	// skipped (same rule as the TX side's txArchWhole).
+	void setArchiveListening(bool on) { archiveOn.store(on, std::memory_order_relaxed); }
+
 	// Audio thread: pull one wide frame (RING_CH interleaved-stereo-per-slot floats).
 	// Returns false on underrun (out untouched). out must hold RING_CH floats.
 	bool pullFrame(float* out) {
@@ -299,6 +306,7 @@ private:
 	std::atomic<int64_t> pullOffset_{INT64_MIN}; // INT64_MIN = not yet published
 	uint64_t mixFramesWritten = 0;               // mix thread only
 
+	std::atomic<bool> archiveOn{false}; // a Recorder is armed: carry wire bytes for it
 	std::atomic<bool> audioStarted_{false};
 	std::atomic<long> nDecoded{0};
 	std::atomic<long> nErrors{0};

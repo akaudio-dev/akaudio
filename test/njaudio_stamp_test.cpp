@@ -55,6 +55,7 @@ int main() {
 	NjAudio a;
 	a.setSampleRate(SR);
 	a.setTempo(BPM, BPI);
+	a.setArchiveListening(true); // we ARE the archive listener here
 
 	std::mutex smu;
 	std::vector<uint64_t> stamps;
@@ -134,6 +135,7 @@ int main() {
 		NjAudio a2;
 		a2.setSampleRate(SR);
 		a2.setTempo(BPM, BPI);
+		a2.setArchiveListening(true);
 		std::mutex m2;
 		std::vector<uint64_t> st2;
 		a2.onIntervalReceived = [&](const std::string&, int, const uint8_t*, size_t,

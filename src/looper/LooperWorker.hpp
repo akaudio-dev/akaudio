@@ -4,7 +4,7 @@
 #pragma once
 // LooperWorker — the Looper's background thread: the ONLY place buffers are
 // allocated or freed (docs/LOOPER_DESIGN.md §5.4). Serves the engine's commands in
-// order: ALLOC (a fresh N-frame buffer), OVERDUB_COPY (staging = take + the rolling
+// buffers (ALLOC), take copies for overdub staging (OVERDUB_COPY), releases, and
 // buffer's completed part), RELEASE (recycle). Keeps a small free-list of
 // same-size buffers so arming never waits on malloc; flushes it when N changes.
 // It also runs the M4 disk jobs (SAVE / CLEAR_FILE) and the manifest flush by calling the

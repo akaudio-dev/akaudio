@@ -101,11 +101,6 @@ void LooperWorker::run() {
 						std::memcpy(b->pcm, c.a->pcm, sizeof(float) * n2);
 					else
 						std::memset(b->pcm, 0, sizeof(float) * n2);
-					if (c.b && c.b->frames == c.frames) {
-						const size_t u2 = (size_t) (c.upto < c.frames ? c.upto : c.frames) * 2;
-						for (size_t i = 0; i < u2; i++)
-							b->pcm[i] += c.b->pcm[i];
-					}
 					Reply r {};
 					r.kind = Reply::OVERDUB_COPY; r.track = c.track; r.slot = c.slot; r.seq = c.seq; r.buf = b;
 					if (!engine.replies.push(r))

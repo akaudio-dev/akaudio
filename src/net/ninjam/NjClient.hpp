@@ -96,8 +96,14 @@ public:
 	// ---- Wire archive (Recorder) ----
 	// Start/stop the raw-interval archive (received players + our TX). Off-thread I/O;
 	// the RX/TX byte hooks are always wired and no-op while stopped. UI thread.
-	void startArchive(const std::string& dir, bool recordTx) { archive.start(dir, recordTx); }
-	void stopArchive() { archive.stop(); }
+	void startArchive(const std::string& dir, bool recordTx) {
+		audio.setArchiveListening(true); // before start: the next interval carries bytes
+		archive.start(dir, recordTx);
+	}
+	void stopArchive() {
+		archive.stop();
+		audio.setArchiveListening(false); // stop carrying wire bytes nobody will write
+	}
 	bool archiveRunning() const { return archive.running(); }
 	std::string archiveDir() const { return archive.dir(); }
 	long archiveIntervals() const { return archive.totalIntervals(); }

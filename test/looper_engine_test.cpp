@@ -365,14 +365,14 @@ int main() {
 	{
 		bool ok = true;
 		for (int f = 0; f < sim.n && ok; f++)
-			if (std::fabs(sim.outL[f] - Sim::sig(3, f)) > 1e-6f) ok = false;
+			if (std::fabs(sim.outL[f] - Sim::sig(3, f)) > 1e-6f || std::fabs(sim.outR[f] + Sim::sig(3, f)) > 1e-6f) ok = false;
 		CHECK(ok, "free-run: the take's first half fills the first short interval");
 	}
 	sim.interval(-1);
 	{
 		bool ok = true;
 		for (int f = 0; f < sim.n && ok; f++)
-			if (std::fabs(sim.outL[f] - Sim::sig(3, 2400 + f)) > 1e-6f) ok = false;
+			if (std::fabs(sim.outL[f] - Sim::sig(3, 2400 + f)) > 1e-6f || std::fabs(sim.outR[f] + Sim::sig(3, 2400 + f)) > 1e-6f) ok = false;
 		CHECK(ok, "free-run: its second half fills the next (drifting against the grid)");
 	}
 	sim.eng.stopTrack(0);
@@ -1149,7 +1149,7 @@ int main() {
 			bool ok = true;
 			for (int f = 0; f < g.n && ok; f++) {
 				float want = f < B ? 0.f : Sim::sig(1, f - B);
-				if (std::fabs(g.outL[f] - want) > 1e-6f) {
+				if (std::fabs(g.outL[f] - want) > 1e-6f || std::fabs(g.outR[f] + want) > 1e-6f) {
 					std::printf("   beat-launch mismatch at %d: %.6f vs %.6f\n", f, g.outL[f], want);
 					ok = false;
 				}
@@ -1168,7 +1168,7 @@ int main() {
 				if (f < B)          want = Sim::sig(1, 3600 + f); // cycle 1 tail
 				else if (f < 2 * B) want = Sim::sig(1, f - B);    // wrapped at its own period
 				else                want = 0.f;                   // stopped on the next beat
-				if (std::fabs(g.outL[f] - want) > 1e-6f) {
+				if (std::fabs(g.outL[f] - want) > 1e-6f || std::fabs(g.outR[f] + want) > 1e-6f) {
 					std::printf("   beat-stop mismatch at %d: %.6f vs %.6f\n", f, g.outL[f], want);
 					ok = false;
 				}
@@ -1199,7 +1199,7 @@ int main() {
 				// take[p] = sig2(B+p) for the body, so the replay from the cap beat
 				// reproduces the performance in place: out[f] = sig2(f).
 				float want = f < B ? 0.f : Sim::sig(2, f);
-				if (std::fabs(g.outL[f] - want) > 1e-6f) {
+				if (std::fabs(g.outL[f] - want) > 1e-6f || std::fabs(g.outR[f] + want) > 1e-6f) {
 					std::printf("   beat-record mismatch at %d: %.6f vs %.6f\n", f, g.outL[f], want);
 					ok = false;
 				}
@@ -1216,7 +1216,7 @@ int main() {
 			bool ok = true;
 			for (int f = 200; f < g.n && ok; f++) {
 				float want = f < B ? Sim::sig(3, f) + Sim::sig(2, f) : Sim::sig(2, f);
-				if (std::fabs(g.outL[f] - want) > 1e-6f) {
+				if (std::fabs(g.outL[f] - want) > 1e-6f || std::fabs(g.outR[f] + want) > 1e-6f) {
 					std::printf("   pickup mismatch at %d: %.6f vs %.6f\n", f, g.outL[f], want);
 					ok = false;
 				}
@@ -1239,7 +1239,7 @@ int main() {
 			bool ok = true;
 			for (int f = 0; f < g.n && ok; f++) {
 				float want = f < 2 * B ? 0.f : Sim::sig(4, B + ((f - 2 * B) % B));
-				if (std::fabs(g.outL[f] - want) > 1e-6f) {
+				if (std::fabs(g.outL[f] - want) > 1e-6f || std::fabs(g.outR[f] + want) > 1e-6f) {
 					std::printf("   beat-finish mismatch at %d: %.6f vs %.6f\n", f, g.outL[f], want);
 					ok = false;
 				}
@@ -1256,7 +1256,7 @@ int main() {
 			bool ok = true;
 			for (int f = 0; f < g.n && ok; f++) {
 				float want = (f >= B && f < 3 * B) ? Sim::sig(4, B + ((f - B) % B)) : 0.f;
-				if (std::fabs(g.outL[f] - want) > 1e-6f) {
+				if (std::fabs(g.outL[f] - want) > 1e-6f || std::fabs(g.outR[f] + want) > 1e-6f) {
 					std::printf("   free-run repeats mismatch at %d: %.6f vs %.6f\n", f, g.outL[f], want);
 					ok = false;
 				}
@@ -1281,7 +1281,7 @@ int main() {
 			bool ok = true;
 			for (int f = 0; f < g.n && ok; f++) {
 				float want = Sim::sig(4, B + (f % B)); // phase 0 at frame 0: launch beat + 3 cycles
-				if (std::fabs(g.outL[f] - want) > 1e-6f) {
+				if (std::fabs(g.outL[f] - want) > 1e-6f || std::fabs(g.outR[f] + want) > 1e-6f) {
 					std::printf("   short-take overdub mismatch at %d: %.6f vs %.6f\n", f, g.outL[f], want);
 					ok = false;
 				}
@@ -1304,7 +1304,7 @@ int main() {
 				int p = f % B;
 				if (p < 16 || (p >= B / 2 - 16 && p < B / 2 + 16)) continue; // arm/commit-edge slack
 				float want = Sim::sig(4, B + p) + (p < B / 2 ? Sim::sig(5, p) : 0.f);
-				if (std::fabs(g.outL[f] - want) > 1e-6f) {
+				if (std::fabs(g.outL[f] - want) > 1e-6f || std::fabs(g.outR[f] + want) > 1e-6f) {
 					std::printf("   partial-layer mismatch at %d: %.6f vs %.6f\n", f, g.outL[f], want);
 					ok = false;
 				}

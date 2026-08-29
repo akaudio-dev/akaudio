@@ -19,8 +19,8 @@ buses, transmit-to-Ninjam over the expander, and **session files on disk** (M4):
 committed take is encoded to OGG + indexed under `<base>/<stamp>_<room>/looper/`,
 overwritten/cleared takes retired into `history/`. The **Recorder** module and its wire
 archive (§4 items 3-4, §7, M3) are also built, and the **clip loader** restores the grid
-on patch reload (§11 — the saved OGGs decode back into their slots). Still on paper, marked
-*(planned)*: the timeline refinements in §7.3. The **Ableton `.als` exporter** (§12) is
+on patch reload (§11 — the saved OGGs decode back into their slots). The §7.3 timeline
+refinements (playout-start stamping) are **implemented** (2026-08-29). The **Ableton `.als` exporter** (§12) is
 built (2026-08-25, attempt #2 — template-based); REAPER `.rpp` stays open. §13 tracks
 per-milestone status.
 
@@ -40,7 +40,7 @@ per-milestone status.
 >    a per-slot free-running playhead: launched on a beat, a loop cycles at its OWN
 >    period; repeats/decay/follow count at the take's wrap (rest cells still count in
 >    intervals at the downbeat). Beat-quantized cuts land mid-cycle, so stops/replaces
->    fade over ~1.5 ms (the `dyingSlot` fade) instead of clicking.
+>    fade over ~1.5 ms (the per-slot `dieFade`) instead of clicking.
 > 3. **Capture records into per-slot staging, not the rolling pair.** The
 >    always-record rolling `rec`/`last` rotation is gone; a press requests a staging
 >    buffer (one interval, the length cap), recording starts at the next beat —
@@ -493,10 +493,10 @@ audio thread at frame or boundary granularity).
 
 ## 7. Recorder
 
-*(§7 is **built** — milestone M3 — with two simplifications from the sketch below,
-noted inline: the RX timestamp is a coarse session frame Ninjam publishes each block
-(not the exact playout-start mapping of §7.3, which is a v2 refinement), and the index
-is `index.jsonl` — one JSON object per line — rather than `index.json` + `clipsort.log`.)*
+*(§7 is **built** — milestone M3. RX rows carry the exact §7.3 playout-start stamps
+since 2026-08-29 (with never-played intervals flushed at a current-clock stamp), and
+the index is `index.jsonl` — one JSON object per line — rather than `index.json` +
+`clipsort.log`.)*
 
 ### 7.1 What it is
 A Ninjam expander with **no audio path and no clock reading** (`src/Recorder.cpp`, 8 HP):
@@ -707,8 +707,9 @@ reload:
 - The **worker** decodes each queued OGG (`stb_vorbis`, off the audio thread), allocates the
   buffer, computes the thumbnail, and hands it over via an SPSC `LoadInstall`.
 - The **audio thread** (`drainLoads` in `tick`) installs each as a **FILLED** slot with its
-  saved `repeats`/`decay` and thumbnail — playable once the live grid matches its length
-  (the regrid rule; greyed until a matching clock arrives). Buffer lifetime is the usual
+  saved `repeats`/`decay` and thumbnail, at its recorded length — launchable on any grid
+  (free-running, the 2026-08-29 rework; a slot the user started using meanwhile is torn
+  down first). Buffer lifetime is the usual
   rule — the worker frees it when the slot is later cleared/overwritten.
 - A restored session **keeps its folder** (`sessionRestored`), so new captures land beside
   the loaded takes and share their manifest — until the user changes the base folder.

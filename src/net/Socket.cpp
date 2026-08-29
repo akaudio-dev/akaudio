@@ -37,6 +37,19 @@ void netStartup() {
 	(void) once;
 }
 
+// May this fd go into an fd_set? POSIX fd_set is a bitmap indexed by the fd VALUE, so
+// the value must be bounded by FD_SETSIZE; Windows fd_set is a count-bounded ARRAY of
+// handles whose values are unbounded — value-bounding them skipped valid sockets and
+// broke every connect once handles grew past the limit (WSAEINVAL 10022, fixed
+// 2026-08-29). The Windows count bound is npending < FD_SETSIZE, enforced at insert.
+static inline bool fdSetIndexable(int f) {
+#ifdef _WIN32
+	return f >= 0;
+#else
+	return f >= 0 && f < FD_SETSIZE;
+#endif
+}
+
 int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeoutMs,
 		int* failErrOut) {
 	// Staggered PARALLEL connect ("happy eyeballs", RFC 8305 in spirit): launch a
@@ -178,19 +191,8 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 		int maxFd = -1;
 		for (int i = 0; i < npending; i++) {
 			const int f = pending[i];
-			// Bound re-check before indexing the fd_set BITMAP — POSIX only, mirroring
-			// the insert guard: there the fd VALUE is the index. On Windows fd_set is a
-			// count-bounded ARRAY of handles, and handle values are unbounded (they
-			// exceeded the raised FD_SETSIZE=8192 in a churny session, 2026-08-29) —
-			// applying the value bound there skipped VALID in-flight sockets, sent
-			// select() empty sets, and failed every connect with WSAEINVAL 10022.
-#ifdef _WIN32
-			if (f < 0)
+			if (!fdSetIndexable(f))
 				continue;
-#else
-			if (f < 0 || f >= FD_SETSIZE)
-				continue;
-#endif
 			FD_SET(f, &wf);
 			FD_SET(f, &ef); // Windows: failed connects are reported as exceptions
 			if (f > maxFd)
@@ -209,13 +211,8 @@ int netConnectAbortable(addrinfo* res, const std::atomic<bool>* abort, int timeo
 			netLog("select returned " + std::to_string(s) + " (npending=" + std::to_string(npending) + ")");
 			for (int i = 0; i < npending; i++) {
 				int fd = pending[i];
-#ifdef _WIN32
-				if (fd < 0)
-					continue; // see bound re-check above
-#else
-				if (fd < 0 || fd >= FD_SETSIZE)
-					continue; // see bound re-check above
-#endif
+				if (!fdSetIndexable(fd))
+					continue;
 				bool isWritable = FD_ISSET(fd, &wf) != 0;
 				bool isException = FD_ISSET(fd, &ef) != 0;
 				if (!isWritable && !isException)

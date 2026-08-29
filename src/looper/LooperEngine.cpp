@@ -11,6 +11,12 @@
 namespace akaudio {
 namespace looper {
 
+// Peak-accumulate one sample into the display thumbnail (pos of len frames → bin).
+static inline void thumbAccum(float* thumb, long long pos, long long len, float a) {
+	int bin = (int) std::min<long long>(THUMB_BINS - 1, pos * THUMB_BINS / len);
+	thumb[bin] = std::max(thumb[bin], std::min(1.f, a));
+}
+
 LooperEngine::LooperEngine() {
 	worker = new LooperWorker(*this);
 }
@@ -53,7 +59,7 @@ void LooperEngine::release(Buf* b) {
 	if (!b)
 		return;
 	Cmd c {};
-	c.kind = Cmd::RELEASE; c.track = c.slot = c.frames = c.upto = 0; c.seq = 0; c.a = b; c.b = nullptr;
+	c.kind = Cmd::RELEASE; c.track = c.slot = c.frames = 0; c.seq = 0; c.a = b;
 	cmds.push(c); // a full queue would leak the buffer rather than block — sized so it can't happen
 }
 
@@ -65,9 +71,21 @@ void LooperEngine::requestSpare(int t) {
 	if (tr.sparePending || N <= 0 || !tr.present.load(std::memory_order_relaxed))
 		return;
 	Cmd c {};
-	c.kind = Cmd::ALLOC; c.track = t; c.slot = -1; c.frames = N; c.upto = 0; c.seq = seqCounter++; c.a = c.b = nullptr;
+	c.kind = Cmd::ALLOC; c.track = t; c.slot = -1; c.frames = N; c.seq = seqCounter++; c.a = nullptr;
 	if (cmds.push(c))
 		tr.sparePending = true;
+}
+
+// Ask the worker for a capture staging buffer for (t, s) — one in flight at a time.
+// The reply is accepted in drainReplies only while the slot is still CAPTURE-armed.
+void LooperEngine::requestCaptureStaging(int t, int s) {
+	Slot& sl = tracks[t].slots[s];
+	if (sl.capAllocPending || N <= 0)
+		return;
+	Cmd c {};
+	c.kind = Cmd::ALLOC; c.track = t; c.slot = s; c.frames = N; c.seq = seqCounter++; c.a = nullptr;
+	if (cmds.push(c))
+		sl.capAllocPending = true;
 }
 
 // Hand a freshly committed take to the sink for encoding + indexing (M4). Runs on the
@@ -79,8 +97,8 @@ void LooperEngine::saveTake(int t, int s) {
 	Slot& sl = tracks[t].slots[s];
 	if (!sl.take.buf || sl.take.frames <= 0) return;
 	Cmd c {};
-	c.kind = Cmd::SAVE; c.track = t; c.slot = s; c.frames = sl.take.frames; c.upto = 0;
-	c.seq = seqCounter++; c.a = sl.take.buf; c.b = nullptr;
+	c.kind = Cmd::SAVE; c.track = t; c.slot = s; c.frames = sl.take.frames;
+	c.seq = seqCounter++; c.a = sl.take.buf;
 	c.meta.frames = sl.take.frames;
 	c.meta.sampleRate = sl.take.sampleRate;
 	c.meta.bpm = sl.take.bpm; c.meta.bpi = sl.take.bpi;
@@ -97,8 +115,8 @@ void LooperEngine::saveTake(int t, int s) {
 void LooperEngine::clearFile(int t, int s) {
 	if (!sink) return;
 	Cmd c {};
-	c.kind = Cmd::CLEAR_FILE; c.track = t; c.slot = s; c.frames = 0; c.upto = 0;
-	c.seq = 0; c.a = c.b = nullptr;
+	c.kind = Cmd::CLEAR_FILE; c.track = t; c.slot = s; c.frames = 0;
+	c.seq = 0; c.a = nullptr;
 	cmds.push(c);
 }
 
@@ -111,8 +129,8 @@ bool LooperEngine::armOverdub(int t, int s) {
 	if (!sl.take.buf || sl.take.frames <= 0)
 		return false;
 	Cmd cmd {};
-	cmd.kind = Cmd::OVERDUB_COPY; cmd.track = t; cmd.slot = s; cmd.frames = sl.take.frames; cmd.upto = 0;
-	cmd.seq = seqCounter++; cmd.a = sl.take.buf; cmd.b = nullptr;
+	cmd.kind = Cmd::OVERDUB_COPY; cmd.track = t; cmd.slot = s; cmd.frames = sl.take.frames;
+	cmd.seq = seqCounter++; cmd.a = sl.take.buf;
 	if (!cmds.push(cmd))
 		return false;
 	sl.odSeq = cmd.seq;
@@ -146,12 +164,22 @@ void LooperEngine::dropOverdub(Slot& sl) {
 	sl.odPeak = 0.f;
 }
 
+// A recording (or its armed pre-roll) dies without committing: release the staging,
+// reset the cell to EMPTY, and clear its UI remnants (fill bar, thumbnail).
+void LooperEngine::discardRecording(int t, int s) {
+	Slot& sl = tracks[t].slots[s];
+	dropCapture(sl);
+	sl.state.store(EMPTY, std::memory_order_relaxed);
+	sl.phaseA.store(0.f, std::memory_order_relaxed);
+	for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = 0.f;
+}
+
 void LooperEngine::dropCapture(Slot& sl) {
 	if (sl.staging) {
 		release(sl.staging);
 		sl.staging = nullptr;
 	}
-	sl.capSeq = 0;
+	sl.capAllocPending = false;
 	sl.recPos = -1;
 	sl.preW = 0;
 	sl.recPeak = 0.f;
@@ -171,7 +199,8 @@ void LooperEngine::setPlaying(int t, int s, uint8_t reason) {
 	sl.repCount.store(0, std::memory_order_relaxed);
 	sl.gain.store(1.f, std::memory_order_relaxed);
 	sl.playPos = 0; // the loop (re)starts from its own frame 0
-	sl.startedThisBoundary = true;
+	sl.phaseA.store(0.f, std::memory_order_relaxed);
+	sl.restStarted = sl.take.buf == nullptr; // only rest cells consume this (interval counting)
 	tr.playingSlot.store(s, std::memory_order_relaxed);
 	if (!retrigger)
 		emitEvent(true, t, s, reason);
@@ -198,8 +227,8 @@ void LooperEngine::emitEvent(bool start, int t, int s, uint8_t reason) {
 	if (!sink) return;
 	Slot& sl = tracks[t].slots[s];
 	Cmd c {};
-	c.kind = Cmd::EVENT; c.track = t; c.slot = s; c.frames = 0; c.upto = 0;
-	c.seq = seqCounter++; c.a = c.b = nullptr;
+	c.kind = Cmd::EVENT; c.track = t; c.slot = s; c.frames = 0;
+	c.seq = seqCounter++; c.a = nullptr;
 	c.ev.start = start;
 	c.ev.track = t;
 	c.ev.slot = s;
@@ -231,12 +260,13 @@ void LooperEngine::drainReplies() {
 						release(r.buf); // grid moved meanwhile, or already stocked
 				} else if (r.slot < MAX_SLOTS) {
 					// A capture staging: accept only while its arm is still pending.
+					// (Any in-flight ALLOC for this slot is equivalent — a zeroed
+					// N-frame buffer — so a plain in-flight flag replaces seq matching.)
 					Slot& sl = tr.slots[r.slot];
-					if (sl.capSeq == r.seq && sl.capSeq != 0 && !sl.staging
-					        && r.buf && r.buf->frames == N
+					sl.capAllocPending = false;
+					if (!sl.staging && r.buf && r.buf->frames == N
 					        && sl.pending.load(std::memory_order_relaxed) == CAPTURE) {
 						sl.staging = r.buf; // zeroed by the worker
-						sl.capSeq = 0;
 					} else {
 						release(r.buf);
 					}
@@ -458,15 +488,9 @@ void LooperEngine::beatCommit(const ClockFrame& c, double now) {
 					}
 					if (!sl.staging) {
 						sl.preW = 0; // the pre-roll aimed at THIS beat; re-aim at the next
-						if (sl.capSeq == 0) {
-							// Pressed before the grid was up (or the queue was full):
-							// (re)issue the staging request and stay armed.
-							Cmd cc {};
-							cc.kind = Cmd::ALLOC; cc.track = t; cc.slot = s; cc.frames = N; cc.upto = 0;
-							cc.seq = seqCounter++; cc.a = cc.b = nullptr;
-							if (cmds.push(cc))
-								sl.capSeq = cc.seq;
-						}
+						// Pressed before the grid was up (or the queue was full):
+						// (re)issue the staging request and stay armed.
+						requestCaptureStaging(t, s);
 						break;
 					}
 					sl.pending.store(NONE, std::memory_order_relaxed);
@@ -527,10 +551,7 @@ void LooperEngine::commitCapture(int t, int s, bool finishing, const ClockFrame&
 	const bool commitOk = present && sl.staging && len > 0 && sl.recPeak >= GATE
 	        && (!finishing || tr.chainFrom < 0 || sl.recPeak >= TAIL_GATE);
 	if (!commitOk) {
-		dropCapture(sl);
-		sl.state.store(EMPTY, std::memory_order_relaxed);
-		sl.phaseA.store(0.f, std::memory_order_relaxed);
-		for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = 0.f;
+		discardRecording(t, s);
 		if (finishing && tr.chainFrom >= 0) {
 			// Finish with an empty final cell: no flash (the drop is the expected
 			// outcome), close the chain at the predecessor and cycle the performance
@@ -547,10 +568,7 @@ void LooperEngine::commitCapture(int t, int s, bool finishing, const ClockFrame&
 			} else {
 				pd.followSlot.store(head + 1, std::memory_order_relaxed); // 1-based
 			}
-			if (tr.slots[head].take.buf)
-				setPlaying(t, head, LoopEvent::R_LAUNCH);
-			else
-				refuse(tr.slots[head], now); // head cleared mid-chain: nothing to replay
+			replayChainHead(t, head, now);
 		} else {
 			// Silence (or the cable is gone): refuse with a flash; breakChain stamps
 			// the predecessor as the performance's last cell.
@@ -575,7 +593,7 @@ void LooperEngine::commitCapture(int t, int s, bool finishing, const ClockFrame&
 	sl.take.bpm = c.bpm; sl.take.bpi = c.bpi; sl.take.sampleRate = sr;
 	sl.take.startFrame = sl.recStart;
 	sl.take.peak = sl.recPeak;
-	sl.capSeq = 0;
+	sl.capAllocPending = false;
 	sl.recPos = -1;
 	sl.recPeak = 0.f;
 	// Thumbnail bins were laid against the one-interval cap; a shorter take re-spreads
@@ -637,12 +655,7 @@ void LooperEngine::commitCapture(int t, int s, bool finishing, const ClockFrame&
 		sl.repeats.store(1, std::memory_order_relaxed);
 		sl.followSlot.store(head + 1, std::memory_order_relaxed); // 1-based
 		sl.state.store(FILLED, std::memory_order_relaxed);
-		tr.chainFrom = -1;
-		tr.chainHead = -1;
-		if (tr.slots[head].take.buf)
-			setPlaying(t, head, LoopEvent::R_LAUNCH);
-		else
-			refuse(tr.slots[head], now); // head cleared mid-chain: nothing to replay
+		replayChainHead(t, head, now);
 	} else if (chain) {
 		sl.state.store(FILLED, std::memory_order_relaxed);
 		// Hand the spare to the next cell and keep recording without missing a frame.
@@ -656,7 +669,6 @@ void LooperEngine::commitCapture(int t, int s, bool finishing, const ClockFrame&
 		nx.recPeak = 0.f;
 		nx.recStart = c.sessionFrame;
 		nx.preW = 0;
-		nx.capSeq = 0;
 		for (int b = 0; b < THUMB_BINS; b++) nx.thumb[b] = 0.f;
 		if (!chainedIn)
 			tr.chainHead = s; // a chain just started: this cell is the performance's first bar
@@ -677,18 +689,31 @@ void LooperEngine::commitCapture(int t, int s, bool finishing, const ClockFrame&
 	saveTake(t, s); // encode + index the committed take (M4)
 }
 
+// Close the auto-advance chain and start the replay from its head on this same beat.
+// The caller has already wired the closing cell; head < 0 or a cleared head refuses.
+void LooperEngine::replayChainHead(int t, int head, double now) {
+	Track& tr = tracks[t];
+	tr.chainFrom = -1;
+	tr.chainHead = -1;
+	if (head < 0 || head >= MAX_SLOTS)
+		return;
+	if (tr.slots[head].take.buf)
+		setPlaying(t, head, LoopEvent::R_LAUNCH);
+	else
+		refuse(tr.slots[head], now); // head cleared mid-chain: nothing to replay
+}
+
 // Interval downbeat. Playing REST cells (silence steps in a follow chain — they have no
 // take, so no loop period of their own) count their repeats here, in intervals. Real
 // takes count at their own wrap in tick()'s playback path.
-void LooperEngine::boundary(const ClockFrame& c, double now) {
-	(void) c;
+void LooperEngine::boundary(double now) {
 	for (int t = 0; t < MAX_TRACKS; t++) {
 		Track& tr = tracks[t];
 		int ps = tr.playingSlot.load(std::memory_order_relaxed);
 		if (ps < 0) continue;
 		Slot& sl = tr.slots[ps];
-		if (sl.startedThisBoundary)
-			sl.startedThisBoundary = false; // not on the boundary it started on
+		if (sl.restStarted)
+			sl.restStarted = false; // not on the downbeat it started on
 		else if (!sl.take.buf)
 			wrapPlaying(t, now);
 	}
@@ -720,7 +745,7 @@ void LooperEngine::wrapPlaying(int t, double now) {
 			setPlaying(t, fs, LoopEvent::R_FOLLOW);
 			// A rest target counts per interval from the NEXT downbeat: consume the
 			// started flag so a mid-interval follow doesn't stretch its first step.
-			tr.slots[fs].startedThisBoundary = false;
+			tr.slots[fs].restStarted = false;
 		} else {
 			demote(t, ps, LoopEvent::R_EXHAUSTED);
 			tr.playingSlot.store(-1, std::memory_order_relaxed);
@@ -744,16 +769,17 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 	if (c.running && c.intervalFrames > 0) {
 		if (!haveGrid || c.gridGeneration != gen || c.intervalFrames != N || c.sampleRate != sr)
 			regrid(c);
-		if (c.beat || c.downbeat)
+		if (c.beat)
 			beatCommit(c, now); // the action grid: launches, stops, record start/finish
 		if (c.downbeat)
-			boundary(c, now);
+			boundary(now); // rest cells count their repeats per interval
 	}
 	const bool grid = haveGrid && N > 0 && c.running;
 	const int f = c.frameInInterval;
 	const bool inGrid = grid && f >= 0 && f < N;
 
 	const bool declick = declickEnabled.load(std::memory_order_relaxed) && declickN > 0;
+	int remToBeat = -1; // framesToNextBeat(c), computed once on demand (tick-invariant)
 
 	float mixL = 0.f, mixR = 0.f, cuL = 0.f, cuR = 0.f;
 	for (int t = 0; t < MAX_TRACKS; t++) {
@@ -788,15 +814,19 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 					else                          { o[0] = l;  o[1] = r;  }
 					float aa = std::max(std::fabs(o[0]), std::fabs(o[1]));
 					if (aa > sl.recPeak) sl.recPeak = aa;
-					int bin = (int) std::min<long long>(THUMB_BINS - 1, (long long) sl.recPos * THUMB_BINS / N);
-					sl.thumb[bin] = std::max(sl.thumb[bin], std::min(1.f, aa));
+					thumbAccum(sl.thumb, sl.recPos, N, aa);
 					sl.recPos++;
-					sl.phaseA.store((float) sl.recPos / (float) N, std::memory_order_relaxed);
+					// The UI reads at ~60 Hz: publishing every 256th frame (~5 ms) is
+					// already sub-visible — no need for an fdiv + store per frame.
+					if (!(sl.recPos & 0xFF))
+						sl.phaseA.store((float) sl.recPos / (float) N, std::memory_order_relaxed);
 				} else if (sl.pending.load(std::memory_order_relaxed) == CAPTURE && sl.staging) {
 					// Pre-roll: frames land at their final tail position directly —
 					// N - (frames remaining to the start beat) — faded in so the fold
 					// can't click at its left edge.
-					const int rem = framesToNextBeat(c);
+					if (remToBeat < 0)
+						remToBeat = framesToNextBeat(c);
+					const int rem = remToBeat;
 					if (rem >= 1 && rem <= N) {
 						const int pos = N - rem;
 						float fg = declick && sl.preW < declickN
@@ -805,8 +835,7 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 						o[0] = l * fg;
 						o[1] = r * fg;
 						sl.preW++;
-						int bin = (int) std::min<long long>(THUMB_BINS - 1, (long long) pos * THUMB_BINS / N);
-						sl.thumb[bin] = std::max(sl.thumb[bin], std::min(1.f, a));
+						thumbAccum(sl.thumb, pos, N, a);
 					}
 				}
 			}
@@ -848,9 +877,7 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 					o[1] += r;
 					float aa = std::max(std::fabs(o[0]), std::fabs(o[1]));
 					if (aa > sl->odPeak) sl->odPeak = aa;
-					int bin = (int) std::min<long long>(THUMB_BINS - 1,
-					          (long long) sl->playPos * THUMB_BINS / sl->take.frames);
-					sl->thumb[bin] = std::max(sl->thumb[bin], std::min(1.f, aa));
+					thumbAccum(sl->thumb, sl->playPos, sl->take.frames, aa);
 				}
 				float g = sl->gain.load(std::memory_order_relaxed);
 				// Declick: fade the first/last declickN frames of the cycle smoothly to 0, so
@@ -867,7 +894,8 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 				loopL = sl->take.buf->pcm[(size_t) sl->playPos * 2] * g;
 				loopR = sl->take.buf->pcm[(size_t) sl->playPos * 2 + 1] * g;
 				sl->playPos++;
-				sl->phaseA.store((float) sl->playPos / (float) sl->take.frames, std::memory_order_relaxed);
+				if (!(sl->playPos & 0xFF)) // ~60 Hz UI reader; 256-frame granularity suffices
+					sl->phaseA.store((float) sl->playPos / (float) sl->take.frames, std::memory_order_relaxed);
 			}
 		}
 		// Stopped/replaced loops fade out (~1.5 ms) instead of hard-cutting: every slot
@@ -997,11 +1025,8 @@ void LooperEngine::cancelRecording(int t, int except) {
 		if (s == except) continue;
 		Slot& sl = tr.slots[s];
 		if (sl.state.load(std::memory_order_relaxed) == RECORDING) {
-			sl.state.store(EMPTY, std::memory_order_relaxed);
 			sl.pending.store(NONE, std::memory_order_relaxed); // a queued FINISH dies with the recording
-			dropCapture(sl); // the staging goes back to the worker
-			sl.phaseA.store(0.f, std::memory_order_relaxed);
-			for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = 0.f;
+			discardRecording(t, s); // staging back to the worker; cell + UI remnants reset
 			breakChain(tr, s);
 		}
 	}
@@ -1040,13 +1065,7 @@ void LooperEngine::pressSlot(int t, int s, bool overdubLatch) {
 			// arm would otherwise be reused, folding its old pre-roll into this take.
 			dropCapture(sl);
 			for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = 0.f;
-			if (N > 0) {
-				Cmd c {};
-				c.kind = Cmd::ALLOC; c.track = t; c.slot = s; c.frames = N; c.upto = 0;
-				c.seq = seqCounter++; c.a = c.b = nullptr;
-				if (cmds.push(c))
-					sl.capSeq = c.seq;
-			}
+			requestCaptureStaging(t, s);
 			sl.pending.store(CAPTURE, std::memory_order_relaxed);
 			break;
 		}

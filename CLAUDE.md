@@ -118,8 +118,8 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
   takes retired into `history/`; base defaults to `~/Music/jams`, shares a Recorder's jam
   folder via `RecorderLink` when one is armed. The **clip loader restores the grid on patch
   reload**: the resolved session dir is persisted, and on load the Session decodes each
-  saved OGG (stb_vorbis, on the worker) back into its slot as a FILLED take — playable once
-  the live grid matches its length; continued captures land in the same folder/manifest,
+  saved OGG (stb_vorbis, on the worker) back into its slot as a FILLED take at its recorded length (free-running —
+  launchable on any grid); continued captures land in the same folder/manifest,
   and the restored session counts as written (`markRestored`) so settings/name edits and
   clears rewrite session.json immediately instead of waiting for a new take.
   **Takes also embed in the patch** (`looper/SessionMirror`, on by default, menu-toggleable):

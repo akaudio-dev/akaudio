@@ -117,8 +117,7 @@ void NjArchive::archiveRx(const std::string& user, int chidx, const uint8_t* byt
 	j.user = user;
 	j.chidx = chidx;
 	j.bytes.assign(bytes, bytes + len);
-	j.sessionFrame = atSessionFrame != UINT64_MAX ? atSessionFrame
-	               : sessionFrame.load(std::memory_order_relaxed);
+	j.sessionFrame = stampOr(atSessionFrame);
 	j.bpm = bpm; j.bpi = bpi; j.frames = frames; j.sampleRate = sampleRate;
 	enqueue(std::move(j));
 }
@@ -132,8 +131,7 @@ void NjArchive::archiveTx(int chidx, const uint8_t* bytes, size_t len,
 	j.tx = true;
 	j.chidx = chidx;
 	j.bytes.assign(bytes, bytes + len);
-	j.sessionFrame = atSessionFrame != UINT64_MAX ? atSessionFrame
-	               : sessionFrame.load(std::memory_order_relaxed);
+	j.sessionFrame = stampOr(atSessionFrame);
 	j.bpm = bpm; j.bpi = bpi; j.frames = frames; j.sampleRate = sampleRate;
 	enqueue(std::move(j));
 }

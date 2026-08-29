@@ -60,6 +60,8 @@ public:
 	// it is enqueued.
 	void setSessionFrame(uint64_t sf) { sessionFrame.store(sf, std::memory_order_relaxed); }
 	uint64_t now() const { return sessionFrame.load(std::memory_order_relaxed); }
+	// The UINT64_MAX sentinel means "stamp with the current clock" — resolved here, once.
+	uint64_t stampOr(uint64_t at) const { return at != UINT64_MAX ? at : now(); }
 
 	// Mix thread: a complete received interval's raw OGG bytes (no-op unless running).
 	// `atSessionFrame` is the interval's playout start on the shared timeline (§7.3);

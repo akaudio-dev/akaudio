@@ -163,10 +163,9 @@ struct LoadInstall {
 // Audio → worker.
 struct Cmd {
 	enum Kind { ALLOC, OVERDUB_COPY, RELEASE, SAVE, CLEAR_FILE, EVENT } kind;
-	int track, slot, frames, upto;
+	int track, slot, frames;
 	uint32_t seq;
 	Buf* a;      // OVERDUB_COPY: the take to copy; RELEASE: the buffer; SAVE: the source take
-	Buf* b;      // OVERDUB_COPY: the rolling buffer whose [0, upto) is added
 	TakeMeta meta; // SAVE: the take's metadata
 	LoopEvent ev;  // EVENT: the performance event (FIFO with SAVE keeps take-before-event order)
 };
@@ -214,14 +213,16 @@ struct Slot {
 	// after a tempo change it simply keeps playing at the old speed, drifting against
 	// the new grid ("tough luck" by design; no re-pitching, no tile/split derivation).
 	int playPos = 0;
-	bool startedThisBoundary = false;
+	// A playing REST cell (no take) counts repeats per interval; this skips the
+	// downbeat it started on. Real takes count at their own wrap and ignore it.
+	bool restStarted = false;
 	// Capture / overdub staging (one at a time — a slot is never both). Capture:
-	// requested at the press (ALLOC, capSeq), input recorded straight into it from the
+	// requested at the press (ALLOC), input recorded straight into it from the
 	// start beat; committed at a beat (FINISH) or at the one-interval cap. Overdub:
 	// a worker copy of the take (odSeq), input accumulated at the playhead, swapped in
 	// at the take's own wrap.
 	Buf* staging = nullptr;
-	uint32_t capSeq = 0;    // outstanding capture ALLOC (0 = none)
+	bool capAllocPending = false; // a capture ALLOC is in flight (don't re-issue)
 	int recPos = -1;        // frames recorded into staging (−1 = recording not started)
 	int preW = 0;           // pre-roll (pickup) frames written at the staging tail
 	uint64_t recStart = 0;  // session frame of the recording's first frame
@@ -334,7 +335,7 @@ private:
 	void regrid(const ClockFrame& c);
 	// Interval downbeat: playing REST cells (silence in a follow chain) count their
 	// repeats in intervals here; real takes count at their own wrap in tick().
-	void boundary(const ClockFrame& c, double now);
+	void boundary(double now);
 	// Beat boundary (incl. the downbeat): commit pending LAUNCH / STOP / CAPTURE-start /
 	// FINISH — the action grid is the beat, not the interval.
 	void beatCommit(const ClockFrame& c, double now);
@@ -346,6 +347,11 @@ private:
 	void drainReplies();
 	void drainIntents();
 	void requestSpare(int t);
+	void requestCaptureStaging(int t, int s); // one capture ALLOC in flight per slot
+	// Close the chain and replay from its head on this beat (caller wires the closer).
+	void replayChainHead(int t, int head, double now);
+	// Kill a recording/armed cell without committing: staging released, EMPTY, UI reset.
+	void discardRecording(int t, int s);
 	void drainLoads();             // install decoded takes from the worker (clip loader)
 	bool armOverdub(int t, int s); // request staging = copy(take) for the overdub cycle
 	// Swap the completed overdub staging (take + input folded so far) in as the new
