@@ -535,7 +535,9 @@ thread publishes `pullOffset = sessionFrame − framesPulled` every frame
 (`NjClient::setArchiveSessionFrame`) so the mix thread can map its write index onto the
 session axis, ring latency included. TX rows fire on the final upload chunk (the END
 boundary) and are stamped one interval back. An interval dropped before it plays
-(backlog, re-grid, leave) is no longer archived. Received playout is arrival-locked
+(backlog, re-grid, teardown) is still archived — flushed with a current-clock stamp
+(`NjAudio::flushOrphans`), so the wire archive keeps every received interval, including
+the jam's final ones caught mid-queue by a stop. Received playout is arrival-locked
 (arbitrary 0–1 interval offset from our grid) — the timeline records that offset
 exactly; the `.als` export then snaps every `index.jsonl` row to the NEAREST interval
 boundary (`JamExport`), because interval audio is downbeat-aligned by construction and

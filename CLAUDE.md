@@ -53,7 +53,7 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
 
 - **Recorder** (`src/Recorder.cpp`, built M3) — a Ninjam expander that saves the jam:
   `NjClient` owns an `NjArchive` (`src/net/ninjam/NjArchive.{hpp,cpp}`, Rack-free writer
-  thread) that writes every *played* received per-player interval and our TX mix to disk
+  thread) that writes every received per-player interval and our TX mix to disk
   as the raw OGG bytes — rows are stamped on the shared session timeline at the
   interval's local **playout start** (RX: fired from `NjAudio`'s mix thread when the
   chained slot begins, mapped via the audio thread's `pullOffset` publish; TX: capture

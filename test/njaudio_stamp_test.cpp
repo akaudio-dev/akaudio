@@ -127,6 +127,57 @@ int main() {
 		CHECK(stamps[0] != UINT64_MAX, "pullOffset was published before the first pop");
 	}
 
+	// Flush-on-stop: an interval fully received but never played (the jam's last
+	// chord, still queued behind the playing one at teardown) must STILL reach the
+	// archive — delivered by flushOrphans with the UINT64_MAX clock-fallback stamp.
+	{
+		NjAudio a2;
+		a2.setSampleRate(SR);
+		a2.setTempo(BPM, BPI);
+		std::mutex m2;
+		std::vector<uint64_t> st2;
+		a2.onIntervalReceived = [&](const std::string&, int, const uint8_t*, size_t,
+		                            int, int, int, uint64_t sf) {
+			std::lock_guard<std::mutex> lk(m2);
+			st2.push_back(sf);
+		};
+		a2.start();
+		a2.onUserChannel("bob", 0, true, 0, 0);
+		int b2, i2, f2 = 0;
+		auto dl = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+		while (f2 != N && std::chrono::steady_clock::now() < dl) {
+			a2.currentTempo(b2, i2, f2);
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		for (int k = 0; k < 2; k++) {
+			uint8_t guid[16] = {0};
+			guid[0] = (uint8_t) (k + 1);
+			a2.beginInterval("bob", 0, guid, OGGV);
+			a2.writeInterval(guid, ogg.data(), ogg.size(), true);
+		}
+		a2.publishSession(BASE);
+		float fr[RING_CH];
+		uint64_t pulled2 = 0;
+		dl = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+		while (pulled2 < (uint64_t) N / 2 && std::chrono::steady_clock::now() < dl) {
+			// Half an interval: the first interval starts (archived at its playout
+			// start), the second stays queued when we tear down.
+			if (a2.pullFrame(fr)) {
+				pulled2++;
+				a2.publishSession(BASE + pulled2);
+			} else {
+				std::this_thread::sleep_for(std::chrono::microseconds(200));
+			}
+		}
+		a2.stop();
+		std::lock_guard<std::mutex> lk(m2);
+		CHECK(st2.size() == 2, "flush-on-stop: both intervals reached the archive");
+		if (st2.size() == 2) {
+			CHECK(st2[0] != UINT64_MAX, "flush-on-stop: the played one carries a playout stamp");
+			CHECK(st2[1] == UINT64_MAX, "flush-on-stop: the unplayed one carries the clock-fallback stamp");
+		}
+	}
+
 	std::printf(failures ? "\n%d FAILURES\n" : "\nall checks passed\n", failures);
 	return failures ? 1 : 0;
 }

@@ -102,12 +102,14 @@ public:
 			return;
 		txCapture[ch]->push(l, r);
 	}
-	// Mix-thread callback: a complete received interval's raw OGG bytes (non-voice,
-	// non-silence). The wire archive (Recorder) copies them to disk as-is. Fired once
-	// per interval, at the moment its chained playout STARTS in the local mix (not at
-	// network arrival), with `sessionFrame` = that playout start on the shared session
-	// timeline (§7.3; UINT64_MAX until publishSession() has run). An interval dropped
-	// before it plays (mixer backlog, re-grid, leave) is not delivered.
+	// Background-thread callback: a complete received interval's raw OGG bytes
+	// (non-voice, non-silence). The wire archive (Recorder) copies them to disk as-is.
+	// Fired once per interval — normally from the MIX thread at the moment its chained
+	// playout STARTS in the local mix (not at network arrival), with `sessionFrame` =
+	// that playout start on the shared session timeline (§7.3; UINT64_MAX until
+	// publishSession() has run). An interval that never plays (mixer backlog, re-grid,
+	// teardown) is still delivered — flushed with sessionFrame UINT64_MAX (= "stamp
+	// with the current clock") so the wire archive stays complete.
 	std::function<void(const std::string& user, int chidx, const uint8_t* bytes, size_t len,
 	                   int bpm, int bpi, int frames, uint64_t sessionFrame)> onIntervalReceived;
 
@@ -218,8 +220,13 @@ private:
 	};
 
 	static std::string chanKey(const std::string& user, int chidx);
+	static void splitKey(const std::string& key, std::string& user, int& chidx); // inverse
 	void recomputeInterval();
-	void recomputeIntervalLocked(); // caller holds mu
+	void recomputeIntervalLocked(); // caller holds mu; may park drops in orphaned_
+	// Deliver parked never-played intervals (backlog / re-grid / teardown drops) to
+	// onIntervalReceived with sessionFrame UINT64_MAX. Any thread; takes mu briefly and
+	// fires the callback OUTSIDE it. Callers run it right after the scope that parked.
+	void flushOrphans();
 	void enqueue(const std::string& key, std::vector<float>&& interval,
 	             std::vector<uint8_t>&& ogg = std::vector<uint8_t>(),
 	             int bpm = 0, int bpi = 0, int frames = 0);
@@ -274,7 +281,10 @@ private:
 	// mixLoop does the locked recompute/drop at the next boundary.
 	std::atomic<bool> ratePending{false};
 
-	std::mutex mu; // guards channels, slots, tempo fields
+	std::mutex mu; // guards channels, slots, tempo fields, orphaned_
+	// Received intervals dropped before they could play (backlog, re-grid, teardown),
+	// parked under mu for flushOrphans() to archive outside the lock.
+	std::vector<std::pair<std::string, ReadyInterval>> orphaned_;
 	std::map<std::string, Channel> channels;
 	std::map<std::string, int> userSlot; // username -> poly slot
 	bool slotUsed[MAX_PLAYERS] = {false};

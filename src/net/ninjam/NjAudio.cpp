@@ -22,6 +22,35 @@ std::string NjAudio::chanKey(const std::string& user, int chidx) {
 	return user + "\n" + std::to_string(chidx);
 }
 
+void NjAudio::splitKey(const std::string& key, std::string& user, int& chidx) {
+	size_t nl = key.find('\n');
+	user = nl == std::string::npos ? key : key.substr(0, nl);
+	chidx = nl == std::string::npos ? 0 : (int) std::strtol(key.c_str() + nl + 1, nullptr, 10);
+}
+
+void NjAudio::flushOrphans() {
+	std::vector<std::pair<std::string, ReadyInterval>> out;
+	{
+		std::lock_guard<std::mutex> lock(mu);
+		out.swap(orphaned_);
+	}
+	if (out.empty() || !onIntervalReceived)
+		return;
+	for (auto& e : out) {
+		if (e.second.ogg.empty())
+			continue;
+		std::string user;
+		int chidx;
+		splitKey(e.first, user, chidx);
+		// Never played (backlog / re-grid / teardown) but fully received: the wire
+		// archive is preservation, so it gets the bytes anyway — stamped with the
+		// archive's current clock (UINT64_MAX = caller-side fallback), since no
+		// playout start exists for it.
+		onIntervalReceived(user, chidx, e.second.ogg.data(), e.second.ogg.size(),
+		                   e.second.bpm, e.second.bpi, e.second.frames, UINT64_MAX);
+	}
+}
+
 void NjAudio::setSampleRate(double sr) {
 	// May run on the audio device thread (see ratePending): store + flag only, never
 	// lock. mixLoop recomputes the interval length + drops mismatched queued audio at
@@ -43,15 +72,23 @@ void NjAudio::recomputeIntervalLocked() {
 	int prev = intervalSamples.exchange(n, std::memory_order_relaxed);
 	if (n != prev) {
 		// Interval length changed (tempo/sr): queued intervals were gridded to the old
-		// length; drop them so we don't mix mismatched buffers.
-		for (auto& kv : channels)
+		// length; drop them from PLAYOUT so we don't mix mismatched buffers — but park
+		// their wire bytes for the archive (flushOrphans, run by the caller after mu).
+		for (auto& kv : channels) {
+			for (auto& ri : kv.second.ready)
+				if (!ri.ogg.empty())
+					orphaned_.emplace_back(kv.first, std::move(ri));
 			kv.second.ready.clear();
+		}
 	}
 }
 
 void NjAudio::recomputeInterval() {
-	std::lock_guard<std::mutex> lock(mu);
-	recomputeIntervalLocked();
+	{
+		std::lock_guard<std::mutex> lock(mu);
+		recomputeIntervalLocked();
+	}
+	flushOrphans();
 }
 
 void NjAudio::setTempo(int newBpm, int newBpi) {
@@ -371,19 +408,27 @@ void NjAudio::voiceDeliver(Transfer& t) {
 
 void NjAudio::enqueue(const std::string& key, std::vector<float>&& interval,
                       std::vector<uint8_t>&& ogg, int bpm, int bpi, int frames) {
-	std::lock_guard<std::mutex> lock(mu);
-	Channel& ch = channels[key];
-	if (ch.user.empty()) // interval may arrive before USERINFO; derive user from the key
-		ch.user = key.substr(0, key.rfind('\n'));
-	if (ch.ready.size() >= kMaxReady)
-		ch.ready.pop_front(); // mixer fell behind; drop oldest to bound latency/memory
-	ReadyInterval ri;
-	ri.pcm = std::move(interval);
-	ri.ogg = std::move(ogg);
-	ri.bpm = bpm;
-	ri.bpi = bpi;
-	ri.frames = frames;
-	ch.ready.push_back(std::move(ri));
+	{
+		std::lock_guard<std::mutex> lock(mu);
+		Channel& ch = channels[key];
+		if (ch.user.empty()) // interval may arrive before USERINFO; derive user from the key
+			ch.user = key.substr(0, key.rfind('\n'));
+		if (ch.ready.size() >= kMaxReady) {
+			// Mixer fell behind; drop the oldest from playout to bound latency/memory —
+			// but its wire bytes still reach the archive (flushed below, outside mu).
+			if (!ch.ready.front().ogg.empty())
+				orphaned_.emplace_back(key, std::move(ch.ready.front()));
+			ch.ready.pop_front();
+		}
+		ReadyInterval ri;
+		ri.pcm = std::move(interval);
+		ri.ogg = std::move(ogg);
+		ri.bpm = bpm;
+		ri.bpi = bpi;
+		ri.frames = frames;
+		ch.ready.push_back(std::move(ri));
+	}
+	flushOrphans(); // cheap no-op unless the overflow above parked something
 }
 
 std::vector<float> NjAudio::decodeOgg(const uint8_t* data, size_t len, int frames) {
@@ -510,19 +555,29 @@ void NjAudio::stop() {
 	// Clear now (not only in start()) so the UI's join-gap countdown isn't suppressed
 	// by a previous session's flag between a re-join and its mixer launch.
 	audioStarted_.store(false, std::memory_order_relaxed);
-	std::lock_guard<std::mutex> lock(mu);
-	channels.clear();
-	for (auto& kv : transfers)
-		closeTransfer(kv.second); // free any voice pushdata decoders
-	transfers.clear();
-	userSlot.clear();
-	for (int i = 0; i < MAX_PLAYERS; i++) slotUsed[i] = false;
-	nPoly.store(0, std::memory_order_relaxed);
-	// The audio thread (this ring's consumer) may still be pulling; it applies
-	// the drop on its next pull. The tx capture rings are drained by txLoop
-	// (their consumer) — while inactive and at thread start — never from here,
-	// because the audio thread is their *producer* and may push concurrently.
-	ring.requestClear();
+	{
+		std::lock_guard<std::mutex> lock(mu);
+		// Teardown must not lose the wire archive's tail: intervals fully received but
+		// still queued (jitter hold, a still-playing predecessor — typically the jam's
+		// LAST intervals) are parked for the flush below before the channels go away.
+		for (auto& kv : channels)
+			for (auto& ri : kv.second.ready)
+				if (!ri.ogg.empty())
+					orphaned_.emplace_back(kv.first, std::move(ri));
+		channels.clear();
+		for (auto& kv : transfers)
+			closeTransfer(kv.second); // free any voice pushdata decoders
+		transfers.clear();
+		userSlot.clear();
+		for (int i = 0; i < MAX_PLAYERS; i++) slotUsed[i] = false;
+		nPoly.store(0, std::memory_order_relaxed);
+		// The audio thread (this ring's consumer) may still be pulling; it applies
+		// the drop on its next pull. The tx capture rings are drained by txLoop
+		// (their consumer) — while inactive and at thread start — never from here,
+		// because the audio thread is their *producer* and may push concurrently.
+		ring.requestClear();
+	}
+	flushOrphans();
 }
 
 // Transmit: stream each channel's captured frames through a per-interval OGG encoder,
@@ -720,10 +775,12 @@ void NjAudio::mixLoop() {
 	std::vector<PendingArchive> pending;
 
 	while (!abort.load(std::memory_order_acquire)) {
+		bool regridded = false;
 		{
 			std::lock_guard<std::mutex> lock(mu);
 			// Deferred server tempo / sample-rate changes: recompute the grid. Queued
-			// intervals are dropped by the recompute; also drop in-flight playheads —
+			// intervals are dropped by the recompute (their wire bytes parked for the
+			// archive — flushed below, outside mu); also drop in-flight playheads —
 			// they're gridded to the old length.
 			bool regrid = false;
 			if (tempoPending) {
@@ -735,6 +792,7 @@ void NjAudio::mixLoop() {
 			if (ratePending.exchange(false, std::memory_order_acquire))
 				regrid = true;
 			if (regrid) {
+				regridded = true;
 				recomputeIntervalLocked();
 				for (auto& kv : channels) {
 					Channel& ch = kv.second;
@@ -757,6 +815,8 @@ void NjAudio::mixLoop() {
 				}
 			}
 		}
+		if (regridded)
+			flushOrphans(); // the re-grid's dropped intervals still reach the archive
 		int N = intervalSamples.load(std::memory_order_relaxed);
 		double sr = sampleRate.load(std::memory_order_relaxed);
 		// Startup jitter hold: streamed uploads complete right at the sender's boundary,
@@ -852,12 +912,8 @@ void NjAudio::mixLoop() {
 								int64_t off = pullOffset_.load(std::memory_order_relaxed);
 								int64_t sf = off == INT64_MIN ? -1
 								           : (int64_t) (mixFramesWritten + (uint64_t) i) + off;
-								const std::string& k = it->first; // "user\nchidx"
-								size_t nl = k.find('\n');
 								PendingArchive pa;
-								pa.user = nl == std::string::npos ? k : k.substr(0, nl);
-								pa.chidx = nl == std::string::npos ? 0
-								         : (int) std::strtol(k.c_str() + nl + 1, nullptr, 10);
+								splitKey(it->first, pa.user, pa.chidx);
 								pa.ogg = std::move(ri.ogg);
 								pa.bpm = ri.bpm;
 								pa.bpi = ri.bpi;
