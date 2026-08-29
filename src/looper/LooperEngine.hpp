@@ -346,6 +346,12 @@ private:
 	void requestSpare(int t);
 	void drainLoads();             // install decoded takes from the worker (clip loader)
 	bool armOverdub(int t, int s); // request staging = copy(take) for the overdub cycle
+	// Swap the completed overdub staging (take + input folded so far) in as the new
+	// take. Safe mid-cycle: beyond the playhead the staging is bit-identical to the
+	// take (the worker copied it; input lands only at already-played positions), so a
+	// partial layer commits without touching unplayed audio. Does NOT queue the save —
+	// callers order saveTake around other queue traffic. False = nothing to commit.
+	bool commitOverdubLayer(int t, int s);
 	void saveTake(int t, int s);  // enqueue an OGG save of the slot's committed take (M4)
 	void clearFile(int t, int s); // enqueue a retire of the slot's live file into history/ (M4)
 	// The playing slot completed one full loop cycle: advance the repeat counter, apply

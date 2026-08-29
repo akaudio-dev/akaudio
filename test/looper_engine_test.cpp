@@ -1226,6 +1226,53 @@ int main() {
 			CHECK(ok, "free-run repeats: two OWN cycles then stop, all mid-interval");
 		}
 		CHECK(g.slot(2).state.load() == FILLED, "free-run repeats: cell FILLED after its 2 cycles");
+
+		// Overdubbing a finish-shortened take must NOT erase it (regression 2026-08-29:
+		// the staging kept Buf::frames == N while take.frames == len, the worker's copy
+		// guard failed, and a silent overdub cycle zeroed the take). Latch a silent
+		// overdub across several of its own cycles and check the audio survives.
+		g.slot(2).repeats.store(0);
+		g.interval(-1, true, [&](int f) { if (f == 10) g.eng.pressSlot(0, 2, false); }); // launch at B
+		g.eng.overdubSel.store(0 * MAX_SLOTS + 2);
+		g.eng.overdubMode.store(true);
+		g.interval(-1); // arm + several silent layer cycles commit (3 wraps per interval)
+		g.eng.overdubMode.store(false);
+		g.eng.overdubSel.store(-1);
+		g.interval(-1); // trailing partial commits; the loop keeps playing
+		{
+			bool ok = true;
+			for (int f = 0; f < g.n && ok; f++) {
+				float want = Sim::sig(4, B + (f % B)); // phase 0 at frame 0: launch beat + 3 cycles
+				if (std::fabs(g.outL[f] - want) > 1e-6f) {
+					std::printf("   short-take overdub mismatch at %d: %.6f vs %.6f\n", f, g.outL[f], want);
+					ok = false;
+				}
+			}
+			CHECK(ok, "silent overdub cycles leave a finish-shortened take intact");
+		}
+
+		// Dropping the latch mid-cycle keeps the partial layer (regression 2026-08-29:
+		// the retarget path discarded the staging, losing the phrase played since the
+		// last wrap).
+		g.eng.overdubSel.store(0 * MAX_SLOTS + 2);
+		g.eng.overdubMode.store(true);
+		g.interval(-1); // arm on a cycle boundary; silent cycles commit
+		g.interval(5, true, [&](int f) { if (f == B / 2) g.eng.overdubMode.store(false); });
+		g.eng.overdubSel.store(-1);
+		g.interval(-1);
+		{
+			bool ok = true;
+			for (int f = 0; f < g.n && ok; f++) {
+				int p = f % B;
+				if (p < 16 || (p >= B / 2 - 16 && p < B / 2 + 16)) continue; // arm/commit-edge slack
+				float want = Sim::sig(4, B + p) + (p < B / 2 ? Sim::sig(5, p) : 0.f);
+				if (std::fabs(g.outL[f] - want) > 1e-6f) {
+					std::printf("   partial-layer mismatch at %d: %.6f vs %.6f\n", f, g.outL[f], want);
+					ok = false;
+				}
+			}
+			CHECK(ok, "mid-cycle latch drop commits the partial layer instead of discarding it");
+		}
 		g.eng.stop();
 	}
 

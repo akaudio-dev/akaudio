@@ -121,6 +121,21 @@ bool LooperEngine::armOverdub(int t, int s) {
 	return true;
 }
 
+bool LooperEngine::commitOverdubLayer(int t, int s) {
+	Slot& sl = tracks[t].slots[s];
+	if (!sl.odReady || !sl.staging || !sl.take.buf
+	        || sl.staging->frames != sl.take.frames)
+		return false;
+	release(sl.take.buf);
+	sl.take.buf = sl.staging;
+	sl.take.peak = std::max(sl.take.peak, sl.odPeak);
+	sl.staging = nullptr;
+	sl.odReady = false;
+	sl.odSeq = 0;
+	sl.odPeak = 0.f;
+	return true;
+}
+
 void LooperEngine::dropOverdub(Slot& sl) {
 	if (sl.staging) {
 		release(sl.staging);
@@ -531,6 +546,12 @@ void LooperEngine::commitCapture(int t, int s, bool finishing, const ClockFrame&
 	if (sl.take.buf) release(sl.take.buf);
 	sl.take.buf = sl.staging;
 	sl.staging = nullptr;
+	// The take's length is the truth EVERYWHERE, including Buf::frames: the worker's
+	// OVERDUB_COPY guard compares `a->frames == frames` — a finish-shortened take whose
+	// buffer still said N would fail it and get a ZEROED copy, erasing the take at the
+	// next overdub commit (found in review, 2026-08-29). The over-allocation past `len`
+	// is simply unused; recycle() won't pool a non-N length, it deletes it.
+	sl.take.buf->frames = len;
 	sl.take.frames = len;
 	sl.take.bpm = c.bpm; sl.take.bpi = c.bpi; sl.take.sampleRate = sr;
 	sl.take.startFrame = sl.recStart;
@@ -782,17 +803,14 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 			if (sl->take.buf && sl->playPos >= sl->take.frames) {
 				// Wrap: one full cycle done. Commit the continuous overdub at the loop
 				// point (staging = take + this cycle's input, built below), then count.
-				if (odTrack == t && odSlot == ps && sl->odReady && sl->staging
-				        && sl->staging->frames == sl->take.frames) {
-					release(sl->take.buf);
-					sl->take.buf = sl->staging;
-					sl->take.peak = std::max(sl->take.peak, sl->odPeak);
-					sl->staging = nullptr;
-					sl->odReady = false;
-					sl->odSeq = 0;
-					sl->odPeak = 0.f;
+				if (odTrack == t && odSlot == ps && commitOverdubLayer(t, ps)) {
+					// Arm the NEXT cycle's copy BEFORE queueing the save: both ride the
+					// same FIFO worker queue and the save is a full OGG encode (~100 ms
+					// for a long interval) — copy-first shrinks each cycle's input hole
+					// from encode-length to copy-length (~1 ms, hidden under the
+					// loop-edge declick).
+					armOverdub(t, ps);
 					saveTake(t, ps); // the overdubbed take replaces the file (old → history)
-					armOverdub(t, ps); // next cycle layers onto the new take
 				}
 				sl->playPos = 0;
 				wrapPlaying(t, now);
@@ -881,7 +899,9 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 	// Continuous overdub retarget — immediate, mid-cycle: while the OVERDUB latch is on,
 	// the selected playing (patched) cell is the target; layers commit at the take's own
 	// wrap. Selection changes (or the latch dropping, or the target stopping) move/stop
-	// it right away — the partial cycle's input still lands in the layer.
+	// it right away — and the PARTIAL cycle's layer commits first, so the phrase played
+	// since the last wrap is kept (the layered input just ends at the commit point; on
+	// later cycles that edge sits under whatever was already in the take there).
 	{
 		int sel = overdubMode.load(std::memory_order_relaxed)
 		          ? overdubSel.load(std::memory_order_relaxed) : -1;
@@ -890,7 +910,9 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 		if (odTrack != dt || odSlot != dsl) {
 			if (odTrack >= 0 && odSlot >= 0) {
 				Slot& o = tracks[odTrack].slots[odSlot];
-				dropOverdub(o);
+				if (commitOverdubLayer(odTrack, odSlot))
+					saveTake(odTrack, odSlot);
+				dropOverdub(o); // no-op after a commit; recycles a not-yet-ready copy otherwise
 				o.overdubbing.store(false, std::memory_order_relaxed);
 			}
 			odTrack = odSlot = -1;
@@ -906,9 +928,12 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 				}
 			}
 		} else if (odTrack >= 0) {
-			// The target stopped playing (stop, steal, exhaust): drop the layer.
+			// The target stopped playing (stop, steal, exhaust): keep the partial layer,
+			// end the overdub.
 			Slot& o = tracks[odTrack].slots[odSlot];
 			if (o.state.load(std::memory_order_relaxed) != PLAYING) {
+				if (commitOverdubLayer(odTrack, odSlot))
+					saveTake(odTrack, odSlot);
 				dropOverdub(o);
 				o.overdubbing.store(false, std::memory_order_relaxed);
 				odTrack = odSlot = -1;
