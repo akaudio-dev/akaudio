@@ -341,6 +341,21 @@ void LooperEngine::drainLoads() {
 		Track& ltr = tracks[li.track];
 		Slot& sl = ltr.slots[li.slot];
 		if (ltr.dyingSlot == li.slot) { ltr.dyingSlot = -1; ltr.dyingFade = 0; } // buffer replaced
+		// A load can land on a slot the user started using meanwhile (restore decodes
+		// arrive seconds after patch load): tear the slot down the way clearCell
+		// would — close a playing span, disarm capture/overdub, release stagings —
+		// or the slot ends up FILLED-but-playing (unstoppable: STOP gates on
+		// PLAYING) with a stranded staging buffer.
+		sl.pending.store(NONE, std::memory_order_relaxed);
+		dropOverdub(sl);
+		dropCapture(sl);
+		sl.overdubbing.store(false, std::memory_order_relaxed);
+		if (odTrack == li.track && odSlot == li.slot) { odTrack = odSlot = -1; }
+		if (ltr.playingSlot.load(std::memory_order_relaxed) == li.slot) {
+			if (sl.state.load(std::memory_order_relaxed) == PLAYING)
+				emitEvent(false, li.track, li.slot, LoopEvent::R_REPLACED);
+			ltr.playingSlot.store(-1, std::memory_order_relaxed);
+		}
 		breakChain(ltr, li.slot); // a load landing on a chain member ends the chain
 		if (sl.take.buf) release(sl.take.buf); // replace whatever is there
 		sl.take.buf = li.buf;
@@ -436,7 +451,12 @@ void LooperEngine::beatCommit(const ClockFrame& c, double now) {
 					// staging buffer (requested at the press; the worker round-trip is
 					// ms against a beat of hundreds) — if it hasn't landed, stay armed
 					// for the next beat and drop the now-misaimed pre-roll.
-					if (!present) { sl.pending.store(NONE, std::memory_order_relaxed); refuse(sl, now); break; }
+					if (!present) {
+						sl.pending.store(NONE, std::memory_order_relaxed);
+						dropCapture(sl); // the delivered staging must not stay parked on an EMPTY slot
+						refuse(sl, now);
+						break;
+					}
 					if (!sl.staging) {
 						sl.preW = 0; // the pre-roll aimed at THIS beat; re-aim at the next
 						if (sl.capSeq == 0) {
@@ -629,6 +649,7 @@ void LooperEngine::commitCapture(int t, int s, bool finishing, const ClockFrame&
 		// Hand the spare to the next cell and keep recording without missing a frame.
 		Slot& nx = tr.slots[s + 1];
 		nx.pending.store(NONE, std::memory_order_relaxed);
+		dropCapture(nx); // an orphaned staging from an aborted arm must not leak under the hand-off
 		nx.staging = tr.spare; // ALLOC-zeroed, untouched since
 		tr.spare = nullptr;
 		nx.state.store(RECORDING, std::memory_order_relaxed);
@@ -1011,11 +1032,9 @@ void LooperEngine::pressSlot(int t, int s, bool overdubLatch) {
 			// point — the action grid is the beat). The staging buffer is requested
 			// here so it is in hand by the beat (beatCommit retries if the grid
 			// wasn't up yet); the sub-beat press→beat window records into its tail
-			// as the pickup.
-			sl.capSeq = 0;
-			sl.preW = 0;
-			sl.recPos = -1;
-			sl.recPeak = 0.f;
+			// as the pickup. dropCapture first: a stale staging left by an aborted
+			// arm would otherwise be reused, folding its old pre-roll into this take.
+			dropCapture(sl);
 			for (int b = 0; b < THUMB_BINS; b++) sl.thumb[b] = 0.f;
 			if (N > 0) {
 				Cmd c {};

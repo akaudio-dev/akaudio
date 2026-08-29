@@ -449,6 +449,30 @@ int main() {
 		CHECK(sim.slot(5).state.load() == EMPTY, "empty-pcm load skipped (no silent ghost take)");
 	}
 
+	// ---- A load landing on a PLAYING slot tears it down first (regression 2026-08-29:
+	// it forced FILLED while playingSlot still pointed at it — audibly playing yet
+	// unstoppable, since STOP gates on state == PLAYING) ----
+	{
+		const int n = sim.n;
+		CHECK(sim.slot(6).state.load() == PLAYING, "clobber setup: slot 6 still playing");
+		Buf* b = new Buf; b->frames = n; b->pcm = new float[(size_t) n * 2];
+		for (int f = 0; f < n; f++) { b->pcm[f * 2] = Sim::sig(8, f); b->pcm[f * 2 + 1] = -Sim::sig(8, f); }
+		LoadInstall li{};
+		li.track = 0; li.slot = 6; li.buf = b;
+		li.meta.frames = n; li.meta.sampleRate = SR; li.meta.bpm = 120; li.meta.bpi = 4;
+		CHECK(sim.eng.submitLoad(li), "clobber load submitted");
+		sim.interval(-1); // install lands at the first tick: playing span closed
+		CHECK(sim.slot(6).state.load() == FILLED
+			&& sim.eng.tracks[0].playingSlot.load() == -1,
+			"load onto a playing slot stops it cleanly (FILLED, playingSlot cleared)");
+		sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressSlot(0, 6, false); });
+		sim.interval(-1);
+		CHECK(sim.slot(6).state.load() == PLAYING, "clobbered slot relaunches");
+		CHECK(sim.outputIs(8), "the newly loaded take plays sample-exactly");
+		sim.eng.stopTrack(0);
+		sim.interval(-1);
+	}
+
 	CHECK(sim.eng.tracks[0].bufs.load() <= 1, "at most one spare buffer per track (got %d)", sim.eng.tracks[0].bufs.load());
 	std::printf("worker allocations: %ld\n", sim.eng.allocations.load());
 	CHECK(sim.eng.allocations.load() <= 40, "allocation count bounded (got %ld)", sim.eng.allocations.load());
