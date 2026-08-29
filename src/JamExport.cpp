@@ -173,6 +173,32 @@ std::string exportJamAls(const std::string& jamRoot, bool liteMode, std::string*
 	// Recorder wire archive → Arrangement tracks (one per player + TX).
 	std::vector<PlayerRow> playerRows; // Lite: all players, merged below
 	std::string idxAll = readFile(jamRoot + "/index.jsonl");
+	// The boundary snap below assumes ONE grid for the whole session, anchored at
+	// session frame 0. After a mid-session tempo change the later boundaries sit at
+	// changePoint + k·newFrames (JamClock keeps the timeline continuous), NOT on the
+	// zero-anchored lattice — snapping there would actively misplace clips by up to
+	// half an interval. Detect mixed interval lengths up front and fall back to raw
+	// stamps for the whole file (the pre-snap graceful degradation), with a warning.
+	bool uniformGrid = true;
+	if (!idxAll.empty()) {
+		long seenFrames = 0;
+		std::istringstream ss0(idxAll);
+		std::string line0;
+		while (std::getline(ss0, line0)) {
+			if (line0.empty()) continue;
+			json_error_t e0;
+			json_t* o0 = json_loads(line0.c_str(), 0, &e0);
+			if (!o0) continue;
+			long fr = (long) json_integer_value(json_object_get(o0, "frames"));
+			json_decref(o0);
+			if (fr <= 0) continue;
+			if (seenFrames == 0) seenFrames = fr;
+			else if (fr != seenFrames) { uniformGrid = false; break; }
+		}
+		if (!uniformGrid)
+			WARN("akaudio: .als export: tempo change detected in index.jsonl — "
+			     "clips placed at raw stamps (no grid snap)");
+	}
 	if (!idxAll.empty()) {
 		std::map<std::string, size_t> byKey;
 		std::istringstream ss(idxAll);
@@ -202,9 +228,10 @@ std::string exportJamAls(const std::string& jamRoot, bool liteMode, std::string*
 			// downbeat-aligned by construction, so any residual offset in the stamp is
 			// transport (clock-publish granularity, receive-chain phase), not music —
 			// snapping puts every lane on the grid and makes consecutive clips tile.
-			// (Assumes one tempo for the session, like the rest of this exporter.)
+			// Only on a uniform grid (see the pre-scan above): a session with a tempo
+			// change keeps its raw stamps.
 			uint64_t sfv = sf ? (uint64_t) json_integer_value(sf) : 0;
-			if (frames > 0)
+			if (uniformGrid && frames > 0)
 				sfv = ((sfv + (uint64_t) frames / 2) / (uint64_t) frames) * (uint64_t) frames;
 			if (file && *file && frames > 0) {
 				if (tempo <= 0 && bpm > 0) tempo = bpm;

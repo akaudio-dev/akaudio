@@ -941,7 +941,11 @@ struct Ninjam : Module, public akaudio::RecorderLink {
 			clickEnv = 0.f;
 		}
 		publishClock(jam);
-		njclient.setArchiveSessionFrame(jam.sessionFrame);
+		// Only a RUNNING clock publishes the session frame: the !running branch's
+		// zero-initialized message would stamp any archive/mix work still draining
+		// after a leave with sessionFrame 0 (clips piling onto bar 0 of the export).
+		if (jam.running)
+			njclient.setArchiveSessionFrame(jam.sessionFrame);
 
 		// ---- Transmit capture: feed input frames once armed at a beat boundary ----
 		// (voice mode: immediately — it has no grid to align to). Source is the poly IN

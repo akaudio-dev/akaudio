@@ -149,6 +149,11 @@ private:
 	// "could not be decoded using OggFLAC" on the first tx row).
 	std::vector<uint8_t> txAccum[NjAudio::MAX_TX];
 	bool txArchWhole[NjAudio::MAX_TX] = {};
+	// Session frame at the interval's BEGIN — the archived row's capture-start stamp.
+	// Recorded where the interval actually starts (TX thread), so it stays correct
+	// even when the tempo (and interval length) changes while the interval is in
+	// flight — back-computing "end − currentTempo().frames" did not.
+	uint64_t txStartSf[NjAudio::MAX_TX] = {};
 	// Archive generation at the interval's BEGIN: a disarm + re-arm mid-interval bumps
 	// the generation, so the final chunk refuses the gapped accumulation (chunks that
 	// arrived while stopped were skipped — the bytes are not a whole interval).

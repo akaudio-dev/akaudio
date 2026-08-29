@@ -130,6 +130,7 @@ void NjClient::sendUploadBegin(int chidx) {
 	// archive generation runs (a disarm + re-arm mid-interval skips this interval).
 	txArchWhole[chidx] = archive.running();
 	txArchGen[chidx] = archive.generation();
+	txStartSf[chidx] = archive.now(); // capture START: BEGIN fires at the interval boundary
 	txAccum[chidx].clear();
 	sendAll(buildUploadBegin(txGuid[chidx], FOURCC_OGG, chidx, 0));
 }
@@ -150,19 +151,16 @@ void NjClient::sendUploadData(int chidx, const uint8_t* data, size_t len, bool l
 			int bpm, bpi, frames;
 			audio.currentTempo(bpm, bpi, frames);
 			// The final chunk fires at the interval's END boundary; the archived row
-			// belongs at its capture START — one interval earlier — so the .als clip
-			// lands where the audio was actually played. Voice mode has no beat grid
+			// belongs at its capture START — the stamp taken at this interval's BEGIN,
+			// which stays correct across a mid-flight tempo change (back-computing
+			// end − frames used the NEW grid's length). Voice mode has no beat grid
 			// (rolling ~2 s chunks): stamp those with the current clock as before.
 			bool voice;
 			{
 				std::lock_guard<std::mutex> lock(txMutex);
 				voice = txVoice;
 			}
-			uint64_t sf = UINT64_MAX;
-			if (!voice) {
-				sf = archive.now();
-				sf = sf > (uint64_t) frames ? sf - (uint64_t) frames : 0;
-			}
+			uint64_t sf = voice ? UINT64_MAX : txStartSf[chidx];
 			archive.archiveTx(chidx, txAccum[chidx].data(), txAccum[chidx].size(), bpm, bpi, 48000.f, frames, sf);
 			txAccum[chidx].clear();
 		}

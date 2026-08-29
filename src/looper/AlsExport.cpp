@@ -17,6 +17,25 @@ namespace looper {
 // DEFLATE stored blocks (BTYPE=00: [BFINAL bit][LEN][NLEN][raw]), CRC32 + ISIZE trailer.
 // The .als XML is small, so skipping compression is fine.
 
+// A take's OWN length in beats — the warp/loop span the .als pins over the file.
+// Since the fluid-jamming rework takes are any whole-beat length: `bpi` is only the
+// INTERVAL's beat count (the cap), never assumed to be the take's. Derive from the
+// audio itself and snap near-integers (the beat grid is integer-ceil spaced, so a
+// b-beat take is within a few frames of exactly b beats); `bpi` is the last-resort
+// fallback when the take carries no usable tempo.
+static double takeLenBeats(long frames, double sampleRate, double bpm, int bpi) {
+	if (frames > 0 && sampleRate > 0 && bpm > 0) {
+		double beats = (double) frames / sampleRate * bpm / 60.0;
+		double r = std::floor(beats + 0.5);
+		// Beat-quantized capture lands within a couple of frames of a whole beat
+		// (~0.0002 beats) — snap only that, never audio genuinely off the beat grid.
+		if (r >= 1.0 && std::fabs(beats - r) < 0.005)
+			return r;
+		return beats > 0 ? beats : 4.0;
+	}
+	return bpi > 0 ? (double) bpi : 4.0;
+}
+
 static uint32_t crc32Of(const uint8_t* p, size_t n) {
 	static uint32_t table[256];
 	static bool init = false;
@@ -545,8 +564,7 @@ std::string buildAlsXml(const AlsProject& p, const std::string& tpl, std::string
 			spec.name = c.name;
 			spec.color = tracks[c.track].color;
 			spec.startBeats = 0;
-			spec.lenBeats = c.bpi > 0 ? (double) c.bpi
-			                : (c.sampleRate > 0 ? (double) c.frames / c.sampleRate * c.bpm / 60.0 : 4.0);
+			spec.lenBeats = takeLenBeats(c.frames, c.sampleRate, c.bpm, c.bpi);
 			spec.loop = true;
 			spec.absPath = c.absPath;
 			spec.relPath = c.relPath;
@@ -805,8 +823,7 @@ void buildLooperLanes(const std::vector<LoopEventIn>& events,
 			c.loop = true;
 			double sr = take->sampleRate > 0 ? take->sampleRate : 48000.0;
 			double bpm = cur.bpm > 0 ? (double) cur.bpm : tempo;
-			c.loopLenBeats = cur.bpi > 0 ? (double) cur.bpi
-			                 : (double) take->frames / sr * bpm / 60.0;
+			c.loopLenBeats = takeLenBeats(take->frames, sr, bpm, cur.bpi);
 			c.frames = take->frames;
 			c.sampleRate = sr;
 			c.fileSize = take->fileSize;

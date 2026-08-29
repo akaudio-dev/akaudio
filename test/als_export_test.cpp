@@ -117,10 +117,13 @@ int main(int argc, char** argv) {
 		c.mtime = 1756100000;
 		return c;
 	};
-	p.sessionClips.push_back(take(0, 0, 16, 520339));
-	p.sessionClips.push_back(take(0, 1, 16, 520339));
-	p.sessionClips.push_back(take(3, 7, 8, 260169));
-	p.sessionClips.push_back(take(7, 0, 16, 520339));
+	p.sessionClips.push_back(take(0, 0, 16, 520678));
+	p.sessionClips.push_back(take(0, 1, 16, 520678));
+	p.sessionClips.push_back(take(3, 7, 8, 260339));
+	p.sessionClips.push_back(take(7, 0, 16, 520678));
+	// A finish-shortened take (fluid-jamming rework): ~2 beats of audio in a bpi-16
+	// session — its warp must pin the take's OWN length, never the interval's bpi.
+	p.sessionClips.push_back(take(1, 2, 16, 65085));
 
 	AlsArrangementTrack tx;
 	tx.isTx = true;
@@ -176,11 +179,11 @@ int main(int argc, char** argv) {
 	CHECK(xml.find("<EffectiveName Value=\"you (tx)\"") != std::string::npos, "tx track cloned");
 
 	std::printf("== clips ==\n");
-	CHECK(countOf(xml, "<AudioClip Id=") == 8, "4 session + 4 arrangement clips");
+	CHECK(countOf(xml, "<AudioClip Id=") == 9, "5 session + 4 arrangement clips");
 	// A filled Session slot is the one place a <Value> wraps an <AudioClip> directly
 	// (device-chain <Value> wrappers hold preset refs, at the same tab depth).
-	CHECK(countOf(xml, "<Value>\n\t\t\t\t\t\t\t\t\t\t<AudioClip ") == 4,
-	      "exactly 4 filled session slots");
+	CHECK(countOf(xml, "<Value>\n\t\t\t\t\t\t\t\t\t\t<AudioClip ") == 5,
+	      "exactly 5 filled session slots");
 	CHECK(xml.find("looper/t3_s7.ogg") != std::string::npos, "take file referenced (relative)");
 	// Privacy: absolute sample paths must never reach the set — Live resolves via
 	// RelativePath + the project marker; an absolute path only leaks the account name.
@@ -195,7 +198,16 @@ int main(int argc, char** argv) {
 		CHECK(clip.find("<LoopOn Value=\"true\"") != std::string::npos, "t3s7 loop enabled");
 		CHECK(clip.find("<IsWarped Value=\"true\"") != std::string::npos, "t3s7 warped");
 		CHECK(clip.find("BeatTime=\"8\"") != std::string::npos, "warp marker pins 8 beats");
-		CHECK(clip.find("<DefaultDuration Value=\"260169\"") != std::string::npos, "frames recorded");
+		CHECK(clip.find("<DefaultDuration Value=\"260339\"") != std::string::npos, "frames recorded");
+	}
+	// The short take: 2 beats of warp, not the interval's 16.
+	size_t c12 = xml.find("<Name Value=\"take t1s2\"");
+	CHECK(c12 != std::string::npos, "t1s2 short take present");
+	if (c12 != std::string::npos) {
+		size_t clipStart = xml.rfind("<AudioClip", c12);
+		std::string clip = xml.substr(clipStart, xml.find("</AudioClip>", clipStart) - clipStart);
+		CHECK(clip.find("<LoopEnd Value=\"2\"") != std::string::npos, "short take loops its OWN 2 beats, not bpi");
+		CHECK(clip.find("BeatTime=\"2\"") != std::string::npos, "warp marker pins the take's 2 beats");
 		CHECK(clip.find("<Type Value=\"2\"") != std::string::npos,
 		      "FileRef Type=2 (audio file — what Live's own refs use)");
 		CHECK(clip.find("<LastModDate Value=\"1756100000\"") != std::string::npos,
@@ -264,7 +276,7 @@ int main(int argc, char** argv) {
 	CHECK(np.size() == 1 && np[0] > maxTarget, "NextPointeeId above every target id");
 	std::vector<long> warpIds = idsOf(xml, "<WarpMarker Id=\"");
 	std::set<long> warpSet(warpIds.begin(), warpIds.end());
-	CHECK(warpIds.size() == 16 && warpSet.size() == 16, "16 unique warp marker ids (2 per clip)");
+	CHECK(warpIds.size() == 18 && warpSet.size() == 18, "18 unique warp marker ids (2 per clip)");
 	std::vector<long> trackIds = idsOf(xml, "<AudioTrack Id=\"");
 	std::set<long> trackSet(trackIds.begin(), trackIds.end());
 	CHECK(trackSet.size() == 10, "all track ids unique");
@@ -334,7 +346,7 @@ int main(int argc, char** argv) {
 	std::printf("== looper lanes (as-played timeline) ==\n");
 	{
 		// Grid: 16 beats/interval at 88.5 bpm, 48k → N = 520339-ish; use exact frames.
-		const long N48 = 520339;
+		const long N48 = 523636; // 16 beats at 88 BPM, exactly (real captures are grid-exact)
 		std::vector<LooperTakeIn> takes;
 		LooperTakeIn k;
 		k.track = 0; k.slot = 0; k.file = "t0_s0.ogg"; k.absPath = "/jam/looper/t0_s0.ogg";
