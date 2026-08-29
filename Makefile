@@ -150,6 +150,9 @@ unittest: $(UT_OGG_OBJ)
 	rm -rf build/archive_test_out
 	$(CXX) -std=c++11 -O1 -I src test/archive_test.cpp src/net/ninjam/NjArchive.cpp \
 	  src/net/Log.cpp -lpthread -o build/archive_test && build/archive_test build/archive_test_out
+	$(CXX) -std=c++11 -O1 -I src $(UT_OGG_INC) test/njaudio_stamp_test.cpp \
+	  src/net/ninjam/NjAudio.cpp src/net/ninjam/NjEncoder.cpp src/dep/stb_vorbis_impl.cpp \
+	  $(UT_OGG_OBJ) -lpthread -o build/njaudio_stamp_test && build/njaudio_stamp_test
 	rm -rf build/als_export_out
 	$(CXX) -std=c++11 -O1 -I src test/als_export_test.cpp src/looper/AlsExport.cpp \
 	  -o build/als_export_test && build/als_export_test

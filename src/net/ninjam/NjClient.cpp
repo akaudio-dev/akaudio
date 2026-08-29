@@ -53,10 +53,11 @@ void NjClient::start(const std::string& host, int port, const std::string& user,
 		sendUploadData(ch, data, len, last);
 	};
 	// Wire the raw-interval archive hooks (no-op unless startArchive() was called). RX:
-	// each received interval's bytes; TX is accumulated per channel in sendUploadData.
+	// each received interval's bytes, fired at its playout start and stamped with that
+	// moment on the session timeline; TX is accumulated per channel in sendUploadData.
 	audio.onIntervalReceived = [this](const std::string& user, int chidx, const uint8_t* bytes,
-	                                  size_t len, int bpm, int bpi, int frames) {
-		archive.archiveRx(user, chidx, bytes, len, bpm, bpi, 48000.f, frames);
+	                                  size_t len, int bpm, int bpi, int frames, uint64_t sf) {
+		archive.archiveRx(user, chidx, bytes, len, bpm, bpi, 48000.f, frames, sf);
 	};
 	abort.store(false, std::memory_order_release);
 	running.store(true, std::memory_order_release);
@@ -148,7 +149,21 @@ void NjClient::sendUploadData(int chidx, const uint8_t* data, size_t len, bool l
 		if (last) {
 			int bpm, bpi, frames;
 			audio.currentTempo(bpm, bpi, frames);
-			archive.archiveTx(chidx, txAccum[chidx].data(), txAccum[chidx].size(), bpm, bpi, 48000.f, frames);
+			// The final chunk fires at the interval's END boundary; the archived row
+			// belongs at its capture START — one interval earlier — so the .als clip
+			// lands where the audio was actually played. Voice mode has no beat grid
+			// (rolling ~2 s chunks): stamp those with the current clock as before.
+			bool voice;
+			{
+				std::lock_guard<std::mutex> lock(txMutex);
+				voice = txVoice;
+			}
+			uint64_t sf = UINT64_MAX;
+			if (!voice) {
+				sf = archive.now();
+				sf = sf > (uint64_t) frames ? sf - (uint64_t) frames : 0;
+			}
+			archive.archiveTx(chidx, txAccum[chidx].data(), txAccum[chidx].size(), bpm, bpi, 48000.f, frames, sf);
 			txAccum[chidx].clear();
 		}
 	}

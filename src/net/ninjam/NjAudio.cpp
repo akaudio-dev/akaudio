@@ -234,16 +234,6 @@ void NjAudio::writeInterval(const uint8_t guid[16], const uint8_t* data, size_t 
 		return;
 
 	int frames = intervalSamples.load(std::memory_order_relaxed);
-	// Wire archive: hand the raw interval bytes to a listener (the Recorder) before we
-	// decode. Verbatim — no decode, no re-encode. chanKey is "user\nchidx".
-	if (onIntervalReceived && t.ogg && !t.bytes.empty()) {
-		size_t nl = t.chanKey.find('\n');
-		std::string user = nl == std::string::npos ? t.chanKey : t.chanKey.substr(0, nl);
-		int cidx = nl == std::string::npos ? 0 : (int) std::strtol(t.chanKey.c_str() + nl + 1, nullptr, 10);
-		int b, i;
-		{ std::lock_guard<std::mutex> lock(mu); b = bpm; i = bpi; }
-		onIntervalReceived(user, cidx, t.bytes.data(), t.bytes.size(), b, i, frames);
-	}
 	std::vector<float> pcm;
 	if (t.ogg && frames > 0 && !t.bytes.empty()) {
 		pcm = decodeOgg(t.bytes.data(), t.bytes.size(), frames);
@@ -253,7 +243,13 @@ void NjAudio::writeInterval(const uint8_t guid[16], const uint8_t* data, size_t 
 			nDecoded.fetch_add(1, std::memory_order_relaxed);
 	}
 	// On failure / unsupported codec, pcm stays empty => a silence interval (keeps cadence).
-	enqueue(t.chanKey, std::move(pcm));
+	// The raw wire bytes ride the queue: the archive listener (the Recorder) is handed
+	// them when the interval's chained playout STARTS (mixLoop), stamped with that
+	// playout start on the session timeline — not here at network arrival (§7.3).
+	int b, i;
+	{ std::lock_guard<std::mutex> lock(mu); b = bpm; i = bpi; }
+	enqueue(t.chanKey, std::move(pcm),
+	        t.ogg ? std::move(t.bytes) : std::vector<uint8_t>(), b, i, frames);
 	closeTransfer(t); // a preview transfer holds a pushdata decoder
 	transfers.erase(it);
 }
@@ -373,14 +369,21 @@ void NjAudio::voiceDeliver(Transfer& t) {
 	}
 }
 
-void NjAudio::enqueue(const std::string& key, std::vector<float>&& interval) {
+void NjAudio::enqueue(const std::string& key, std::vector<float>&& interval,
+                      std::vector<uint8_t>&& ogg, int bpm, int bpi, int frames) {
 	std::lock_guard<std::mutex> lock(mu);
 	Channel& ch = channels[key];
 	if (ch.user.empty()) // interval may arrive before USERINFO; derive user from the key
 		ch.user = key.substr(0, key.rfind('\n'));
 	if (ch.ready.size() >= kMaxReady)
 		ch.ready.pop_front(); // mixer fell behind; drop oldest to bound latency/memory
-	ch.ready.push_back(std::move(interval));
+	ReadyInterval ri;
+	ri.pcm = std::move(interval);
+	ri.ogg = std::move(ogg);
+	ri.bpm = bpm;
+	ri.bpi = bpi;
+	ri.frames = frames;
+	ch.ready.push_back(std::move(ri));
 }
 
 std::vector<float> NjAudio::decodeOgg(const uint8_t* data, size_t len, int frames) {
@@ -479,6 +482,11 @@ void NjAudio::start() {
 		return; // already running
 	abort.store(false, std::memory_order_release);
 	audioStarted_.store(false, std::memory_order_relaxed); // fresh join gap begins
+	// Restart the mix↔session frame axes in lockstep (stop() dropped the ring, so both
+	// producer and consumer counts must return to zero together).
+	framesPulled_.store(0, std::memory_order_relaxed);
+	pullOffset_.store(INT64_MIN, std::memory_order_relaxed);
+	mixFramesWritten = 0;
 	// Build the capture rings ONCE, here, before spawning txThread — so the only
 	// concurrent reader (txLoop) and the audio-thread producer (captureFrame, gated on
 	// txRings) never see the vector being mutated. ~21 s @ 48 kHz headroom each.
@@ -699,6 +707,17 @@ void NjAudio::mixLoop() {
 	const int BLOCK = 256;                        // frames mixed per lock acquisition
 	const size_t VOICE_PREBUF = 2048;             // ~43 ms @48k before a voice channel starts
 	std::vector<float> block((size_t) BLOCK * RING_CH);
+	// Archive emissions collected at the pop sites below (under mu) and fired after the
+	// lock is released — onIntervalReceived leads to the archive's own mutex + a copy,
+	// which must not run under mu.
+	struct PendingArchive {
+		std::string user;
+		int chidx = 0;
+		std::vector<uint8_t> ogg;
+		int bpm = 0, bpi = 0, frames = 0;
+		uint64_t sf = 0;
+	};
+	std::vector<PendingArchive> pending;
 
 	while (!abort.load(std::memory_order_acquire)) {
 		{
@@ -820,11 +839,32 @@ void NjAudio::mixLoop() {
 								continue;
 							}
 							// Arrival lock: the interval starts on this very frame.
-							ch.cur = std::move(ch.ready.front());
+							ReadyInterval ri = std::move(ch.ready.front());
 							ch.ready.pop_front();
+							ch.cur = std::move(ri.pcm);
 							ch.curPos = 0;
 							ch.playing = true;
 							ch.holdFrames = -1;
+							if (!ri.ogg.empty() && onIntervalReceived) {
+								// This mix frame (mixFramesWritten + i) is the interval's
+								// playout start; map it onto the session timeline (§7.3)
+								// and queue the archive hand-off for after the lock.
+								int64_t off = pullOffset_.load(std::memory_order_relaxed);
+								int64_t sf = off == INT64_MIN ? -1
+								           : (int64_t) (mixFramesWritten + (uint64_t) i) + off;
+								const std::string& k = it->first; // "user\nchidx"
+								size_t nl = k.find('\n');
+								PendingArchive pa;
+								pa.user = nl == std::string::npos ? k : k.substr(0, nl);
+								pa.chidx = nl == std::string::npos ? 0
+								         : (int) std::strtol(k.c_str() + nl + 1, nullptr, 10);
+								pa.ogg = std::move(ri.ogg);
+								pa.bpm = ri.bpm;
+								pa.bpi = ri.bpi;
+								pa.frames = ri.frames;
+								pa.sf = sf < 0 ? UINT64_MAX : (uint64_t) sf;
+								pending.push_back(std::move(pa));
+							}
 							if (ch.cur.empty())
 								ch.silenceLeft = N; // silence interval placeholder
 							else
@@ -902,6 +942,12 @@ void NjAudio::mixLoop() {
 		}
 		nActive.store(active, std::memory_order_relaxed);
 
+		// Fire the archive hand-offs collected above, outside mu.
+		for (PendingArchive& pa : pending)
+			onIntervalReceived(pa.user, pa.chidx, pa.ogg.data(), pa.ogg.size(),
+			                   pa.bpm, pa.bpi, pa.frames, pa.sf);
+		pending.clear();
+
 		if (!anything) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 			continue;
@@ -914,6 +960,7 @@ void NjAudio::mixLoop() {
 				std::this_thread::sleep_for(std::chrono::milliseconds(2));
 			}
 		}
+		mixFramesWritten += (uint64_t) BLOCK;
 	}
 }
 

@@ -512,10 +512,22 @@ session import.)*
 `sessionFrame` (monotonic frames since join, in the clock message) is the axis for
 everything: the Looper stamps each take's `startFrame`; `NjArchive` stamps each
 received interval's local playout start (`mixFrameStart + pullOffset`) and each TX
-interval's start. Received intervals are arrival-locked (arbitrary 0–1 interval
-offset from our grid) — the timeline records that offset exactly, so a DAW project
-reproduces the jam *as heard here*. Tempo changes don't reset the axis; each entry
-carries its own `(bpm, bpi, frames)`.
+interval's capture start. Implementation: `NjAudio` carries the raw wire bytes in the
+ready queue and fires `onIntervalReceived` from the mix thread at the moment the
+interval's chained slot begins (not at network arrival — arrival stamps jittered ±90 ms
+and sat an arbitrary phase off the grid, the 2026-08-29 misalignment fix); the audio
+thread publishes `pullOffset = sessionFrame − framesPulled` every frame
+(`NjClient::setArchiveSessionFrame`) so the mix thread can map its write index onto the
+session axis, ring latency included. TX rows fire on the final upload chunk (the END
+boundary) and are stamped one interval back. An interval dropped before it plays
+(backlog, re-grid, leave) is no longer archived. Received playout is arrival-locked
+(arbitrary 0–1 interval offset from our grid) — the timeline records that offset
+exactly; the `.als` export then snaps every `index.jsonl` row to the NEAREST interval
+boundary (`JamExport`), because interval audio is downbeat-aligned by construction and
+the residual offset is transport, not music — so player/TX lanes land on the grid and
+consecutive clips tile. Tempo changes don't reset the axis; each entry carries its own
+`(bpm, bpi, frames)` (the snap assumes a single-tempo session, like the exporter's
+beat math).
 
 ### 7.4 Panel (≈8 HP)
 REC bezel button (arm; red light — same widget as the Looper's OVERDUB, aligned to it),

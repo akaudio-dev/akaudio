@@ -103,8 +103,13 @@ public:
 	long archiveIntervals() const { return archive.totalIntervals(); }
 	long archiveBytes() const { return archive.totalBytes(); }
 	std::vector<NjArchive::PlayerStat> archiveStatus() const { return archive.status(); }
-	// Audio thread: publish the session-timeline position the archive stamps intervals with.
-	void setArchiveSessionFrame(uint64_t sf) { archive.setSessionFrame(sf); }
+	// Audio thread, every frame: publish the session-timeline position. The archive
+	// stamps TX rows against it, and NjAudio derives the mix→session offset that
+	// stamps each received interval's playout start (§7.3).
+	void setArchiveSessionFrame(uint64_t sf) {
+		archive.setSessionFrame(sf);
+		audio.publishSession(sf);
+	}
 
 private:
 	void run(std::string host, int port, std::string user, std::string pass);

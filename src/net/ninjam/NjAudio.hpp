@@ -102,11 +102,14 @@ public:
 			return;
 		txCapture[ch]->push(l, r);
 	}
-	// Net-thread callback: a complete received interval's raw OGG bytes (non-voice,
-	// non-silence). The wire archive (Recorder) copies them to disk as-is; empty/absent
-	// when nobody is listening. Fired once per interval, on its final chunk.
+	// Mix-thread callback: a complete received interval's raw OGG bytes (non-voice,
+	// non-silence). The wire archive (Recorder) copies them to disk as-is. Fired once
+	// per interval, at the moment its chained playout STARTS in the local mix (not at
+	// network arrival), with `sessionFrame` = that playout start on the shared session
+	// timeline (§7.3; UINT64_MAX until publishSession() has run). An interval dropped
+	// before it plays (mixer backlog, re-grid, leave) is not delivered.
 	std::function<void(const std::string& user, int chidx, const uint8_t* bytes, size_t len,
-	                   int bpm, int bpi, int frames)> onIntervalReceived;
+	                   int bpm, int bpi, int frames, uint64_t sessionFrame)> onIntervalReceived;
 
 	// TX-thread upload callbacks: an interval starts (send UPLOAD_INTERVAL_BEGIN)…
 	std::function<void(int chidx)> onUploadBegin;
@@ -117,11 +120,26 @@ public:
 
 	// Audio thread: pull one wide frame (RING_CH interleaved-stereo-per-slot floats).
 	// Returns false on underrun (out untouched). out must hold RING_CH floats.
-	bool pullFrame(float* out) { return ring.pull(out); }
+	bool pullFrame(float* out) {
+		if (!ring.pull(out))
+			return false;
+		framesPulled_.fetch_add(1, std::memory_order_relaxed);
+		return true;
+	}
+	// Audio thread, once per pulled frame: map the mix-frame axis onto the shared
+	// session timeline. pullOffset = sessionFrame − framesPulled makes the frame the
+	// mixer wrote at mix index M audible at session frame M + pullOffset (the ring's
+	// standing latency included) — exact except across an underrun, which the very
+	// next publish corrects. The mix thread reads it to stamp interval playout starts.
+	void publishSession(uint64_t sessionFrame) {
+		pullOffset_.store((int64_t) sessionFrame
+		                  - (int64_t) framesPulled_.load(std::memory_order_relaxed),
+		                  std::memory_order_relaxed);
+	}
 	// Convenience for the standalone harness: pull a frame and sum slots to a stereo master.
 	bool pull(float& l, float& r) {
 		float f[RING_CH];
-		if (!ring.pull(f)) return false;
+		if (!pullFrame(f)) return false;
 		l = 0.f; r = 0.f;
 		for (int i = 0; i < MAX_PLAYERS; i++) { l += f[(size_t) i * 2]; r += f[(size_t) i * 2 + 1]; }
 		return true;
@@ -147,12 +165,20 @@ public:
 	bool audioStarted() const { return audioStarted_.load(std::memory_order_relaxed); }
 
 private:
+	// One decoded interval waiting its chain slot. The raw wire bytes ride along so the
+	// archive callback can fire at the interval's playout start (mix thread) instead of
+	// at arrival — with the tempo metadata captured when it was decoded.
+	struct ReadyInterval {
+		std::vector<float> pcm;   // intervalSamples*2 interleaved, or empty = silence
+		std::vector<uint8_t> ogg; // raw interval bytes for onIntervalReceived (empty = none)
+		int bpm = 0, bpi = 0, frames = 0;
+	};
 	struct Channel {
 		std::string user;
 		bool active = false;
 		bool voice = false; // NINJAM voice-chat channel (flags bit 2): played live
 		float gainL = 1.f, gainR = 1.f;
-		std::deque<std::vector<float>> ready; // each: intervalSamples*2 interleaved, or empty = silence
+		std::deque<ReadyInterval> ready;
 		// Interval-mode playhead (mix thread, under mu). Playback is ARRIVAL-LOCKED:
 		// the first ready interval starts (after a short jitter hold) the moment it
 		// is available, and subsequent ones chain seamlessly — phase-true to the
@@ -194,7 +220,9 @@ private:
 	static std::string chanKey(const std::string& user, int chidx);
 	void recomputeInterval();
 	void recomputeIntervalLocked(); // caller holds mu
-	void enqueue(const std::string& key, std::vector<float>&& interval);
+	void enqueue(const std::string& key, std::vector<float>&& interval,
+	             std::vector<uint8_t>&& ogg = std::vector<uint8_t>(),
+	             int bpm = 0, int bpi = 0, int frames = 0);
 	std::vector<float> decodeOgg(const uint8_t* data, size_t len, int frames);
 	static void closeTransfer(Transfer& t); // frees the pushdata decoder, if any
 	// Progressive OGG decode of arriving chunks into the channel FIFO (net thread).
@@ -252,6 +280,14 @@ private:
 	bool slotUsed[MAX_PLAYERS] = {false};
 
 	std::map<std::string, Transfer> transfers; // net thread only (keyed by 16-byte guid)
+
+	// The mix-frame ↔ session-timeline mapping (§7.3). framesPulled_ counts frames the
+	// audio thread has consumed from the ring; the mix thread's mixFramesWritten (below,
+	// thread-local to mixLoop's owner) counts frames pushed. Both reset together in
+	// start() (stop() drops the ring, so the axes must restart in lockstep).
+	std::atomic<uint64_t> framesPulled_{0};
+	std::atomic<int64_t> pullOffset_{INT64_MIN}; // INT64_MIN = not yet published
+	uint64_t mixFramesWritten = 0;               // mix thread only
 
 	std::atomic<bool> audioStarted_{false};
 	std::atomic<long> nDecoded{0};

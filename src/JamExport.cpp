@@ -198,6 +198,14 @@ std::string exportJamAls(const std::string& jamRoot, bool liteMode, std::string*
 				json_decref(o);
 				continue;
 			}
+			// Snap the stamp to the nearest interval boundary. Interval audio is
+			// downbeat-aligned by construction, so any residual offset in the stamp is
+			// transport (clock-publish granularity, receive-chain phase), not music —
+			// snapping puts every lane on the grid and makes consecutive clips tile.
+			// (Assumes one tempo for the session, like the rest of this exporter.)
+			uint64_t sfv = sf ? (uint64_t) json_integer_value(sf) : 0;
+			if (frames > 0)
+				sfv = ((sfv + (uint64_t) frames / 2) / (uint64_t) frames) * (uint64_t) frames;
 			if (file && *file && frames > 0) {
 				if (tempo <= 0 && bpm > 0) tempo = bpm;
 				if (!ivFrames) ivFrames = frames;
@@ -206,7 +214,7 @@ std::string exportJamAls(const std::string& jamRoot, bool liteMode, std::string*
 					PlayerRow r;
 					r.abs = abs;
 					r.rel = file;
-					r.sf = sf ? (uint64_t) json_integer_value(sf) : 0;
+					r.sf = sfv;
 					r.frames = frames;
 					r.sampleRate = sr > 0 ? sr : 48000;
 					r.fileSize = absSize;
@@ -236,7 +244,7 @@ std::string exportJamAls(const std::string& jamRoot, bool liteMode, std::string*
 				c.name = (tx ? "tx " : (u + " ")) + std::to_string(seq);
 				c.relPath = file;
 				c.absPath = abs;
-				c.sessionFrame = sf ? (uint64_t) json_integer_value(sf) : 0;
+				c.sessionFrame = sfv;
 				c.frames = frames;
 				c.sampleRate = sr > 0 ? sr : 48000;
 				c.fileSize = absSize;

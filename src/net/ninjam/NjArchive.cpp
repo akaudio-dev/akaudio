@@ -109,7 +109,7 @@ void NjArchive::enqueue(Job&& j) {
 }
 
 void NjArchive::archiveRx(const std::string& user, int chidx, const uint8_t* bytes, size_t len,
-                          int bpm, int bpi, float sampleRate, int frames) {
+                          int bpm, int bpi, float sampleRate, int frames, uint64_t atSessionFrame) {
 	if (!run_.load(std::memory_order_acquire) || !bytes || len == 0)
 		return;
 	Job j;
@@ -117,13 +117,14 @@ void NjArchive::archiveRx(const std::string& user, int chidx, const uint8_t* byt
 	j.user = user;
 	j.chidx = chidx;
 	j.bytes.assign(bytes, bytes + len);
-	j.sessionFrame = sessionFrame.load(std::memory_order_relaxed);
+	j.sessionFrame = atSessionFrame != UINT64_MAX ? atSessionFrame
+	               : sessionFrame.load(std::memory_order_relaxed);
 	j.bpm = bpm; j.bpi = bpi; j.frames = frames; j.sampleRate = sampleRate;
 	enqueue(std::move(j));
 }
 
 void NjArchive::archiveTx(int chidx, const uint8_t* bytes, size_t len,
-                          int bpm, int bpi, float sampleRate, int frames) {
+                          int bpm, int bpi, float sampleRate, int frames, uint64_t atSessionFrame) {
 	if (!run_.load(std::memory_order_acquire) || !recordTx_.load(std::memory_order_relaxed)
 	        || !bytes || len == 0)
 		return;
@@ -131,7 +132,8 @@ void NjArchive::archiveTx(int chidx, const uint8_t* bytes, size_t len,
 	j.tx = true;
 	j.chidx = chidx;
 	j.bytes.assign(bytes, bytes + len);
-	j.sessionFrame = sessionFrame.load(std::memory_order_relaxed);
+	j.sessionFrame = atSessionFrame != UINT64_MAX ? atSessionFrame
+	               : sessionFrame.load(std::memory_order_relaxed);
 	j.bpm = bpm; j.bpi = bpi; j.frames = frames; j.sampleRate = sampleRate;
 	enqueue(std::move(j));
 }

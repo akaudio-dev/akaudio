@@ -55,17 +55,24 @@ public:
 	long totalIntervals() const { return nIntervals.load(std::memory_order_relaxed); }
 	long totalBytes() const { return nBytes.load(std::memory_order_relaxed); }
 
-	// Audio thread: publish the current session-timeline position (cheap atomic). Each
-	// interval is stamped with the value current when it is enqueued.
+	// Audio thread: publish the current session-timeline position (cheap atomic). An
+	// interval whose caller doesn't pass an explicit stamp gets the value current when
+	// it is enqueued.
 	void setSessionFrame(uint64_t sf) { sessionFrame.store(sf, std::memory_order_relaxed); }
+	uint64_t now() const { return sessionFrame.load(std::memory_order_relaxed); }
 
-	// Net thread: a complete received interval's raw OGG bytes (no-op unless running).
+	// Mix thread: a complete received interval's raw OGG bytes (no-op unless running).
+	// `atSessionFrame` is the interval's playout start on the shared timeline (§7.3);
+	// UINT64_MAX = unknown, stamp with the current clock instead.
 	void archiveRx(const std::string& user, int chidx, const uint8_t* bytes, size_t len,
-	               int bpm, int bpi, float sampleRate, int frames);
+	               int bpm, int bpi, float sampleRate, int frames,
+	               uint64_t atSessionFrame = UINT64_MAX);
 	// TX thread: a complete transmitted-mix interval's raw OGG bytes (no-op unless
-	// running or recordTx is off).
+	// running or recordTx is off). `atSessionFrame` as above (the caller passes the
+	// interval's capture START — the final chunk fires at its end boundary).
 	void archiveTx(int chidx, const uint8_t* bytes, size_t len,
-	               int bpm, int bpi, float sampleRate, int frames);
+	               int bpm, int bpi, float sampleRate, int frames,
+	               uint64_t atSessionFrame = UINT64_MAX);
 
 	// UI thread: snapshot of per-source counts, most-recent-first-ish (insertion order).
 	std::vector<PlayerStat> status() const;

@@ -53,8 +53,14 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
 
 - **Recorder** (`src/Recorder.cpp`, built M3) — a Ninjam expander that saves the jam:
   `NjClient` owns an `NjArchive` (`src/net/ninjam/NjArchive.{hpp,cpp}`, Rack-free writer
-  thread) that writes every received per-player interval and our TX mix to disk as the
-  raw OGG bytes (`~/Music/jams/<stamp>_<room>/{players,tx}/*.ogg` (folder configurable via the Recorder menu)
+  thread) that writes every *played* received per-player interval and our TX mix to disk
+  as the raw OGG bytes — rows are stamped on the shared session timeline at the
+  interval's local **playout start** (RX: fired from `NjAudio`'s mix thread when the
+  chained slot begins, mapped via the audio thread's `pullOffset` publish; TX: capture
+  start, one interval before the final-chunk boundary), and the `.als` export snaps
+  every row to the nearest interval boundary — arrival-time stamps put player clips an
+  arbitrary ~0–1 interval off the grid with ±90 ms jitter (fixed 2026-08-29, see
+  `LOOPER_DESIGN.md` §7.3) (`~/Music/jams/<stamp>_<room>/{players,tx}/*.ogg` (folder configurable via the Recorder menu)
   + `index.jsonl`), no re-encode (a TX interval is archived only if its BEGIN happened
   with the archive running — `txArchWhole` in `NjClient` — else the row would be a
   headerless mid-stream slice nothing can decode). The module is a pure panel reaching
