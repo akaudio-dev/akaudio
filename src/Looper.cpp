@@ -290,6 +290,8 @@ struct Looper : Module {
 			c.intervalFrames = std::max(1, src->intervalFrames);
 			c.frameInInterval = src->frameInInterval;
 			c.downbeat = src->downbeat;
+			c.beat = src->beat;           // the ACTION grid: clip ops commit per beat
+			c.beatIndex = src->beatIndex;
 			c.gridGeneration = src->gridGeneration;
 			c.sessionFrame = src->sessionFrame;
 			c.bpm = src->bpm; c.bpi = src->bpi;
@@ -302,6 +304,8 @@ struct Looper : Module {
 			c.intervalFrames = (int) n;
 			c.frameInInterval = (int) simFrame;
 			c.downbeat = simFrame == 0;
+			c.beat = c.downbeat; // beat-less grid: one action point per interval
+			c.beatIndex = 0;
 			c.gridGeneration = simGen;
 			c.sessionFrame = simSession++;
 			c.bpm = 0; c.bpi = 0;
@@ -533,10 +537,10 @@ struct Looper : Module {
 	// folder wins and the grid migrates along (adoption, below); off-recording, the
 	// resolved folder freezes once written and a menu change of the base re-resolves.
 	// Re-point the session into `dir` (a fresh jam folder). With `carry`, the whole grid
-	// travels: Session::migrateTo byte-copies the live take files (any grid — mismatched
-	// takes grey + re-derive on load, and derived tiles travel as their originals) and
-	// rewrites the manifest there; the engine then re-opens playing cells' spans in the
-	// new events log. Non-destructive: the previous folder keeps all its files.
+	// travels: Session::migrateTo byte-copies the live take files (any grid — takes keep
+	// their recorded length and free-run wherever they land) and rewrites the manifest
+	// there; the engine then re-opens playing cells' spans in the new events log.
+	// Non-destructive: the previous folder keeps all its files.
 	void adoptSessionDir(const std::string& dir, const std::string& folder, bool carry) {
 		resolvedSessionDir = dir;
 		// Room label = the jam NAME (folder may carry a date prefix, "2026-08-26/0842_room").
@@ -646,7 +650,7 @@ struct Looper : Module {
 	// Restore the grid from a persisted session folder (clip loader). UI thread, runs once
 	// on patch load: parse `<loadDir>/session.json`, restore track names, seed the session's
 	// manifest model, and queue each take's OGG for the worker to decode + install. The
-	// takes appear as FILLED slots (playable once the live grid matches their length).
+	// takes appear as FILLED slots, launchable at their recorded length (free-running).
 	void loadSession() {
 		loadPending = false;
 		// Disk first: the saved session folder is the source of truth. Only when it is
@@ -740,7 +744,6 @@ struct Looper : Module {
 		json_object_set_new(root, "defRepeats", json_integer(engine.defRepeats.load()));
 		json_object_set_new(root, "defDecayDb", json_real(engine.defDecayDb.load()));
 		json_object_set_new(root, "autoAdvance", json_boolean(engine.autoAdvance.load()));
-		json_object_set_new(root, "repitch", json_boolean(engine.repitch.load()));
 		json_t* names = json_array();
 		for (int t = 0; t < TRACKS; t++)
 			json_array_append_new(names, json_string(trackNames[t].c_str()));
@@ -769,8 +772,8 @@ struct Looper : Module {
 		if (j) engine.defDecayDb.store((float) json_number_value(j));
 		j = json_object_get(root, "autoAdvance");
 		if (json_is_boolean(j)) engine.autoAdvance.store(json_boolean_value(j));
-		j = json_object_get(root, "repitch");
-		if (json_is_boolean(j)) engine.repitch.store(json_boolean_value(j));
+		// ("repitch" from older patches is deliberately ignored: tempo conversion was
+		// removed 2026-08-29 — takes free-run at their recorded speed.)
 		j = json_object_get(root, "trackNames");
 		if (json_is_array(j)) {
 			for (int t = 0; t < TRACKS && t < (int) json_array_size(j); t++) {
@@ -1041,8 +1044,8 @@ struct SlotButton : HoverSwitch {
 		const float w = box.size.x, h = box.size.y;
 		int state = akaudio::looper::EMPTY, pending = akaudio::looper::NONE, reps = 0, repCount = 0;
 		int follow = 0;
-		float decay = 0.f, gain = 1.f;
-		bool sel = false, playable = true, overdubbing = false;
+		float decay = 0.f, gain = 1.f, slotPhase = 0.f;
+		bool sel = false, overdubbing = false;
 		const float* thumb = nullptr;
 		float preview[THUMB_BINS];
 		if (lp) {
@@ -1054,8 +1057,8 @@ struct SlotButton : HoverSwitch {
 			follow = sl.followSlot.load(std::memory_order_relaxed);
 			decay = sl.decayDb.load(std::memory_order_relaxed);
 			gain = sl.gain.load(std::memory_order_relaxed);
+			slotPhase = sl.phaseA.load(std::memory_order_relaxed);
 			sel = lp->selected.load(std::memory_order_relaxed) == t * SLOTS + s;
-			playable = sl.playable.load(std::memory_order_relaxed);
 			overdubbing = sl.overdubbing.load(std::memory_order_relaxed);
 			thumb = sl.thumb;
 		} else if ((t * 3 + s * 5) % 7 < 2) {
@@ -1079,11 +1082,10 @@ struct SlotButton : HoverSwitch {
 		nvgStrokeWidth(vg, 1.f);
 		nvgStroke(vg);
 
-		// Thumbnail (a take whose length no longer matches the grid draws faint: not launchable).
+		// Thumbnail.
 		if ((state == akaudio::looper::FILLED || state == akaudio::looper::PLAYING) && thumb) {
 			const float bw = (w - 4.f) / THUMB_BINS;
 			NVGcolor c = state == akaudio::looper::PLAYING ? lpGreen() : lpTextDim();
-			if (!playable) c = nvgTransRGBAf(c, 0.3f);
 			nvgFillColor(vg, state == akaudio::looper::PLAYING ? nvgTransRGBAf(c, 0.35f + 0.65f * gain) : c);
 			for (int i = 0; i < THUMB_BINS; i++) {
 				float bh = std::max(1.f, thumb[i] * (h - 6.f));
@@ -1092,27 +1094,25 @@ struct SlotButton : HoverSwitch {
 				nvgFill(vg);
 			}
 		}
-		// Recording (or overdubbing): the interval being recorded fills the slot
-		// left → right, like a recording clip — red while recording, amber over the
-		// take for overdub. The bins come from the track's rolling recorder.
-		if (lp && (state == akaudio::looper::RECORDING || overdubbing)) {
-			akaudio::looper::Track& tr = lp->engine.tracks[t];
-			float ph = lp->phase.load(std::memory_order_relaxed);
+		// Recording: the take being captured fills the slot left → right, like a
+		// recording clip — the bins accumulate in the slot's own thumbnail as the
+		// capture writes them (recording may start mid-interval: the fill tracks the
+		// take's own progress toward the one-interval cap, not the grid phase).
+		if (lp && state == akaudio::looper::RECORDING && thumb) {
 			const float bw = (w - 4.f) / THUMB_BINS;
-			int upto = (int) (ph * THUMB_BINS);
-			bool present = tr.present.load(std::memory_order_relaxed);
-			nvgFillColor(vg, state == akaudio::looper::RECORDING ? lpRed() : lpAmber());
+			int upto = (int) (slotPhase * THUMB_BINS);
+			nvgFillColor(vg, lpRed());
 			for (int i = 0; i <= upto && i < THUMB_BINS; i++) {
-				float a = present ? tr.live[i] : 0.08f;
-				float bh = std::max(1.f, a * (h - 6.f));
+				float bh = std::max(1.f, std::max(thumb[i], 0.04f) * (h - 6.f));
 				nvgBeginPath(vg);
 				nvgRect(vg, 2.f + i * bw, h / 2 - bh / 2, std::max(0.5f, bw - 0.3f), bh);
 				nvgFill(vg);
 			}
 		}
-		// Playhead.
+		// Playhead: the loop's OWN phase (free-running — after a tempo change it
+		// drifts against the grid, and that is the truth worth showing).
 		if (state == akaudio::looper::PLAYING) {
-			float ph = lp ? lp->phase.load(std::memory_order_relaxed) : 0.4f;
+			float ph = lp ? slotPhase : 0.4f;
 			nvgBeginPath(vg);
 			nvgRect(vg, 2.f + ph * (w - 4.f) - 0.5f, 1.f, 1.f, h - 2.f);
 			nvgFillColor(vg, lpText());
@@ -1396,12 +1396,9 @@ struct LooperWidget : ModuleWidget {
 		// push is a mutex-guarded compare that no-ops when nothing changed.
 		if (++settingsSweep >= 30) {
 			settingsSweep = 0;
-			// Tempo-derived cells (BPI tile/split) are RAM-only: their rewired settings
-			// must not leak into the manifest, which keeps the ORIGINAL take's settings.
 			for (int t = 0; t < TRACKS; t++)
 				for (int s = 0; s < SLOTS; s++)
-					if (!lp->engine.tracks[t].slots[s].derived.load(std::memory_order_relaxed))
-						lp->pushSlotSettings(t, s);
+					lp->pushSlotSettings(t, s);
 			// The name sync serializes the whole MixMaster (dataToJson) — every 4th
 			// sweep (~2 s) is plenty for label edits.
 			if (++nameSweep >= 4) {
@@ -1434,10 +1431,6 @@ struct LooperWidget : ModuleWidget {
 		menu->addChild(createBoolMenuItem("Capture: auto-advance while playing", "",
 			[m]() { return m->engine.autoAdvance.load(std::memory_order_relaxed); },
 			[m](bool v) { m->engine.autoAdvance.store(v, std::memory_order_relaxed); }));
-		// Off = takes grey out on a BPM change instead of re-pitching (varispeed).
-		menu->addChild(createBoolMenuItem("Tempo change: re-pitch takes", "",
-			[m]() { return m->engine.repitch.load(std::memory_order_relaxed); },
-			[m](bool v) { m->engine.repitch.store(v, std::memory_order_relaxed); }));
 		menu->addChild(createMenuItem("Clear all slots", "", [m]() {
 			for (int t = 0; t < TRACKS; t++)
 				for (int s = 0; s < SLOTS; s++)

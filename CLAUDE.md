@@ -84,19 +84,28 @@ one slug, one shared library, one Library page, two modules (for now). Both modu
   intervals are decoded/summed/re-encoded into `<jamRoot>/mixdown/`, lone intervals
   reference their original OGG untouched). Offline test:
   `make unittest` (or `test/archive_test.cpp`).
-- **Looper** (built through M4: `src/Looper.cpp` is the Rack glue over
-  the Rack-free engine in `src/looper/` — `LooperEngine` (audio thread: always-record,
-  boundary-quantized capture/launch/stop/overdub, scenes, per-slot repeats/decay + follow
+- **Looper** (built through M4 + the 2026-08-29 **fluid-jamming rework**:
+  `src/Looper.cpp` is the Rack glue over
+  the Rack-free engine in `src/looper/` — `LooperEngine` (audio thread: **the action
+  grid is the BEAT** — launch/stop/record-start/record-finish all commit on the next
+  beat, mid-interval included; capture records straight into a per-slot staging buffer
+  (no rolling pair), a press on the recording cell commits the take at its actual
+  whole-beat length, one full interval is the cap; **playback free-runs** — a take
+  keeps its recorded length/pitch forever, loops at its OWN period from wherever it
+  was launched, and a tempo change never converts/stops/greys it (repeats/decay/follow
+  count at the take's wrap; rest cells count in intervals; stops/replaces fade ~1.5 ms
+  via the dyingSlot to avoid mid-cycle clicks; NO tempo conversion — the old varispeed
+  / tile / split machinery is deliberately gone), scenes, per-slot repeats/decay + follow
   actions ("After": stop or chain to slot N, edited in the cell menu; an empty target
   is a rest step that plays silence then follows on), auto-advance
-  capture (playing through the downbeat rolls the recording into the next empty cell —
-  tail-gated at −40 dB; menu-toggleable for drones — and self-wires the chain:
+  capture (playing through the one-interval cap rolls the recording into the next
+  empty cell via the track's spare buffer — tail-gated at −40 dB; menu-toggleable for
+  drones — and self-wires the chain:
   each cell ×1 + follow→next, so launching the first cell replays the take), pickup
-  capture (press→downbeat audio folds into the take's tail — early hits and lead-in
-  phrases survive the loop point), tempo conversion (a BPM change within 0.5×–2×
-  re-pitches takes via windowed-sinc varispeed — menu-toggleable; BPI doubling tiles ×2,
-  halving splits into two ×1-chained halves; combined changes decompose; all RAM-only +
-  guarded installs, disk keeps the originals), always-on two-way track-name
+  capture (the sub-beat press→beat pre-roll writes into the staging tail and the final
+  beat folds over it — early hits survive the loop point; dropped on finish-shortened
+  takes), overdub as playhead-aligned staging (layer commits at the take's wrap; works
+  on any-length takes), always-on two-way track-name
   sync with a MindMeld MixMaster feeding MULTI (commit-triggered: mixer label edits
   pull only the changed `trackLabels` chunks, closing the Looper's 4-char label editor
   pushes back via the mixer's own dataFromJson; no toggle — connecting a mixer makes it
@@ -473,17 +482,19 @@ with undo).
   build/aac_decode_test sample.aac   # exit 0 = real audio; HE-AAC verifies SBR (22050→44100)
   ```
 - `looper_engine_test.cpp` — drives `LooperEngine` with a synthetic clock and deterministic
-  input: capture/launch/stop/overdub commit on the boundary and play back sample-exactly,
-  repeats, −6 dB decay, follow actions (exhaustion/decay-floor chain, self-retrigger,
-  rest cells, launch-wins precedence, A→B→C chains), auto-advance capture
-  (tail gate: quiet tail loops at once, hot tail chains down the column and wires
-  itself, silence ends the chain, launch replays the performance), pickup capture
-  (press→downbeat fold into the take tail, fade-in, no false chain trigger),
-  silent-capture refusal,
-  scene stop, clear, regrid (mismatched take greyed + refused), tempo conversion (tile
-  sample-exact, split pair cycles, derived-not-rederived, occupied-slot block, BPM
-  varispeed verified against an analytic re-pitched sine, combined BPM+BPI, ratio
-  bounds, repitch toggle), bounded allocations. Build:
+  input. The legacy sections run bpi=1 (beat == downbeat), so every historical
+  interval-quantized expectation still holds verbatim: capture/launch/stop/overdub and
+  sample-exact playback, repeats, −6 dB decay, follow actions (exhaustion/decay-floor
+  chain, self-retrigger, rest cells, launch-wins precedence, A→B→C chains),
+  auto-advance capture (tail gate: quiet tail loops at once, hot tail chains down the
+  column and wires itself, silence ends the chain, launch replays the performance),
+  silent-capture refusal, finish-press semantics, scene stop, clear, regrid (the take
+  keeps playing, free-running, and stays launchable), bounded allocations. The
+  "beat action grid" section runs bpi=4: mid-interval beat-quantized launch/stop
+  (with the free playhead wrapping at the take's own period), mid-interval recording
+  start with a boundary-spanning take + startFrame stamp, the pickup pre-roll folded
+  at the tail and replaying sample-exactly, finish-shortened whole-beat takes cycling
+  at their own period, and repeats counting the take's OWN cycles. Build:
   `c++ -std=c++11 -I src test/looper_engine_test.cpp src/looper/LooperEngine.cpp src/looper/LooperWorker.cpp -lpthread -o build/looper_engine_test && build/looper_engine_test`
 - `session_mirror_test.cpp` — offline check of `looper/SessionMirror` (live cells + manifest
   sync, 0-writes-when-unchanged, mtime-preserving hydration round-trip, stale-cell removal,

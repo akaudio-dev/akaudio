@@ -76,38 +76,6 @@ void LooperWorker::recycle(Buf* b) {
 	delete b;
 }
 
-// Windowed-sinc varispeed for BPM conversion (worker thread; allocation-free, the
-// caller provides the output). Maps `srcN` interleaved-stereo frames onto `outN`
-// (speed changes by srcN/outN, pitch with it — tape-style). 16 taps per side with a
-// Hann window and an anti-alias cutoff when slowing down; per-sample normalization
-// keeps unity gain at the take's edges. Quality is deliberately "small, deterministic,
-// dependency-free" — well above the audibility bar for re-pitching loop material.
-static void resampleSinc(const float* src, int srcN, float* out, int outN) {
-	const int TAPS = 16;
-	const double step = (double) srcN / outN;
-	const double cut = outN < srcN ? (double) outN / srcN : 1.0; // anti-alias when slowing the rate down
-	for (int i = 0; i < outN; i++) {
-		double pos = (i + 0.5) * step - 0.5;
-		int c = (int) std::floor(pos);
-		double frac = pos - c;
-		double sumL = 0.0, sumR = 0.0, wsum = 0.0;
-		for (int k = -TAPS + 1; k <= TAPS; k++) {
-			int idx = c + k;
-			if (idx < 0 || idx >= srcN) continue;
-			double x = k - frac;
-			double px = M_PI * x * cut;
-			double sinc = px == 0.0 ? 1.0 : std::sin(px) / px;
-			double w = cut * sinc * (0.5 + 0.5 * std::cos(M_PI * x / TAPS)); // Hann over ±TAPS
-			sumL += w * src[(size_t) idx * 2];
-			sumR += w * src[(size_t) idx * 2 + 1];
-			wsum += w;
-		}
-		double g = wsum != 0.0 ? 1.0 / wsum : 0.0;
-		out[(size_t) i * 2] = (float) (sumL * g);
-		out[(size_t) i * 2 + 1] = (float) (sumR * g);
-	}
-}
-
 void LooperWorker::run() {
 	Cmd c;
 	while (!quit.load(std::memory_order_acquire)) {
@@ -125,9 +93,8 @@ void LooperWorker::run() {
 					break;
 				}
 				case Cmd::OVERDUB_COPY: {
-					// staging = take, plus the part of the current interval already recorded
-					// before the press ([0, upto) of the rolling buffer — frames the audio
-					// thread has finished writing; it adds the rest itself as it records).
+					// staging = a copy of the take; the audio thread folds input into it
+					// at the playhead as the loop plays, and the wrap swaps it in.
 					Buf* b = alloc(c.frames);
 					const size_t n2 = (size_t) c.frames * 2;
 					if (c.a && c.a->frames == c.frames)
@@ -165,75 +132,6 @@ void LooperWorker::run() {
 					if (engine.sink)
 						engine.sink->event(c.ev);
 					break;
-				case Cmd::CONVERT: {
-					// Tempo conversion (BPI halved/doubled, and/or BPM changed within
-					// 0.5×–2×): derive grid-fitting takes. The source (c.a) is an
-					// immutable committed take, valid like a SAVE's (any RELEASE is
-					// queued after this command). Results go through the guarded load
-					// path: a stale result is recycled by the audio thread, never
-					// installed. RAM-only — nothing is saved to disk; the session
-					// keeps the original take + settings.
-					if (!c.a || c.frames <= 1 || c.a->frames <= 0) break;
-					const int n = c.frames;
-					const int srcN = c.a->frames;
-					// Placement mode (c.seq): 0 = in-place, 1 = tile ×2, 2 = split.
-					// First fit the source to L frames: an exact copy when lengths
-					// agree (pure BPI change — keeps tiling/splitting sample-exact),
-					// pad/trim a rounding drift, else windowed-sinc varispeed (a BPM
-					// change re-pitches, tape-style). By construction L/srcN is
-					// exactly the tempo ratio, so the grid does the math for us.
-					const int L = c.seq == 1 ? n / 2 : c.seq == 2 ? 2 * n : n; // ≥ 1: n > 1 above
-					std::vector<float> fit((size_t) L * 2, 0.f);
-					if (srcN == L) {
-						std::memcpy(fit.data(), c.a->pcm, sizeof(float) * (size_t) L * 2);
-					} else if (std::abs(srcN - L) <= 4) {
-						const int m = std::min(srcN, L);
-						std::memcpy(fit.data(), c.a->pcm, sizeof(float) * (size_t) m * 2);
-					} else {
-						resampleSinc(c.a->pcm, srcN, fit.data(), L);
-					}
-					auto push = [&](int slot, Buf* expect, int srcFrom, const TakeMeta& m) {
-						Buf* b = alloc(n);
-						for (int f = 0; f < n; f++) {
-							int sf = srcFrom < 0 ? f % L : srcFrom + f; // tile vs slice
-							bool in = sf < L;
-							b->pcm[(size_t) f * 2]     = in ? fit[(size_t) sf * 2] : 0.f;
-							b->pcm[(size_t) f * 2 + 1] = in ? fit[(size_t) sf * 2 + 1] : 0.f;
-						}
-						LoadInstall li {};
-						li.track = c.track; li.slot = slot; li.buf = b; li.meta = m;
-						li.guard = true; li.expect = expect; li.derived = true;
-						computeThumb(b->pcm, n, li.thumb);
-						if (!engine.submitLoad(li))
-							recycle(b);
-					};
-					if (c.seq == 0) {
-						// In-place varispeed: same bar count, new tempo.
-						push(c.slot, c.a, 0, c.meta);
-					} else if (c.seq == 1) {
-						// Tile ×2: the take plays twice per doubled interval — exactly
-						// what the room heard. Settings carry over unchanged.
-						push(c.slot, c.a, -1, c.meta);
-					} else {
-						// Split into two ×1-chained halves: the pair replays the take
-						// exactly. The second half takes the original's After; an
-						// endless original (repeats ∞, After Stop) becomes an A↔B
-						// cycle. (A finite repeat count can't span a chain — the pair
-						// plays once, then the original's After. Decay resets on each
-						// chain hop, so it is effectively lost — as in any chain.)
-						TakeMeta m1 = c.meta;
-						m1.repeats = 1;
-						m1.followSlot = c.upto + 1; // 1-based: → the second half
-						TakeMeta m2 = c.meta;
-						m2.repeats = 1;
-						m2.startFrame = c.meta.startFrame + (uint64_t) n;
-						if (m2.followSlot == 0 && c.meta.repeats == 0)
-							m2.followSlot = c.slot + 1; // 1-based: back to the first half
-						push(c.slot, c.a, 0, m1);
-						push(c.upto, nullptr, n, m2);
-					}
-					break;
-				}
 			}
 		}
 		if (engine.sink)

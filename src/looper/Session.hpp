@@ -37,10 +37,9 @@ public:
 	void setDir(const std::string& looperDir);
 	// Carry the whole session into a new folder (the adoption move): live take files
 	// are byte-copied old→new and the manifest rewritten there, rows kept as-is —
-	// including takes whose grid doesn't match the live one (they grey + re-derive on
-	// load, exactly like a restore; a RAM re-save can't do this, and derived tiles
-	// have no files of their own — the originals are what travel). The old folder
-	// keeps everything; events continue in the new folder's log.
+	// including takes recorded on another grid (they reload at their own length and
+	// free-run, exactly like a restore; a RAM re-save can't preserve that). The old
+	// folder keeps everything; events continue in the new folder's log.
 	// `retireSource`: after the worker's byte-copies all verify, delete the source's
 	// live files + manifest + events log and remove its (then-empty) folders — move
 	// semantics for a same-run own `_session` folder that would otherwise linger as a

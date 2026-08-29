@@ -3,28 +3,34 @@
 
 #pragma once
 // LooperEngine — the audio-thread half of the Looper (docs/LOOPER_DESIGN.md §5):
-// tracks × slots of one-interval takes, always-record into a rolling buffer, and the
-// arm → commit-at-the-boundary state machine (capture / launch / stop / overdub,
-// scenes, per-slot repeats + decay). Rack-free and driven one frame at a time by a
-// ClockFrame (Ninjam's JamClockMessage in the plugin, a synthetic clock in test/).
+// tracks × slots of takes, beat-quantized clip actions, free-running loop playback.
+// Rack-free and driven one frame at a time by a ClockFrame (Ninjam's JamClockMessage
+// in the plugin, a synthetic clock in test/).
 //
 // THE REALTIME CONTRACT (CLAUDE.md) applies to everything called from tick():
 // no allocation, no locks, no I/O. Buffers are allocated/freed ONLY by LooperWorker;
 // the audio thread asks for them (Cmd) and receives them (Reply) over SPSC queues and
-// commits by pointer rotation. A committed take is immutable; overdub builds a new
-// buffer (staging) and swaps it in at the boundary.
+// commits by pointer swap. A committed take is immutable; capture and overdub build
+// into a staging buffer that is swapped in at commit.
 //
-// Capture has Ableton clip semantics: pressing an empty slot arms it; at the next
-// boundary it starts RECORDING (the interval is recorded into the rolling buffer as
-// always); at the boundary after that the completed interval becomes its take and it
-// starts playing, replacing the slot that was playing. Pressing an ARMED slot cancels
-// the arm; pressing a RECORDING slot queues a FINISH — at the boundary the take
-// commits and replays (a chain closes and cycles from its head); pressing again
-// cancels the finish (the recording rolls on). The track STOP button is the discard.
+// The ACTION grid is the BEAT (fluid-jamming rework, 2026-08-29): launch, stop,
+// recording start and recording finish all commit on the next beat boundary — the
+// interval (NINJAM's bar) matters only as the take-length cap and the auto-advance
+// chain quantum. Capture has Ableton clip semantics: pressing an empty slot arms it;
+// at the next BEAT it starts RECORDING (input goes straight into its staging buffer;
+// the sub-beat press→beat pre-roll folds into the take's tail — the pickup); pressing
+// the RECORDING cell queues a FINISH — at the next beat the take (any whole-beat
+// length) commits and replays from its own start; recording that reaches one full
+// interval auto-commits (hot tail → auto-advance chains into the next empty cell).
+// Pressing an ARMED slot cancels the arm; the track STOP button is the discard.
 //
-// Buffer accounting per track: `rec` (recording), `last` (the interval just
-// completed — what a RECORDING slot takes), `spare` (pre-fetched replacement); per
-// filled slot one take; per in-flight overdub one staging buffer.
+// PLAYBACK IS FREE-RUNNING: a take keeps its recorded length and pitch forever; a
+// launch starts it on a beat and it then cycles at its OWN period (repeats, decay and
+// follow actions count at its wrap). A tempo change never converts audio — old takes
+// keep playing at the old speed and simply drift against the new grid.
+//
+// Buffer accounting per track: `spare` (the chain's instant hand-off); per filled
+// slot one take; per in-flight capture or overdub one staging buffer.
 #include <atomic>
 #include <cstdint>
 #include <vector>
@@ -61,6 +67,9 @@ struct ClockFrame {
 	int intervalFrames;   // N
 	int frameInInterval;  // 0..N-1
 	bool downbeat;        // frameInInterval == 0 this frame
+	bool beat;            // first frame of a beat, incl. the downbeat (the ACTION grid:
+	                      // launch/stop/record commit on beats — sim clock: beat = downbeat)
+	int beatIndex;        // 0..bpi-1 (0 when the clock has no beats)
 	uint32_t gridGeneration;
 	uint64_t sessionFrame;
 	float sampleRate;
@@ -140,32 +149,25 @@ struct LooperSink {
 	virtual void event(const LoopEvent&) {}
 };
 
-// A decoded take on its way from the worker into a slot (clip loader / BPI converter).
-// The worker allocates + fills `buf` (like a committed take) and computes the thumbnail;
-// the audio thread installs it as a FILLED take. Buffer lifetime follows the usual rule —
+// A decoded take on its way from the worker into a slot (clip loader). The worker
+// allocates + fills `buf` (like a committed take) and computes the thumbnail; the
+// audio thread installs it as a FILLED take. Buffer lifetime follows the usual rule —
 // freed by the worker when the slot is later cleared/overwritten.
 struct LoadInstall {
 	int track, slot;
 	Buf* buf;
 	TakeMeta meta;
 	float thumb[THUMB_BINS];
-	// Guarded install (BPI conversions): only land if the slot still holds `expect`
-	// (the source take the conversion was derived from), or — expect == null — if the
-	// slot is still EMPTY (the split's second half). A stale result is recycled, so a
-	// clear/re-record between enqueue and install can never be clobbered.
-	bool guard;
-	Buf* expect;
-	bool derived; // mark the installed take as tempo-derived (RAM-only; see Slot::derived)
 };
 
 // Audio → worker.
 struct Cmd {
-	enum Kind { ALLOC, OVERDUB_COPY, RELEASE, SAVE, CLEAR_FILE, CONVERT, EVENT } kind;
-	int track, slot, frames, upto; // CONVERT: frames = new N; upto = split target slot (−1 = tile)
+	enum Kind { ALLOC, OVERDUB_COPY, RELEASE, SAVE, CLEAR_FILE, EVENT } kind;
+	int track, slot, frames, upto;
 	uint32_t seq;
-	Buf* a;      // OVERDUB_COPY: the take to copy; RELEASE: the buffer; SAVE/CONVERT: the source take
+	Buf* a;      // OVERDUB_COPY: the take to copy; RELEASE: the buffer; SAVE: the source take
 	Buf* b;      // OVERDUB_COPY: the rolling buffer whose [0, upto) is added
-	TakeMeta meta; // SAVE: the take's metadata; CONVERT: new-grid bpm/bpi + the ORIGINAL settings
+	TakeMeta meta; // SAVE: the take's metadata
 	LoopEvent ev;  // EVENT: the performance event (FIFO with SAVE keeps take-before-event order)
 };
 // Worker → audio.
@@ -199,23 +201,33 @@ struct Slot {
 	std::atomic<int> followSlot{0};    // after done: 0 = stop, 1..8 = launch slot N on this track
 	std::atomic<int> repCount{0};
 	std::atomic<float> gain{1.f};
-	std::atomic<bool> playable{true};  // take length matches the live grid
-	// This take is a RAM-only tempo derivation (a BPI tile or split half): the settings
-	// sweep must NOT push its rewired settings into the manifest — the disk keeps the
-	// original take and its original settings, and reload + regrid re-derives. Derived
-	// takes are not converted again on further tempo changes (they grey out; reload
-	// restores the originals). Cleared on capture/clear/real-load.
-	std::atomic<bool> derived{false};
 	std::atomic<bool> overdubbing{false}; // this slot is the live overdub target (UI marker)
 	std::atomic<double> flashAt{-1.0}; // wall time of a refused action (UI: red flash)
-	float thumb[THUMB_BINS] = {};      // display only; written at a boundary
+	// UI progress: PLAYING = loop phase (playPos / take.frames); RECORDING = capture
+	// progress (recPos / N). Written by the audio thread each frame.
+	std::atomic<float> phaseA{0.f};
+	float thumb[THUMB_BINS] = {};      // display only; accumulated while recording
 	// Audio-thread only.
 	Take take;
-	int armFrame = 0; // frame-in-interval of the capture press: the pickup window start
+	// Free-running loop playhead (frames into the take). A take keeps its recorded
+	// length forever: launched on a beat boundary, it then cycles at its OWN period —
+	// after a tempo change it simply keeps playing at the old speed, drifting against
+	// the new grid ("tough luck" by design; no re-pitching, no tile/split derivation).
+	int playPos = 0;
 	bool startedThisBoundary = false;
-	Buf* staging = nullptr; // overdub in progress: take + this interval's input
+	// Capture / overdub staging (one at a time — a slot is never both). Capture:
+	// requested at the press (ALLOC, capSeq), input recorded straight into it from the
+	// start beat; committed at a beat (FINISH) or at the one-interval cap. Overdub:
+	// a worker copy of the take (odSeq), input accumulated at the playhead, swapped in
+	// at the take's own wrap.
+	Buf* staging = nullptr;
+	uint32_t capSeq = 0;    // outstanding capture ALLOC (0 = none)
+	int recPos = -1;        // frames recorded into staging (−1 = recording not started)
+	int preW = 0;           // pre-roll (pickup) frames written at the staging tail
+	uint64_t recStart = 0;  // session frame of the recording's first frame
+	float recPeak = 0.f;    // running peak of the recording (commit gate)
 	uint32_t odSeq = 0;
-	int odCatch = 0;        // frames of the rolling buffer already added into staging
+	float odPeak = 0.f;     // running peak of overdubbed input (merged at commit)
 	bool odReady = false;
 };
 
@@ -223,19 +235,19 @@ struct Track {
 	Slot slots[MAX_SLOTS];
 	std::atomic<int> playingSlot{-1};
 	std::atomic<bool> present{false};
-	std::atomic<int> bufs{0};        // rolling buffers held (rec + last + spare) — diagnostics
-	float live[THUMB_BINS] = {};     // interval in progress (audio writes; an armed slot draws it)
-	float lastLive[THUMB_BINS] = {}; // the completed interval (capture thumbnail)
+	std::atomic<int> bufs{0};        // spare buffers held — diagnostics
 	// Audio-thread only.
-	Buf* rec = nullptr;
-	Buf* last = nullptr;
+	// One pre-allocated interval buffer: the auto-advance chain's instant staging
+	// hand-off at the commit beat (a fresh ALLOC round-trip would drop frames).
 	Buf* spare = nullptr;
+	bool sparePending = false;
 	int chainFrom = -1;   // predecessor of the auto-advance chain's armed cell (−1 = no chain)
 	int chainHead = -1;   // the chain's first cell — a FINISH press launches the replay here
-	bool recPrevOk = false; // post-rotation `rec` still holds the immediately-previous
-	                        // completed interval (pickup source), not a fresh spare
-	bool recPending = false;
-	float peak = 0.f, lastPeak = 0.f;
+	// A stopped/replaced loop fades out over ~1.5 ms instead of hard-cutting mid-cycle
+	// (beat-quantized stops land anywhere in a free-running loop): the demoted slot
+	// keeps rendering, faded, until the fade or its take ends.
+	int dyingSlot = -1;
+	int dyingFade = 0;
 	float txGain = 1.f;   // smoothed TX latch (no click)
 	float gateEnv = 0.f;  // live-thru gate envelope
 };
@@ -312,27 +324,35 @@ public:
 	// escape hatch for never-silent sources (drones/pads), where the chain would
 	// otherwise eat the whole column.
 	std::atomic<bool> autoAdvance{true};
-	// A BPM change re-pitches takes (varispeed, tape-style) within 0.5×–2×. Off = takes
-	// grey out on tempo changes instead (re-record rather than shift pitch).
-	std::atomic<bool> repitch{true};
 	std::atomic<int> intervalFrames{0};  // current N (UI)
 	std::atomic<long> allocations{0};    // buffers allocated by the worker (diagnostics/test)
 
 private:
 	friend class LooperWorker;
 	void regrid(const ClockFrame& c);
+	// Interval downbeat: playing REST cells (silence in a follow chain) count their
+	// repeats in intervals here; real takes count at their own wrap in tick().
 	void boundary(const ClockFrame& c, double now);
+	// Beat boundary (incl. the downbeat): commit pending LAUNCH / STOP / CAPTURE-start /
+	// FINISH — the action grid is the beat, not the interval.
+	void beatCommit(const ClockFrame& c, double now);
+	// Commit a recording: staging[0, recPos) becomes the take (chain / finish / silence
+	// rules), from beatCommit (FINISH) or the capture step (one-interval cap).
+	void commitCapture(int t, int s, bool finishing, const ClockFrame& c, double now);
+	// Frames from c's frame to the start of the next beat (N - frame when beat-less).
+	static int framesToNextBeat(const ClockFrame& c);
 	void drainReplies();
 	void drainIntents();
-	void requestRec(int t);
+	void requestSpare(int t);
 	void drainLoads();             // install decoded takes from the worker (clip loader)
-	bool armOverdub(int t, int s); // request staging = copy(take) for the next interval's overdub
+	bool armOverdub(int t, int s); // request staging = copy(take) for the overdub cycle
 	void saveTake(int t, int s);  // enqueue an OGG save of the slot's committed take (M4)
 	void clearFile(int t, int s); // enqueue a retire of the slot's live file into history/ (M4)
-	// BPI halved/doubled at the same BPM: derive grid-fitting takes from mismatched
-	// ones — tile a take into the doubled interval, or split it into two chained
-	// halves (worker builds the buffers; guarded install through the load path).
-	void maybeConvert(Track& tr, int t, int s);
+	// The playing slot completed one full loop cycle: advance the repeat counter, apply
+	// decay, and when exhausted run the follow action. Called from tick() at the take's
+	// OWN wrap (playPos reaching take.frames — the grid boundary when lengths match),
+	// and from boundary() for playing REST cells (no take: silence counts in intervals).
+	void wrapPlaying(int t, double now);
 	void release(Buf* b);
 	// Start slot `s` playing on track `t`, emitting a START event (reason = why) and a
 	// STOP(R_REPLACED) for the slot it displaces. A self-retrigger (follow → itself, or
@@ -341,8 +361,11 @@ private:
 	static void refuse(Slot& sl, double now) { sl.flashAt.store(now, std::memory_order_relaxed); }
 	// A playing cell steps down to FILLED — unless it has no take (an empty "rest" cell
 	// playing silence in a follow chain), which goes back to EMPTY. Emits a STOP event
-	// (reason = why) when the cell was actually PLAYING.
+	// (reason = why) when the cell was actually PLAYING, and starts the ~1.5 ms
+	// fade-out (dyingSlot) so a mid-cycle cut can't click.
 	void demote(int t, int s, uint8_t reason);
+	// Release a slot's capture staging + reset the capture fields (cancel/clear/regrid).
+	void dropCapture(Slot& sl);
 	// Push one performance event to the sink via the worker queue (audio thread; never
 	// blocks — a full queue drops the event and counts it).
 	void emitEvent(bool start, int t, int s, uint8_t reason);
@@ -371,12 +394,11 @@ private:
 	int N = 0;
 	float sr = 0.f;
 	uint32_t gen = 0;
-	int curBpm = 0, curBpi = 0; // the live grid's tempo (set at regrid; BPI converter)
+	int curBpm = 0, curBpi = 0; // the live grid's tempo (set at regrid)
 	bool haveGrid = false;
 	float gateDecay = 0.f;
-	int declickN = 0;   // loop-end fade length in frames (~1.5 ms), computed on regrid
+	int declickN = 0;   // loop-edge fade length in frames (~1.5 ms), computed on regrid
 	uint32_t seqCounter = 1;
-	int lastFrameRecorded = -1; // frames [0, lastFrameRecorded] of the interval are in `rec`
 	int odTrack = -1, odSlot = -1; // the slot currently accumulating a continuous overdub
 	// The current frame's session-timeline position, cached at the top of tick() so
 	// mid-interval paths (a CLEAR intent) stamp events without the clock in scope.

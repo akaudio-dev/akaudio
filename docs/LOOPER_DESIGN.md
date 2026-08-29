@@ -24,6 +24,36 @@ on patch reload (§11 — the saved OGGs decode back into their slots). Still on
 built (2026-08-25, attempt #2 — template-based); REAPER `.rpp` stays open. §13 tracks
 per-milestone status.
 
+> **2026-08-29 — the fluid-jamming rework (supersedes parts of §1, §5, §9).**
+> Three coupled changes landed together; where an older section below conflicts, THIS
+> note wins (the sections are kept for the decision history):
+>
+> 1. **No tempo conversion, ever.** The whole §5.2 "Tempo conversion" machinery
+>    (BPM varispeed, BPI tile/split, `derived` takes, guarded installs, the re-pitch
+>    menu toggle) was removed. A take keeps its recorded length and pitch forever;
+>    after a tempo change it keeps playing at the old speed, free-running against the
+>    new grid — a regrid no longer stops, greys, or converts committed audio (only
+>    playing *rest* cells are demoted). "Playable" as a concept is gone.
+> 2. **The action grid is the BEAT, not the interval.** Launch, stop, recording start
+>    and recording finish all commit on the next beat (`ClockFrame.beat`, from
+>    `JamClockMessage`; the simulated clock's only beat is its downbeat). Playback is
+>    a per-slot free-running playhead: launched on a beat, a loop cycles at its OWN
+>    period; repeats/decay/follow count at the take's wrap (rest cells still count in
+>    intervals at the downbeat). Beat-quantized cuts land mid-cycle, so stops/replaces
+>    fade over ~1.5 ms (the `dyingSlot` fade) instead of clicking.
+> 3. **Capture records into per-slot staging, not the rolling pair.** The
+>    always-record rolling `rec`/`last` rotation is gone; a press requests a staging
+>    buffer (one interval, the length cap), recording starts at the next beat —
+>    mid-interval is the point — and input is written straight into the staging. A
+>    press on the recording cell (FINISH) commits at the next beat with the take at
+>    its actual whole-beat length; reaching one full interval auto-commits (and the
+>    auto-advance chain continues into the next empty cell via the track's `spare`
+>    buffer, seamlessly). The pickup survives as the sub-beat press→beat pre-roll,
+>    written straight into the staging TAIL and folded by the final beat's `+=`
+>    (full-length takes only; a finish-shortened take drops it with the unused
+>    buffer tail). §5's rolling-pair buffer model and the boundary-commit pseudocode
+>    in §5.3 describe the pre-rework engine.
+
 ---
 
 ## 1. Goals and non-goals
@@ -35,14 +65,14 @@ complete, DAW-importable record of the jam without any existing recorder.
 **Must have (v1)**
 - Looper: grid of **8 tracks × 8 slots**; a track = one stereo instrument (own jack
   pair, or a pair of channels from the single poly **MULTI** input); a slot = one take
-  of exactly **one interval**.
-- **Queued actions on the interval boundary** (capture / launch / stop / overdub /
-  scene), with a sample-exact grid taken from Ninjam's protocol state — no CV
-  plumbing, correct across mid-session BPM/BPI changes.
+  of up to **one interval** (any whole-beat length since the 2026-08-29 rework).
+- **Queued actions on the beat boundary** (capture / launch / stop / scene — was the
+  interval boundary before the 2026-08-29 rework), with a sample-exact grid taken from
+  Ninjam's protocol state — no CV plumbing, correct across mid-session BPM/BPI changes.
 - **Ableton clip semantics, no record arm:** pressing an empty slot starts recording at
-  the next boundary and the take starts playing at the boundary after that (replacing
-  the slot that was playing). Every plugged-in track is continuously recorded into a
-  rolling buffer, which is what makes the commit a pointer move.
+  the next beat, straight into the slot's staging buffer; the take commits at a press
+  (its actual length) or at the one-interval cap, and starts playing at once (replacing
+  the slot that was playing) — commit is a pointer swap, never a copy.
 - Per-slot **play modes** as two settings: `repeats` (∞ or N) and `decay` (gain per
   repetition).
 - **Submix** of all tracks to one stereo MIX OUT → one NINJAM channel on the wire
@@ -372,30 +402,15 @@ boundary.
    boundary already retargeted the playing slot, so user action always wins over the
    follow jump.
 
-**Tempo conversion (BPM varispeed + BPI halving/doubling).** A **BPM change** within
-0.5×–2× re-pitches takes, tape-style: the worker resamples each mismatched take to the
-new interval length with a small windowed-sinc (16 taps/side, Hann, anti-alias cutoff
-when slowing down) — pitch shifts with the tempo ratio, beats stay aligned. Bigger
-jumps grey the takes (varispeed stops being musical), as does the context-menu toggle
-*Tempo change: re-pitch takes* when off (re-enable + the next regrid re-derives).
-Combined BPM+BPI changes decompose: resample for the tempo ratio, then the BPI
-placement below. Everything shares the machinery described next.
-
-**BPI conversion (halving/doubling at the same BPM).** A regrid greys mismatched
-takes as before, but when the BPI exactly halved or doubled (same BPM, same sample
-rate), the engine derives grid-fitting takes on the worker: **doubling tiles** the take
-twice into the new interval (byte-identical to what the room heard); **halving splits**
-it into two ×1-chained halves in the cell and the next EMPTY slot below (occupied → the
-take stays grey) — an endless original becomes an A↔B cycle, so the pair replays the
-phrase exactly. Derivations are **RAM-only**: nothing is saved, session.json keeps the
-original take + settings (the widget sweep skips `derived` cells), so reload + regrid
-re-derives from pristine sources. Results install through the **guarded** load path
-(only if the source take / EMPTY target is still in place — a clear or re-record wins),
-and derived takes are never derived again (they grey on further tempo changes; reload
-restores originals). An overdub onto a derived take makes it real content: the derived
-mark clears and the layered take saves to disk as usual. Limitations: finite repeat
-counts can't span a split chain (the pair plays once, then the original's After) and
-decay resets on every chain hop, as in any chain.
+**Tempo conversion — REMOVED (2026-08-29; see the rework note up top).** The BPM
+varispeed and BPI tile/split machinery that used to live here was deliberately deleted:
+a take keeps its recorded length and pitch forever, and a tempo change just lets it
+free-run at the old speed against the new grid. The removed design (windowed-sinc
+varispeed within 0.5×–2×, tile-on-doubling, split-into-chained-halves, RAM-only
+`derived` takes with guarded installs) is preserved in the decision log and in git
+history should it ever be wanted again — it should not be: the conversion pipeline was
+the single largest source of state complexity in the engine for a feature a jam never
+actually needs.
 
 ### 5.3 Per-frame `process()` (audio thread)
 
@@ -615,24 +630,23 @@ actually arriving).
 
 ## 9. Edge cases (Looper)
 
-### 9.1 Grid change (`gridGeneration`)
-Cancel all pending ops; restart the rolling recorders at the new frame 0. If N is
-unchanged (re-join at the same tempo): playing slots keep playing, playheads restart
-at the new downbeat. If N changed: playing slots → Filled; takes whose `(frames,
-sampleRate)` ≠ live grid are **greyed** (not launchable) until it matches again.
-Free-list flushed.
+### 9.1 Grid change (`gridGeneration`)  *(reworked 2026-08-29 — see the note up top)*
+Cancel all pending ops; discard in-flight recordings and stagings (sized to the old
+grid); mis-sized spares go back to the worker; chains die. **Playing takes keep
+playing** — free-running at their recorded period, whatever the new N — and stay
+launchable; only a playing *rest* cell (pure grid silence) is demoted. No greying,
+no conversion.
 
-### 9.2 Sample-rate change — arrives as a grid change. Old-rate takes greyed;
-resampling on load is v2.
+### 9.2 Sample-rate change — arrives as a grid change. Old-rate takes keep playing
+at the recorded sample count (they sound re-pitched at the new device rate — the
+free-run rule, honestly applied); resampling on load stays a v2 idea.
 
 ### 9.3 Clock source lost (Ninjam removed, left the room, LISTEN mode)
 The Looper falls back to its **simulated clock** (the context-menu interval), so it
-keeps running and the UX still works with no Ninjam in the rack. Because that is a
-source switch, it counts as a grid change (§9.1): pending ops cancel and takes whose
-length ≠ the simulated N are greyed — so playing loops of a different length stop.
-**Known gap vs. the intent** ("losing the connection must not kill the music"): keeping
-loops running at the *last Ninjam N* across the drop (instead of jumping to the
-simulated grid) is a v2 refinement.
+keeps running and the UX still works with no Ninjam in the rack. That is a source
+switch = a grid change (§9.1) — and since the rework, playing loops SURVIVE it at
+their own period ("losing the connection must not kill the music" now holds; only
+queued actions are lost).
 
 ### 9.4 Silent capture — refused (red flash, slot stays Empty); no empty files.
 

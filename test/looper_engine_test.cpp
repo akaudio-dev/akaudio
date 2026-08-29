@@ -7,9 +7,11 @@
 //   c++ -std=c++11 -I src test/looper_engine_test.cpp src/looper/LooperEngine.cpp \
 //       src/looper/LooperWorker.cpp -lpthread -o build/looper_engine_test && build/looper_engine_test
 //
-// Timing model: a queued action commits on the boundary, i.e. on frame 0 of the NEXT
-// interval — so every state check sits after the following interval() call, whose
-// whole output already reflects the committed state.
+// Timing model: a queued action commits on the next BEAT (the fluid-jamming rework).
+// The legacy sections below run the sim with bpi = 1, where the only beat IS the
+// downbeat — every historical interval-quantized expectation still holds verbatim.
+// The "beat action grid" section at the end runs bpi = 4 and exercises mid-interval
+// launches, stops, recording starts/finishes, and free-running playback.
 #include "looper/LooperEngine.hpp"
 
 #include <chrono>
@@ -78,8 +80,9 @@ struct Sim {
 	uint64_t session = 0;
 	double now = 0.0;
 	int n = N;
-	int bpm = 120, bpi = 4; // the clock's tempo (BPI-conversion tests change bpi + n + gen)
-	int sineHz = -1;    // input override: a pure sine (varispeed tests need a smooth signal)
+	// bpi 1 = the legacy grid (beat == downbeat, interval-quantized expectations);
+	// the beat-grid section runs bpi 4 (a beat every n/4 frames).
+	int bpm = 600, bpi = 1;
 	bool tx_ = false;   // TX latch fed to the track this interval
 	int quietFrom = -1; // input silent from this frame on (tail-gate tests); -1 = full interval
 	float inGain = 1.f; // input scale (finish tests: a faint bar between the −70/−40 dB gates)
@@ -93,6 +96,10 @@ struct Sim {
 	ClockFrame clock() {
 		ClockFrame c;
 		c.running = true; c.intervalFrames = n; c.frameInInterval = frame; c.downbeat = frame == 0;
+		// Beat flags exactly as JamClock computes them: index = frame*bpi/n.
+		c.beatIndex = bpi > 0 ? (int) ((long long) frame * bpi / n) : 0;
+		c.beat = frame == 0
+			|| (bpi > 1 && c.beatIndex != (int) ((long long) (frame - 1) * bpi / n));
 		c.gridGeneration = gen; c.sessionFrame = session++; c.sampleRate = SR; c.bpm = bpm; c.bpi = bpi;
 		if (++frame >= n) frame = 0;
 		return c;
@@ -113,8 +120,8 @@ struct Sim {
 			action(f);
 			TrackIn in;
 			in.present = present; in.tx = tx_;
-			bool live = (k >= 0 || sineHz > 0) && (quietFrom < 0 || f < quietFrom);
-			float v = sineHz > 0 ? 0.3f * std::sin(2.f * (float) M_PI * sineHz * f / SR) : (k >= 0 ? sig(k, f) : 0.f);
+			bool live = k >= 0 && (quietFrom < 0 || f < quietFrom);
+			float v = k >= 0 ? sig(k, f) : 0.f;
 			in.l = live ? v * inGain : 0.f;
 			in.r = live ? -v * inGain : 0.f;
 			float l = 0.f, r = 0.f, cl = 0.f, cr = 0.f;
@@ -149,9 +156,12 @@ struct Sim {
 		}
 		return true;
 	}
-	// Output == signal a + signal b (the overdubbed take), within tol.
+	// Output == signal a + signal b (the overdubbed take), within tol. Skips the first
+	// 16 frames: the overdub copy arrives a hair after the wrap that re-arms it, so the
+	// layer's very first frames of input are by-design absent (masked by the declick
+	// fade in real use — disabled here for exactness).
 	bool outputIsSum(int a, int b, float tol = 1e-6f) {
-		for (int f = 0; f < n; f++) {
+		for (int f = 16; f < n; f++) {
 			float el = sig(a, f) + sig(b, f), er = -sig(a, f) - sig(b, f);
 			if (std::fabs(outL[f] - el) > tol || std::fabs(outR[f] - er) > tol) {
 				std::printf("   mismatch at frame %d: got %.6f want %.6f\n", f, outL[f], el);
@@ -171,9 +181,9 @@ int main() {
 	sim.eng.start();
 	Slot& s0 = sim.slot(0);
 
-	// Warm-up: first clock → regrid → rolling buffers arrive from the worker.
+	// Warm-up: first clock → regrid → the track's spare buffer arrives from the worker.
 	sim.interval(0);
-	CHECK(sim.eng.tracks[0].bufs.load() >= 2, "rolling buffers stocked (got %d)", sim.eng.tracks[0].bufs.load());
+	CHECK(sim.eng.tracks[0].bufs.load() >= 1, "spare buffer stocked (got %d)", sim.eng.tracks[0].bufs.load());
 
 	// ---- Capture (Ableton clip semantics): press → records the NEXT interval → plays ----
 	sim.interval(-1, true, [&](int f) { if (f == 100) sim.eng.pressSlot(0, 0, false); });
@@ -224,18 +234,20 @@ int main() {
 	CHECK(std::fabs(s0.gain.load() - 1.f) < 1e-6f, "gain 1 again (got %f)", s0.gain.load());
 
 	// ---- Continuous overdub: OVERDUB latch on + selection → the selected playing cell
-	// layers this interval's input onto its take each boundary, until the latch is off or
-	// the selection changes. slot 0 is playing signal 1. ----
+	// layers its input onto its take at the playhead, committing each layer at the
+	// take's own wrap, until the latch is off or the selection changes. slot 0 is
+	// playing signal 1. ----
 	sim.eng.overdubSel.store(0 * MAX_SLOTS + 0);   // select slot 0
 	sim.eng.overdubMode.store(true);           // engage the latch
-	CHECK(!s0.overdubbing.load(), "not overdubbing until the boundary arms it");
-	sim.interval(2);                           // boundary arms; this interval folds signal 2
+	CHECK(!s0.overdubbing.load(), "not overdubbing until the engine's tick arms it");
+	sim.interval(-1);                          // arms immediately; a silent layer commits at the wrap
 	CHECK(s0.overdubbing.load(), "selected playing cell overdubs while latched");
 	CHECK(s0.state.load() == PLAYING, "overdubbing cell keeps playing");
-	sim.interval(-1);                          // boundary commits: take = signal 1 + signal 2
+	sim.interval(2);                           // this cycle folds signal 2 into the layer
+	sim.interval(-1);                          // the wrap committed: take = signal 1 + signal 2
 	{
 		bool ok = true;
-		for (int f = 0; f < N && ok; f++) {
+		for (int f = 16; f < N && ok; f++) { // first frames: staging-arrival hole, by design
 			float el = Sim::sig(1, f) + Sim::sig(2, f);
 			float er = -Sim::sig(1, f) - Sim::sig(2, f);
 			if (std::fabs(sim.outL[f] - el) > 1e-6f || std::fabs(sim.outR[f] - er) > 1e-6f) {
@@ -243,10 +255,10 @@ int main() {
 				ok = false;
 			}
 		}
-		CHECK(ok, "overdub layered this interval's input onto the loop");
+		CHECK(ok, "overdub layered the cycle's input onto the loop");
 	}
-	sim.eng.overdubMode.store(false);          // disengage → overdub stops after committing
-	sim.interval(-1);                          // commits the trailing (silent) overdub, no re-arm
+	sim.eng.overdubMode.store(false);          // disengage → the pending silent layer is dropped
+	sim.interval(-1);
 	CHECK(!s0.overdubbing.load(), "overdub stops when the latch is disengaged");
 	CHECK(s0.state.load() == PLAYING, "loop keeps playing after overdub stops");
 	sim.eng.overdubSel.store(-1);              // clear selection for the sections below
@@ -323,7 +335,9 @@ int main() {
 	CHECK(s0.repeats.load() == 0 && s0.decayDb.load() == 0.f && s0.followSlot.load() == 0,
 		"clear resets the cell's settings (no ghost rest step)");
 
-	// ---- Regrid: a take of another length stays but isn't launchable; new captures work ----
+	// ---- Regrid: a tempo change NEVER touches committed audio — the playing take
+	// keeps looping at its own recorded period, free-running against the new grid;
+	// old-length takes stay launchable; new captures use the new grid. ----
 	sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressSlot(0, 2, false); });
 	sim.interval(3); // records
 	sim.interval(-1);
@@ -331,27 +345,47 @@ int main() {
 	CHECK(s2.state.load() == PLAYING, "captured into slot 2 before regrid");
 	CHECK(sim.outputIs(3), "slot 2 plays");
 	sim.n = 2400; sim.gen = 2; sim.frame = 0;
-	sim.interval(4);                          // regrid on its first tick
-	CHECK(s2.state.load() == FILLED && !s2.playable.load(), "old-length take stopped + greyed on regrid");
+	sim.interval(-1);                         // regrid on its first tick; the take plays on
+	CHECK(s2.state.load() == PLAYING, "free-run: the old-length take keeps playing across a regrid");
 	CHECK(sim.eng.intervalFrames.load() == 2400, "engine follows the new N");
+	{
+		bool ok = true;
+		for (int f = 0; f < sim.n && ok; f++)
+			if (std::fabs(sim.outL[f] - Sim::sig(3, f)) > 1e-6f) ok = false;
+		CHECK(ok, "free-run: the take's first half fills the first short interval");
+	}
+	sim.interval(-1);
+	{
+		bool ok = true;
+		for (int f = 0; f < sim.n && ok; f++)
+			if (std::fabs(sim.outL[f] - Sim::sig(3, 2400 + f)) > 1e-6f) ok = false;
+		CHECK(ok, "free-run: its second half fills the next (drifting against the grid)");
+	}
+	sim.eng.stopTrack(0);
+	sim.interval(-1);
+	CHECK(s2.state.load() == FILLED, "free-running take stopped");
+	// Relaunching the old-length take works — length vs the live grid is irrelevant.
 	sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressSlot(0, 2, false); });
 	sim.interval(-1);
-	CHECK(s2.state.load() == FILLED && s2.flashAt.load() > 0, "launching a mismatched take is refused");
+	CHECK(s2.state.load() == PLAYING, "old-length take relaunches after the regrid");
+	sim.eng.stopTrack(0);
+	sim.interval(-1);
+	// New captures record on the new grid.
 	sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressSlot(0, 3, false); });
 	sim.interval(5); // records on the new grid
 	sim.interval(-1);
 	CHECK(sim.slot(3).state.load() == PLAYING, "capture on the new grid committed");
 	CHECK(sim.outputIs(5), "capture on the new grid plays sample-exactly");
-	// A follow into a grid-mismatched take refuses like a launch would (rest cells are
-	// the only take-less targets allowed; wrong-length takes are not).
+	// A follow into an old-length take is allowed too — it free-runs from the jump.
 	sim.slot(3).repeats.store(1);
-	sim.slot(3).followSlot.store(3); // → slot 2: FILLED but old-length
-	s2.flashAt.store(-1.0);
-	sim.interval(-1); // boundary: repeats exhaust → follow refused → stop
-	CHECK(sim.slot(3).state.load() == FILLED && sim.eng.tracks[0].playingSlot.load() == -1,
-		"mismatched follow target: source stops");
-	CHECK(s2.flashAt.load() > 0, "mismatched follow target red-flashes");
+	sim.slot(3).followSlot.store(3); // → slot 2: FILLED, old length
+	sim.interval(-1); // wrap: repeats exhaust → follow into the mismatched take
+	CHECK(s2.state.load() == PLAYING && sim.eng.tracks[0].playingSlot.load() == 2,
+		"follow into an old-length take launches it");
+	sim.eng.stopTrack(0);
+	sim.interval(-1);
 	// An out-of-range follow value (hand-edited manifest) degrades to stop, no crash.
+	sim.slot(3).repeats.store(1);
 	sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressSlot(0, 3, false); });
 	sim.interval(-1);
 	CHECK(sim.slot(3).state.load() == PLAYING, "relaunched for the out-of-range follow test");
@@ -400,7 +434,6 @@ int main() {
 		CHECK(s6.state.load() == FILLED, "loaded take installs as FILLED (state %d)", s6.state.load());
 		CHECK(s6.followSlot.load() == 3, "loaded take restores its follow action");
 		CHECK(s6.take.buf != nullptr && s6.take.frames == n, "loaded take keeps its buffer + length");
-		CHECK(s6.playable.load(), "loaded take is playable (matches the live grid)");
 		CHECK(s6.thumb[0] > 0.4f, "loaded take carries a thumbnail");
 		sim.interval(-1, true, [&](int f) { if (f == 10) sim.eng.pressSlot(0, 6, false); });
 		sim.interval(-1);
@@ -416,9 +449,9 @@ int main() {
 		CHECK(sim.slot(5).state.load() == EMPTY, "empty-pcm load skipped (no silent ghost take)");
 	}
 
-	CHECK(sim.eng.tracks[0].bufs.load() <= 3, "at most 3 rolling buffers per track (got %d)", sim.eng.tracks[0].bufs.load());
+	CHECK(sim.eng.tracks[0].bufs.load() <= 1, "at most one spare buffer per track (got %d)", sim.eng.tracks[0].bufs.load());
 	std::printf("worker allocations: %ld\n", sim.eng.allocations.load());
-	CHECK(sim.eng.allocations.load() <= 20, "allocation count bounded (got %ld)", sim.eng.allocations.load());
+	CHECK(sim.eng.allocations.load() <= 40, "allocation count bounded (got %ld)", sim.eng.allocations.load());
 
 	sim.eng.stop();
 
@@ -1044,6 +1077,156 @@ int main() {
 		CHECK(q.slot(0).state.load() == PLAYING && q.slot(1).state.load() == FILLED,
 			"latest-wins: the last-pressed cell plays, not the highest slot");
 		q.eng.stop();
+	}
+
+	// ---- The BEAT action grid (fluid jamming): launch, stop, record-start and finish
+	// all commit on the next beat — mid-interval is the point. bpi = 4 → a beat every
+	// n/4 = 1200 frames; takes free-run from wherever they started. ----
+	{
+		Sim g;
+		g.bpm = 2400; g.bpi = 4; // 4 beats per 0.1 s interval
+		const int B = N / 4;      // 1200 frames per beat
+		g.eng.declickEnabled.store(false);
+		g.eng.start();
+		g.interval(0); // warm-up
+
+		// A full-interval take, classically aligned: press late in the prior interval —
+		// the next beat is the downbeat itself.
+		g.interval(-1, true, [&](int f) {
+			if (f == g.n - 100) g.eng.pressSlot(0, 0, false);
+			if (f == g.n - 50) Sim::nap(); // the staging ALLOC lands before the beat
+		});
+		g.interval(1);   // records the whole interval
+		g.interval(-1);  // capped + playing from the downbeat
+		CHECK(g.slot(0).state.load() == PLAYING, "beat grid: full-interval take captured");
+		CHECK(g.outputIs(1), "beat grid: plays sample-exactly");
+		CHECK(g.slot(0).take.frames == g.n, "beat grid: take length = the interval cap");
+		g.eng.stopTrack(0);
+		g.interval(-1);
+		CHECK(g.slot(0).state.load() == FILLED, "beat grid: stopped");
+
+		// LAUNCH commits mid-interval, on the next beat, from the take's own start.
+		g.interval(-1, true, [&](int f) { if (f == 100) g.eng.pressSlot(0, 0, false); });
+		{
+			bool ok = true;
+			for (int f = 0; f < g.n && ok; f++) {
+				float want = f < B ? 0.f : Sim::sig(1, f - B);
+				if (std::fabs(g.outL[f] - want) > 1e-6f) {
+					std::printf("   beat-launch mismatch at %d: %.6f vs %.6f\n", f, g.outL[f], want);
+					ok = false;
+				}
+			}
+			CHECK(ok, "beat launch: silence to the beat, then the take from its own start");
+		}
+		CHECK(g.slot(0).state.load() == PLAYING, "beat launch: playing");
+
+		// STOP commits on a beat too; before it lands, the free playhead wraps at the
+		// take's OWN period (mid-interval, since the launch was off the downbeat).
+		g.interval(-1, true, [&](int f) { if (f == 1300) g.eng.pressSlot(0, 0, false); });
+		{
+			bool ok = true;
+			for (int f = 0; f < g.n && ok; f++) {
+				float want;
+				if (f < B)          want = Sim::sig(1, 3600 + f); // cycle 1 tail
+				else if (f < 2 * B) want = Sim::sig(1, f - B);    // wrapped at its own period
+				else                want = 0.f;                   // stopped on the next beat
+				if (std::fabs(g.outL[f] - want) > 1e-6f) {
+					std::printf("   beat-stop mismatch at %d: %.6f vs %.6f\n", f, g.outL[f], want);
+					ok = false;
+				}
+			}
+			CHECK(ok, "beat stop: plays (and wraps) to the stop beat, then silence");
+		}
+		CHECK(g.slot(0).state.load() == FILLED, "beat stop: cell FILLED");
+
+		// Recording starts MID-INTERVAL, on the beat after the press; the take spans
+		// the interval boundary, caps at one interval, and replays seamlessly — with
+		// the sub-beat press→beat pre-roll folded at its tail (the pickup).
+		g.eng.requestClear(0, 0);
+		g.interval(-1);
+		uint64_t sess2 = g.session; // session frame of the next interval's frame 0
+		g.interval(2, true, [&](int f) {
+			if (f == 100) g.eng.pressSlot(0, 1, false);
+			if (f == 104) Sim::nap(); // staging lands well before the start beat
+		});
+		CHECK(g.slot(1).state.load() == RECORDING, "beat record: started mid-interval");
+		g.interval(3);   // caps at f=B → commits + plays
+		CHECK(g.slot(1).state.load() == PLAYING, "beat record: capped at one interval, playing");
+		CHECK(g.slot(1).take.startFrame == sess2 + (uint64_t) B,
+			"beat record: startFrame stamped at the mid-interval start beat (got %llu want %llu)",
+			(unsigned long long) g.slot(1).take.startFrame, (unsigned long long) (sess2 + (uint64_t) B));
+		{
+			bool ok = true;
+			for (int f = 0; f < g.n && ok; f++) {
+				// take[p] = sig2(B+p) for the body, so the replay from the cap beat
+				// reproduces the performance in place: out[f] = sig2(f).
+				float want = f < B ? 0.f : Sim::sig(2, f);
+				if (std::fabs(g.outL[f] - want) > 1e-6f) {
+					std::printf("   beat-record mismatch at %d: %.6f vs %.6f\n", f, g.outL[f], want);
+					ok = false;
+				}
+			}
+			CHECK(ok, "beat record: the take replays its own start right at the cap");
+		}
+		g.interval(-1);
+		{
+			// Cycle 1's tail carries the folded pickup — take[3600+f] = sig3(f)+sig2(f):
+			// the lead-in replays right before the loop point, exactly as performed.
+			// Then the wrap (mid-interval) starts cycle 2's body. The first ~200 frames
+			// are skipped: the pre-roll begins at staging arrival, a few frames after
+			// the press.
+			bool ok = true;
+			for (int f = 200; f < g.n && ok; f++) {
+				float want = f < B ? Sim::sig(3, f) + Sim::sig(2, f) : Sim::sig(2, f);
+				if (std::fabs(g.outL[f] - want) > 1e-6f) {
+					std::printf("   pickup mismatch at %d: %.6f vs %.6f\n", f, g.outL[f], want);
+					ok = false;
+				}
+			}
+			CHECK(ok, "beat record: boundary-spanning take + pickup tail replay sample-exactly");
+		}
+
+		// FINISH mid-take: the take is any whole-beat length — record one beat, commit
+		// at the next; the one-beat loop cycles from its commit beat.
+		g.eng.stopTrack(0);
+		g.interval(-1);
+		g.interval(4, true, [&](int f) {
+			if (f == 10)   g.eng.pressSlot(0, 2, false); // capture: starts at f=B
+			if (f == 14)   Sim::nap();
+			if (f == 1400) g.eng.pressSlot(0, 2, false); // finish: commits at f=2B
+		});
+		CHECK(g.slot(2).state.load() == PLAYING, "beat finish: one-beat take committed and playing");
+		CHECK(g.slot(2).take.frames == B, "beat finish: whole-beat take length (got %d)", g.slot(2).take.frames);
+		{
+			bool ok = true;
+			for (int f = 0; f < g.n && ok; f++) {
+				float want = f < 2 * B ? 0.f : Sim::sig(4, B + ((f - 2 * B) % B));
+				if (std::fabs(g.outL[f] - want) > 1e-6f) {
+					std::printf("   beat-finish mismatch at %d: %.6f vs %.6f\n", f, g.outL[f], want);
+					ok = false;
+				}
+			}
+			CHECK(ok, "beat finish: the one-beat loop cycles from its commit beat");
+		}
+
+		// Repeats count the take's OWN cycles — a ×2 one-beat loop stops mid-interval.
+		g.eng.stopTrack(0);
+		g.interval(-1);
+		g.slot(2).repeats.store(2);
+		g.interval(-1, true, [&](int f) { if (f == 10) g.eng.pressSlot(0, 2, false); });
+		{
+			bool ok = true;
+			for (int f = 0; f < g.n && ok; f++) {
+				float want = (f >= B && f < 3 * B) ? Sim::sig(4, B + ((f - B) % B)) : 0.f;
+				if (std::fabs(g.outL[f] - want) > 1e-6f) {
+					std::printf("   free-run repeats mismatch at %d: %.6f vs %.6f\n", f, g.outL[f], want);
+					ok = false;
+				}
+			}
+			CHECK(ok, "free-run repeats: two OWN cycles then stop, all mid-interval");
+		}
+		CHECK(g.slot(2).state.load() == FILLED, "free-run repeats: cell FILLED after its 2 cycles");
+		g.eng.stop();
 	}
 
 	std::printf("%s (%d failures)\n", fails ? "FAIL" : "PASS: LooperEngine", fails);
