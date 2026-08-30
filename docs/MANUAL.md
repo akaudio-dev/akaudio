@@ -106,12 +106,13 @@ Your last server, credentials, and room are saved with the patch.
 
 ![Looper](images/Looper.png)
 
-An 8×8 grid of one-interval loops — Ableton Session view for a NINJAM jam. Place it
-directly next to a **Ninjam** module (either side) and it locks to the room's real
-interval grid; without one it runs on a simulated clock (interval length in the context
-menu). Every action is **boundary-quantized**: presses queue (blinking outline) and
-commit exactly on the next downbeat. One queued action per track — the latest press
-wins.
+An 8×8 grid of loops (any whole-beat length, up to one interval) — Ableton Session
+view for a NINJAM jam. Place it directly next to a **Ninjam** module (either side) and
+it locks to the room's real grid; without one it runs on a simulated clock (interval
+length in the context menu). Every action is **beat-quantized**: presses queue
+(blinking outline) and commit on the next beat — mid-interval included. One queued
+action per track — the latest press wins. Playback **free-runs**: a launched loop
+cycles at its own recorded length and speed, wherever the grid goes.
 
 ### Panel
 
@@ -120,27 +121,28 @@ wins.
 | **INS** (poly) | Your instruments: channels 1/2 = track 1 L/R, 3/4 = track 2, … Feed it from a mixer's direct-outs (a MindMeld MixMaster maps 1:1). |
 | Per-track jacks | Alternative per-track stereo inputs (a track uses its own jacks when connected, else its INS channels). |
 | **Track label** | Click to rename (4 characters, like MixMaster). With a MixMaster feeding INS, names sync both ways automatically — each side updates when an edit commits. |
-| **Grid cells** | Empty: press to record the next interval (what you play *before* the downbeat folds into the take's tail — pickups survive). Filled: press to launch, press again while playing to stop. Recording: press to **finish** — the take commits on the downbeat and starts looping (a chain replays from its first cell); press again to keep recording instead. The waveform thumbnail fills live while recording. |
+| **Grid cells** | Empty: press and recording starts on the next **beat** (what you play just *before* it folds into the take's tail — pickups survive). Filled: press to launch on the next beat, press again while playing to stop. Recording: press to **finish** — the take commits on the next beat at its actual whole-beat length and starts looping (a chain replays from its first cell); press again to keep recording instead. The waveform thumbnail fills live while recording. |
 | **▶ scene** | Launch a whole row: filled cells play, empty cells stop that track. Latest scene press wins. |
-| **■ / stop row** | Stop a track (or all); also disarms a rolling recording. |
+| **■ / stop row** | Stop a track (or all); also discards an in-flight recording. |
 | **OVERDUB** | Latch: the selected playing cell layers each interval until the latch is off. |
 | **TX lamps** | Per-track on-air toggle: green = in the MIX (the room hears it), cyan = private — live input routes to CUE instead. |
 | **OUTS / CUE / MIX** | Per-track poly out, private monitor out, and the stereo submix (cable MIX into Ninjam's IN to transmit it). |
 
-### Playing through the downbeat
+### Playing through the interval
 
-Keep playing past the loop point and the recording **auto-advances** into the next
-empty cell, chaining downward until an interval comes in quiet — then the whole chain
-is wired to replay in order from its first cell. Or end it yourself: **press the
-recording cell** and on the next downbeat the chain closes and starts cycling from its
-first cell (a final bar with nothing played in it is dropped, so the loop keeps its
-meter). Pressing any *other* cell discards the rolling recording, as does ■.
+A recording caps at one interval. Keep playing past the cap and it **auto-advances**
+into the next empty cell, chaining downward until an interval comes in quiet — then
+the whole chain is wired to replay in order from its first cell. Or end it yourself:
+**press the recording cell** and on the next beat the chain closes and starts cycling
+from its first cell (a final chained bar with nothing played in it is dropped, so the
+loop keeps its meter). Pressing any *other* cell discards the in-flight recording, as
+does ■.
 
 ### Tempo changes
 
-A room BPM change re-pitches your takes tape-style (within 0.5×–2×; menu-toggleable);
-a BPI doubling tiles takes ×2, halving splits them into chained halves. Derived takes
-are RAM-only — disk always keeps the originals.
+A room tempo change never touches committed audio: playing loops keep cycling at
+their recorded speed — free-running against the new grid — and every take stays
+launchable. Only queued actions and in-flight recordings are cancelled by the change.
 
 ### Persistence
 

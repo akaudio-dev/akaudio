@@ -8,6 +8,15 @@ lock-free ring buffer feeding the audio thread). Full user manual: [docs/MANUAL.
 
 ## Modules
 
+> **A word on maturity.** Radio and Ninjam are the oldest modules here and have seen
+> the most real-world hours. **Looper and Recorder are younger and substantially more
+> complex** — a realtime loop engine, multi-threaded capture, on-disk sessions, and a
+> DAW-project exporter — and the Looper's action model was recently reworked around
+> beat-quantized "fluid jamming". Treat them as **beta**: expect the occasional rough
+> edge or bug. Your audio is deliberately hard to lose (takes and archives are plain
+> OGG files on disk; overwritten takes are retired into `history/`, never deleted),
+> but back up jams you care about — and please report anything odd via GitHub issues.
+
 ### Radio
 
 ![Radio](docs/images/Radio.png)
@@ -34,15 +43,17 @@ In-panel room browser, room chat, and a voice mode for talkback.
 
 ![Looper](docs/images/Looper.png)
 
-An 8×8 Ableton-Session-style interval looper that runs on the jam's own clock (an
-expander of Ninjam — every capture, launch, and stop commits exactly on the interval
-boundary; a simulated clock stands in when playing solo). Always-on rolling recording
-makes committing a take a pointer move: press an empty cell and the next interval is
-yours, keep playing through the downbeat and the recording rolls into the next cell and
-wires itself into a replayable chain. Per-cell repeats, decay, and follow actions;
-scenes; continuous overdub; tempo-change survival (takes re-pitch tape-style or re-tile
-across BPI changes); two-way track-name sync with a MindMeld MixMaster; and every take
-is saved to disk and restored with the patch.
+An 8×8 Ableton-Session-style looper that runs on the jam's own clock (an expander of
+Ninjam; a simulated clock stands in when playing solo). Built for fluid jamming: every
+launch, stop, and recording start/finish commits on the next **beat** — mid-interval
+included — takes can be any whole-beat length up to one interval, and loops free-run
+at their own recorded speed, so a room tempo change never stops or re-pitches what you
+already played. Press an empty cell and recording starts on the next beat (what you
+play just before it folds into the take's tail); keep playing through the interval cap
+and the recording rolls into the next cell and wires itself into a replayable chain.
+Per-cell repeats, decay, and follow actions; scenes; continuous overdub; two-way
+track-name sync with a MindMeld MixMaster; and every take is saved to disk and
+restored with the patch. *Beta — see the maturity note above.*
 [Manual →](docs/MANUAL.md#looper)
 
 ### Recorder
@@ -55,7 +66,7 @@ nothing lost — and when recording stops it automatically reassembles the whole
 as an **Ableton Live set**: the Looper grid in Session view, everyone's audio and your
 as-played loop timeline laid out in the Arrangement, tempo and loop braces set. A menu
 switch targets full Live (a track per player) or Live Lite's 8-track cap (players
-merged onto one lane).
+merged onto one lane). *Beta — see the maturity note above.*
 [Manual →](docs/MANUAL.md#recorder)
 
 ## Building
