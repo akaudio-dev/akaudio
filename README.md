@@ -1,8 +1,8 @@
 # AK Audio
 
 A personal VCV Rack plugin (collection of modules) by Andrei Kozlov: network audio in
-and out of Rack — internet radio, live NINJAM jamming, an interval looper built for
-jamming, and a recorder that turns whole jams into Ableton Live sets. All modules share
+and out of Rack — internet radio, live NINJAM jamming, a beat-quantized looper built
+for fluid jamming, and a recorder that turns whole jams into Ableton Live sets. All modules share
 the networked-audio layer in `src/net/` (HTTP/Icecast streaming, codec decode,
 lock-free ring buffer feeding the audio thread). Full user manual: [docs/MANUAL.md](docs/MANUAL.md).
 
@@ -71,14 +71,20 @@ merged onto one lane). *Beta — see the maturity note above.*
 
 ## Building
 
-This plugin builds against a sibling source build of Rack at `../Rack`.
+Builds against either the official Rack SDK at `../Rack-SDK` (fetch it with
+`tools/get_sdk.sh`) or a sibling source build of Rack at `../Rack` — the Makefile
+auto-detects whichever exists (override with `make RACK_DIR=/path/to/Rack-SDK`).
 
 ```bash
-export RACK_DIR=/path/to/Rack   # or rely on the Makefile default ../Rack
-make            # -> plugin.dylib
-make install    # package + install into the Rack user plugins folder
+tools/get_sdk.sh   # one-time: download the Rack SDK for your OS/arch into ../Rack-SDK
+make               # -> plugin.dylib / plugin.so / plugin.dll
+make install       # package + install into the Rack user plugins folder
 make clean
 ```
+
+On Windows (MSYS2/MINGW64 required), run `tools/install_win.ps1` from PowerShell — it
+wraps the build and installs into `%LOCALAPPDATA%\Rack2` (`-BuildOnly` skips the
+install; it refuses to install while Rack is running).
 
 ## Adding a module
 
@@ -138,4 +144,6 @@ Foundation, either version 3 of the License, or (at your option) any later
 version. See [LICENSE](LICENSE) for the full text.
 
 Bundled third-party code retains its own (GPL-compatible) license:
-libogg / libvorbis (BSD), stb_vorbis and dr_mp3 (public domain).
+libogg / libvorbis (BSD), stb_vorbis and dr_mp3 (public domain), and FAAD2
+(GPL-2.0-or-later; compiled in on Windows and Linux for AAC/HLS decoding — macOS
+uses the system AudioToolbox instead).
