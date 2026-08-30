@@ -97,7 +97,10 @@ background threads.
 | **Room browser** | Search / list / select public rooms; peak meter. |
 | **Chat** | Send and receive room chat. |
 
-Your last server, credentials, and room are saved with the patch.
+Your last room is saved with the patch and rejoined on load (never transmitting until
+you explicitly start). Server credentials and your display name are **not** in the
+patch — they live in a private local file in your Rack user folder, so a shared `.vcv`
+leaks nothing (see [Privacy](../README.md#privacy)).
 
 ---
 

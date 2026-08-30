@@ -2,20 +2,20 @@
 
 A personal VCV Rack plugin (collection of modules) by Andrei Kozlov: network audio in
 and out of Rack — internet radio, live NINJAM jamming, a multi-channel always-on
-beat-quantized looper, and a recorder that turns whole jams into Ableton Live sets. All modules share
+beat-quantized looper, and a recorder that turns jams into Ableton Live sets. All modules share
 the networked-audio layer in `src/net/` (HTTP/Icecast streaming, codec decode,
-lock-free ring buffer feeding the audio thread). Full user manual: [docs/MANUAL.md](docs/MANUAL.md).
+lock-free ring buffer feeding the audio thread).
+
+This README is the overview; the **full manual** — per-panel reference, usage guides,
+and troubleshooting — is [docs/MANUAL.md](docs/MANUAL.md).
 
 ## Modules
 
-> **A word on maturity.** Radio and Ninjam are the oldest modules here and have seen
-> the most real-world hours. **Looper and Recorder are younger and substantially more
-> complex** — a realtime loop engine, multi-threaded capture, on-disk sessions, and a
-> DAW-project exporter — and the Looper's action model was recently reworked around
-> beat-quantized "fluid jamming". Treat them as **beta**: expect the occasional rough
-> edge or bug. Your audio is deliberately hard to lose (takes and archives are plain
-> OGG files on disk; overwritten takes are retired into `history/`, never deleted),
-> but back up jams you care about — and please report anything odd via GitHub issues.
+> **A warning:** Radio and Ninjam are the much simpler modules, and are supposed to be
+> bug-free. **Looper and Recorder are new and much more complex** — a realtime loop
+> engine, multi-threaded capture, on-disk sessions, and a DAW-project exporter. Please
+> consider them as **beta**: expect the occasional rough edge or bug, especially in
+> corner cases. Please report anything odd via GitHub issues.
 
 ### Radio
 
@@ -26,7 +26,6 @@ AAC, HLS) and it decodes on a background thread and feeds your patch through a b
 level control — with a curated set of ambient, spoken-word, and scanner stations
 bundled as presets, and one-paste import of your own stream URLs (verified live,
 identified, and given artwork before anything is saved).
-[Manual →](docs/MANUAL.md#radio)
 
 ### Ninjam
 
@@ -37,13 +36,12 @@ zero setup, or JOIN with the real protocol: hear the live multi-user mix (arriva
 for a uniform one-interval latency, with a live preview bridging the join gap) and
 transmit your own instruments, streamed interval-by-interval like the canonical client.
 In-panel room browser, room chat, and a voice mode for talkback.
-[Manual →](docs/MANUAL.md#ninjam)
 
 ### Looper
 
-![Looper](docs/images/Looper.png)
+![A Looper session mid-jam: named tracks, follow-chained takes, a playing cell, the NINJAM clock locked at 80 BPM · 32 BPI](docs/images/Looper-session.png)
 
-An 8×8 Ableton-Session-style looper that runs on the jam's own clock (an expander of
+An 8×8 looper that runs on the jam's own clock (an expander of
 Ninjam; a simulated clock stands in when playing solo). Built for fluid jamming: every
 launch, stop, and recording start/finish commits on the next **beat** — mid-interval
 included — takes can be any whole-beat length up to one interval, and loops free-run
@@ -53,12 +51,16 @@ play just before it folds into the take's tail); keep playing through the interv
 and the recording rolls into the next cell and wires itself into a replayable chain.
 Per-cell repeats, decay, and follow actions; scenes; continuous overdub; two-way
 track-name sync with a MindMeld MixMaster; and every take is saved to disk and
-restored with the patch. *Beta — see the maturity note above.*
-[Manual →](docs/MANUAL.md#looper)
+restored with the patch. The sweet spot: wire it as an **insert** on a MindMeld
+MixMaster (or similar) with poly cables — insert send → INS, OUTS → insert return —
+so every mixer channel gets its own looper track with names synced. And if you plan
+to export to **Ableton Live Lite**, keep your instruments to **6 stereo channels**:
+the Lite export reserves tracks 7 and 8 for the bounced players (RX) and your TX mix.
+*Beta — see the warning above.*
 
 ### Recorder
 
-![Recorder](docs/images/Recorder.png)
+![Recorder mid-recording: 3 intervals archived, the TX mix counting along](docs/images/Recorder-session.png)
 
 The jam's black box, and the way out of Rack: as a Ninjam expander it archives every
 player's intervals and your transmitted mix to disk as the raw OGG bytes — no re-encode,
@@ -66,8 +68,7 @@ nothing lost — and when recording stops it automatically reassembles the whole
 as an **Ableton Live set**: the Looper grid in Session view, everyone's audio and your
 as-played loop timeline laid out in the Arrangement, tempo and loop braces set. A menu
 switch targets full Live (a track per player) or Live Lite's 8-track cap (players
-merged onto one lane). *Beta — see the maturity note above.*
-[Manual →](docs/MANUAL.md#recorder)
+merged onto one lane). *Beta — see the warning above.*
 
 ## Building
 
