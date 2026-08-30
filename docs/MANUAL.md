@@ -159,6 +159,8 @@ also embed in the `.vcv` itself (menu-toggleable), so a shared patch carries its
 
 ![Recorder](images/Recorder.png)
 
+![Recorder mid-recording: 3 intervals archived, the TX mix counting along](images/Recorder-session.png)
+
 The jam's black box. Place it directly next to a **Ninjam** module and arm **RECORD**:
 every player's received intervals and (optionally, **REC TX**) your transmitted mix are
 written to disk as the raw OGG bytes — no re-encode, nothing lost — under
