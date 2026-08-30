@@ -114,6 +114,9 @@ length in the context menu). Every action is **beat-quantized**: presses queue
 action per track — the latest press wins. Playback **free-runs**: a launched loop
 cycles at its own recorded length and speed, wherever the grid goes.
 
+![A Looper session mid-jam: named tracks, follow-chained takes, a playing cell with
+its free-running playhead, and the NINJAM clock locked at 80 BPM · 32 BPI](images/Looper-session.png)
+
 ### Panel
 
 | Control | What it does |
