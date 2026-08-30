@@ -238,15 +238,3 @@ akaudio logs every network failure — with the reason and timings — into Rack
 `log.txt` in the Rack user folder (Rack menu → *Help* → *Open user folder*), on lines
 prefixed `akaudio.net:`. The healthy path is silent, so a quiet log means a healthy
 plugin — whatever *is* there is worth reading, and worth pasting into a bug report.
-
----
-
-## Building from source
-
-See the [README](../README.md#building). In brief, with the Rack SDK (or a source build)
-beside this repo:
-
-```bash
-make            # -> plugin.dylib / .so / .dll
-make install    # package + install into the Rack user plugins folder
-```
