@@ -7,7 +7,7 @@ explicitly transmits (only Ninjam's JOIN does). See the
 
 - [Radio](#radio) — streaming internet radio into a patch.
 - [Ninjam](#ninjam) — listen to, or jam in, a NINJAM room.
-- [Looper](#looper) — 8×8 interval looper on the jam's clock.
+- [Looper](#looper) — 8×8 beat-quantized looper on the jam's clock.
 - [Recorder](#recorder) — archive the jam; export it as an Ableton Live set.
 - [Troubleshooting](#troubleshooting) — what the panel error messages mean.
 
@@ -53,9 +53,8 @@ existing user stations. Direct stream URLs and `.pls`/`.m3u` playlists both work
 
 ### Codec notes
 
-- **MP3** works on all platforms.
-- **AAC** and **HLS** (`.m3u8`) are macOS-only; on other platforms those streams report an
-  error and MP3 stations keep working.
+- **MP3**, **AAC**, and **HLS** (`.m3u8`) all work on every platform (macOS decodes AAC
+  with the system AudioToolbox; Windows and Linux use a bundled decoder).
 
 ---
 
