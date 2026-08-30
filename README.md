@@ -1,8 +1,8 @@
 # AK Audio
 
 A personal VCV Rack plugin (collection of modules) by Andrei Kozlov: network audio in
-and out of Rack — internet radio, live NINJAM jamming, a beat-quantized looper built
-for fluid jamming, and a recorder that turns whole jams into Ableton Live sets. All modules share
+and out of Rack — internet radio, live NINJAM jamming, a multi-channel always-on
+beat-quantized looper, and a recorder that turns whole jams into Ableton Live sets. All modules share
 the networked-audio layer in `src/net/` (HTTP/Icecast streaming, codec decode,
 lock-free ring buffer feeding the audio thread). Full user manual: [docs/MANUAL.md](docs/MANUAL.md).
 
