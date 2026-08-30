@@ -4,6 +4,37 @@ All notable changes to **AK Audio** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow VCV Rack's
 scheme (`MAJOR.MINOR.REVISION`, with `MAJOR` = the Rack major version).
 
+## [2.0.8] — 2026-08-29
+
+### Added
+
+- **Looper** — a new module (**beta**): an 8×8 multi-channel always-on looper that
+  runs on the NINJAM jam clock (a Ninjam expander; a simulated clock stands in when
+  playing solo). Launch, stop, and recording start/finish are quantized to the
+  **beat**; takes can be any whole-beat length up to one interval; playback
+  free-runs, so tempo changes never touch committed audio. Pickup capture (what you
+  play before the starting beat folds into the loop's tail), auto-advance chains
+  with press-to-finish, per-cell repeats/decay/follow actions, scenes, continuous
+  overdub, and two-way track-name sync with a MindMeld MixMaster. Every take is
+  saved to disk as raw OGG (overwrites retired into `history/`, never deleted), the
+  grid restores on patch reload, and takes can embed in the `.vcv` itself.
+- **Recorder** — a new module (**beta**): the jam's wire archive. Sitting armed next
+  to a joined Ninjam, it writes every player's received intervals and your
+  transmitted mix to disk as the raw OGG bytes (no re-encode) with a session-timeline
+  index — and when recording stops it builds an **Ableton Live set** of the whole
+  jam: the Looper grid as Session clips, as-played Arrangement lanes, every player on
+  the timeline. Targets Live Standard/Suite (a track per player) or Live Lite
+  (fitted into the 8-track cap).
+- **Ninjam**: connection failures now say *why* on the panel — cannot resolve /
+  refused / timed out / unreachable — matched by a troubleshooting guide in the new
+  user manual (`docs/MANUAL.md`, with per-panel references for all modules).
+
+### Fixed
+
+- **Windows**: all connections could fail with "socket error 10022" once the
+  process's socket handles grew large (e.g. after long HLS radio sessions) — the
+  `fd_set` value-bound check is POSIX-only now.
+
 ## [2.0.7] — 2026-08-12
 
 ### Internal
