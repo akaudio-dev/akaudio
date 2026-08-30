@@ -106,8 +106,6 @@ leaks nothing (see [Privacy](../README.md#privacy)).
 
 ## Looper
 
-![Looper](images/Looper.png)
-
 An 8×8 grid of loops (any whole-beat length, up to one interval) — Ableton Session
 view for a NINJAM jam. Place it directly next to a **Ninjam** module (either side) and
 it locks to the room's real grid; without one it runs on a simulated clock (interval
@@ -171,8 +169,6 @@ also embed in the `.vcv` itself (menu-toggleable), so a shared patch carries its
 ---
 
 ## Recorder
-
-![Recorder](images/Recorder.png)
 
 ![Recorder mid-recording: 3 intervals archived, the TX mix counting along](images/Recorder-session.png)
 
