@@ -120,7 +120,7 @@ its free-running playhead, and the NINJAM clock locked at 80 BPM · 32 BPI](imag
 
 | Control | What it does |
 |---|---|
-| **INS** (poly) | Your instruments: channels 1/2 = track 1 L/R, 3/4 = track 2, … Feed it from a mixer's direct-outs (a MindMeld MixMaster maps 1:1). |
+| **INS** (poly) | Your instruments: channels 1/2 = track 1 L/R, 3/4 = track 2, … Best fed from a mixer's poly **insert send** (see [With a mixer](#with-a-mixer)); direct-outs work too (a MindMeld MixMaster maps 1:1). |
 | Per-track jacks | Alternative per-track stereo inputs (a track uses its own jacks when connected, else its INS channels). |
 | **Track label** | Click to rename (4 characters, like MixMaster). With a MixMaster feeding INS, names sync both ways automatically — each side updates when an edit commits. |
 | **Grid cells** | Empty: press and recording starts on the next **beat** (what you play just *before* it folds into the take's tail — pickups survive). Filled: press to launch on the next beat, press again while playing to stop. Recording: press to **finish** — the take commits on the next beat at its actual whole-beat length and starts looping (a chain replays from its first cell); press again to keep recording instead. The waveform thumbnail fills live while recording. |
@@ -129,6 +129,19 @@ its free-running playhead, and the NINJAM clock locked at 80 BPM · 32 BPI](imag
 | **OVERDUB** | Latch: the selected playing cell layers each interval until the latch is off. |
 | **TX lamps** | Per-track on-air toggle: green = in the MIX (the room hears it), cyan = private — live input routes to CUE instead. |
 | **OUTS / CUE / MIX** | Per-track poly out, private monitor out, and the stereo submix (cable MIX into Ninjam's IN to transmit it). |
+
+### With a mixer
+
+The sweet spot is wiring the Looper as an **insert** on a MindMeld MixMaster (or any
+mixer with poly insert points): the mixer's insert send into **INS**, **OUTS** back
+into the insert return. Every mixer channel then owns a looper track — live input
+passes through when nothing loops, loops take over when launched, and track names
+sync with the mixer automatically.
+
+Planning to export the jam to **Ableton Live Lite**? Keep your instruments on tracks
+**1–6**: the Lite flavor's 8-track cap reserves track 7 for the bounced players (RX)
+and track 8 for your TX mix, and grid takes on tracks 7–8 are dropped from the export
+(with a warning).
 
 ### Playing through the interval
 
