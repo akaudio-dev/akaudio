@@ -4,6 +4,17 @@ All notable changes to **AK Audio** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow VCV Rack's
 scheme (`MAJOR.MINOR.REVISION`, with `MAJOR` = the Rack major version).
 
+## [2.0.9] — 2026-09-03
+
+### Changed
+
+- Static-analysis (CodeQL) cleanup, no functional change: removed a dead unused color
+  helper in the Recorder panel, and rewrote the `.als` exporter's XML well-formedness
+  scan as a `while` loop with an explicit cursor (it no longer reassigns a `for`
+  counter in the body). The remaining CodeQL notes are intentional idioms — exact
+  float compares used for change detection, a swap-and-pop `i--`, and Rack's own
+  `ENUMS()` enumerator macro — and are dismissed as won't-fix.
+
 ## [2.0.8] — 2026-08-29
 
 ### Added

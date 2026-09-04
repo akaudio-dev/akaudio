@@ -759,14 +759,17 @@ std::string buildAlsXml(const AlsProject& p, const std::string& tpl, std::string
 		{
 			int depth = 0;
 			bool ok = true;
-			for (size_t i = 0; ok && (i = xml.find('<', i)) != std::string::npos; i++) {
+			size_t i = 0;
+			while (ok) {
+				i = xml.find('<', i);
+				if (i == std::string::npos) break;
 				size_t end = xml.find('>', i);
 				if (end == std::string::npos) { ok = false; break; }
-				if (xml[i + 1] == '?') { i = end; continue; }
+				if (xml[i + 1] == '?') { i = end + 1; continue; }
 				if (xml[i + 1] == '/') depth--;
 				else if (xml[end - 1] != '/') depth++;
 				if (depth < 0) ok = false;
-				i = end;
+				i = end + 1;
 			}
 			if (!ok || depth != 0) {
 				err.fail("internal: generated XML is unbalanced — refusing to write");

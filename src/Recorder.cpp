@@ -26,7 +26,6 @@ inline NVGcolor rcText()    { return akTheme(nvgRGB(0x24, 0x27, 0x2b), nvgRGB(0x
 inline NVGcolor rcTextDim() { return akTheme(nvgRGB(0x5c, 0x61, 0x68), nvgRGB(0x9a, 0xa0, 0xa6)); }
 inline NVGcolor rcRed()     { return akTheme(nvgRGB(0xc0, 0x39, 0x2b), nvgRGB(0xe0, 0x60, 0x52)); }
 inline NVGcolor rcWell()    { return akShade(akDark() ? 0x14 : 0x10); }
-inline NVGcolor rcCard()    { return akTheme(nvgRGB(0xd6, 0xd9, 0xdc), nvgRGB(0x2e, 0x31, 0x34)); }
 inline NVGcolor rcBorder()  { return akShade(akDark() ? 0x2e : 0x26); }
 
 // The auto-export runs on its own thread: exportJamAls scans every archived OGG and
