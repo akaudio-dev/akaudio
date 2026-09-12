@@ -81,6 +81,23 @@ struct JamClock {
 		gen++;
 	}
 
+	// Re-phase the RUNNING grid so session frame `downbeatSession` (and every N frames
+	// after it) is a downbeat — WITHOUT changing tempo, N, the session timeline, or the
+	// grid generation. Used to lock the local metronome / CV / TX-capture grid onto the
+	// remote jam's audible downbeat (NjAudio publishes that session frame once the first
+	// received interval starts playing), so the click lines up with what you hear. NOT a
+	// regrid: gen is deliberately untouched, so chained Loopers follow the shifted
+	// frameInInterval live instead of tearing down in-flight recordings/chains.
+	void rephase(uint64_t downbeatSession) {
+		if (!running || N <= 0)
+			return;
+		long long d = ((long long) session - (long long) downbeatSession) % N;
+		if (d < 0)
+			d += N;
+		frame = (int) d;
+		lastBeat = (int) ((long long) frame * bpi / N); // resume mid-beat: no spurious beat pulse
+	}
+
 	// Report this frame, then advance. The first tick after regrid() reports frame 0
 	// (downbeat + beat both true).
 	JamClockMessage tick() {

@@ -63,6 +63,9 @@ public:
 	void setSampleRate(double sr) { audio.setSampleRate(sr); }
 	// Audio thread: pull one wide frame (RING_CH per-slot-stereo floats). false on underrun.
 	bool pullFrame(float* out) { return audio.pullFrame(out); }
+	// Audio thread: session frame the metronome should treat as a downbeat to line the
+	// click up with the remote jam (INT64_MIN until the first received interval plays).
+	int64_t gridAnchorSession() const { return audio.gridAnchorSession(); }
 	// Convenience stereo master pull (sum of slots) — used by the standalone harness.
 	bool pull(float& l, float& r) { return audio.pull(l, r); }
 	// Poly channel count currently in use (= number of active players on the bundle).

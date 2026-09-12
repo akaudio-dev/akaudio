@@ -162,6 +162,11 @@ struct Ninjam : Module, public akaudio::RecorderLink {
 	// frames against the TX encoder's interval length — see JamClock.hpp); it is also
 	// what gets published to adjacent Looper expanders every frame.
 	akaudio::JamClock clock;
+	// Have we re-phased `clock` onto the remote jam's downbeat this grid generation? The
+	// clock starts phased to the join instant; once the first received interval plays,
+	// NjAudio publishes its audible downbeat and we snap the click/CV/TX grid onto it so
+	// the metronome lines up with what we hear. Latched once per grid; reset on regrid.
+	bool jamGridPhased = false;
 	float clickEnv = 0.f, clickPhase = 0.f, clickFreq = 880.f, clickAmp = 0.f;
 	// Cached per-rate/per-tempo values so process() pays a compare per frame instead of
 	// an exp() (peak release) and a division (samples per beat):
@@ -889,6 +894,21 @@ struct Ninjam : Module, public akaudio::RecorderLink {
 				currentBeat.store(0, std::memory_order_relaxed);
 				clickEnv = 0.f;
 				txArmed.store(false, std::memory_order_relaxed);
+				jamGridPhased = false; // new grid: re-phase onto its first remote interval
+			}
+			// Lock the metronome / CV / TX grid onto the remote jam. Until the first
+			// received interval plays, the clock is phased to the join instant, so the click
+			// wouldn't match the audio (an arbitrary 0..N offset). Once NjAudio publishes
+			// that interval's audible session-frame downbeat, snap onto it (once per grid)
+			// and re-arm TX so our uploads cut on the room's downbeat too. Playout is already
+			// on this same grid (NjAudio quantizes every channel to it).
+			if (!jamGridPhased) {
+				int64_t anchor = njclient.gridAnchorSession();
+				if (anchor >= 0) {
+					clock.rephase((uint64_t) anchor);
+					jamGridPhased = true;
+					txArmed.store(false, std::memory_order_relaxed);
+				}
 			}
 			jam = clock.tick();
 			if (jam.beat) {

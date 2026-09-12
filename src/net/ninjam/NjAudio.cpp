@@ -58,6 +58,10 @@ void NjAudio::setSampleRate(double sr) {
 	// join's setTempo does the first real compute with this rate anyway.
 	sampleRate.store(sr, std::memory_order_relaxed);
 	ratePending.store(true, std::memory_order_release);
+	// The interval length is about to change → the shared grid re-anchors on the first
+	// interval at the new rate. Clear the published anchor before the audio thread sees the
+	// rate change (it recomputes its own grid then), so it never re-phases to a stale one.
+	gridAnchorSession_.store(INT64_MIN, std::memory_order_relaxed);
 }
 
 void NjAudio::recomputeIntervalLocked() {
@@ -92,6 +96,10 @@ void NjAudio::recomputeInterval() {
 }
 
 void NjAudio::setTempo(int newBpm, int newBpi) {
+	// A tempo change re-grids: the shared grid re-anchors on the first interval at the new
+	// tempo. Clear the anchor here (adjacent to where Ninjam updates jamBpm/jamBpi) so the
+	// audio thread never re-phases the metronome to the previous tempo's downbeat.
+	gridAnchorSession_.store(INT64_MIN, std::memory_order_relaxed);
 	std::lock_guard<std::mutex> lock(mu);
 	if (intervalSamples.load(std::memory_order_relaxed) <= 0) {
 		// No interval established yet (the initial config on join): apply immediately so
@@ -535,6 +543,9 @@ void NjAudio::start() {
 	framesPulled_.store(0, std::memory_order_relaxed);
 	pullOffset_.store(INT64_MIN, std::memory_order_relaxed);
 	mixFramesWritten = 0;
+	// A fresh session establishes a fresh shared grid on its first received interval.
+	gridOriginMix_ = INT64_MIN;
+	gridAnchorSession_.store(INT64_MIN, std::memory_order_relaxed);
 	// Build the capture rings ONCE, here, before spawning txThread — so the only
 	// concurrent reader (txLoop) and the audio-thread producer (captureFrame, gated on
 	// txRings) never see the vector being mutated. ~21 s @ 48 kHz headroom each.
@@ -797,6 +808,10 @@ void NjAudio::mixLoop() {
 			if (regrid) {
 				regridded = true;
 				recomputeIntervalLocked();
+				// New tempo/rate → the shared grid re-anchors on the first interval that
+				// plays at the new length (mirrors the setTempo/setSampleRate resets).
+				gridOriginMix_ = INT64_MIN;
+				gridAnchorSession_.store(INT64_MIN, std::memory_order_relaxed);
 				for (auto& kv : channels) {
 					Channel& ch = kv.second;
 					ch.cur.clear();
@@ -886,22 +901,50 @@ void NjAudio::mixLoop() {
 							if (ch.ready.empty()) {
 								if (ch.playing) {
 									// Chain broke (late interval): count it and re-lock
-									// to arrival when the next one lands.
+									// to the shared grid when the next one lands.
 									nMissed.fetch_add(1, std::memory_order_relaxed);
 									ch.playing = false;
-									ch.holdFrames = -1; // next start burns a fresh hold
+									ch.holdFrames = -1; // next start re-quantizes to the grid
 								}
 								break; // silence for the rest of this block
 							}
-							if (!ch.playing && ch.holdFrames < 0)
-								ch.holdFrames = holdInit; // fresh start: arm the jitter hold once
+							// Common jam grid: every interval — this channel's and every
+							// other channel's — starts on ONE shared grid, so all players and
+							// the metronome stay phase-aligned. The FIRST interval to play
+							// establishes the grid (after a jitter hold for headroom); every
+							// later start waits for the next grid boundary that is at least a
+							// hold away — same buffered slack, so playout stays gapless while
+							// it aligns (canonical NINJAM's 1–2 interval settle).
+							if (!ch.playing && ch.holdFrames < 0) {
+								if (gridOriginMix_ == INT64_MIN) {
+									ch.holdFrames = holdInit; // establisher: hold, then anchor here
+								} else {
+									int64_t mf = (int64_t) (mixFramesWritten + (uint64_t) i);
+									int64_t phase = ((mf - gridOriginMix_) % N + N) % N; // 0 = on a boundary
+									int64_t wait = phase == 0 ? 0 : (N - phase);
+									while (wait < holdInit)
+										wait += N; // guarantee ≥ holdInit of buffered slack
+									ch.holdFrames = (int) wait;
+								}
+							}
 							if (ch.holdFrames > 0) {
 								int m = std::min(BLOCK - i, ch.holdFrames);
 								ch.holdFrames -= m;
 								i += m;
 								continue;
 							}
-							// Arrival lock: the interval starts on this very frame.
+							// On the grid boundary: this mix frame is the interval's playout
+							// start. Map it onto the session timeline (§7.3) — used for the
+							// archive hand-off, and on the FIRST interval to anchor the shared
+							// grid (mix axis) + publish the metronome's downbeat (session axis).
+							int64_t off = pullOffset_.load(std::memory_order_relaxed);
+							int64_t sf = off == INT64_MIN ? -1
+							           : (int64_t) (mixFramesWritten + (uint64_t) i) + off;
+							if (gridOriginMix_ == INT64_MIN) {
+								gridOriginMix_ = (int64_t) (mixFramesWritten + (uint64_t) i);
+								if (sf >= 0)
+									gridAnchorSession_.store(sf, std::memory_order_relaxed);
+							}
 							ReadyInterval ri = std::move(ch.ready.front());
 							ch.ready.pop_front();
 							ch.cur = std::move(ri.pcm);
@@ -909,12 +952,7 @@ void NjAudio::mixLoop() {
 							ch.playing = true;
 							ch.holdFrames = -1;
 							if (!ri.ogg.empty() && onIntervalReceived) {
-								// This mix frame (mixFramesWritten + i) is the interval's
-								// playout start; map it onto the session timeline (§7.3)
-								// and queue the archive hand-off for after the lock.
-								int64_t off = pullOffset_.load(std::memory_order_relaxed);
-								int64_t sf = off == INT64_MIN ? -1
-								           : (int64_t) (mixFramesWritten + (uint64_t) i) + off;
+								// Queue the archive hand-off for after the lock is released.
 								PendingArchive pa;
 								splitKey(it->first, pa.user, pa.chidx);
 								pa.ogg = std::move(ri.ogg);

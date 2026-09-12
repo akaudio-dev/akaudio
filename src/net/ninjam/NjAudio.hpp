@@ -172,6 +172,12 @@ public:
 	// True once any room audio (preview, voice, or chained interval) has reached the
 	// mix this session — the UI's join-gap countdown hides itself on this.
 	bool audioStarted() const { return audioStarted_.load(std::memory_order_relaxed); }
+	// Audio thread: the session frame the metronome should treat as a downbeat so the
+	// click lines up with the remote jam — the first received interval's audible playout
+	// start (INT64_MIN until one has played this grid generation). Every channel's playout
+	// is quantized to this same grid, so all players stay phase-aligned with each other and
+	// the click. See docs/LOOPER_DESIGN.md §3 and Ninjam::process (clock.rephase).
+	int64_t gridAnchorSession() const { return gridAnchorSession_.load(std::memory_order_relaxed); }
 
 private:
 	// One decoded interval waiting its chain slot. The raw wire bytes ride along so the
@@ -305,6 +311,16 @@ private:
 	std::atomic<uint64_t> framesPulled_{0};
 	std::atomic<int64_t> pullOffset_{INT64_MIN}; // INT64_MIN = not yet published
 	uint64_t mixFramesWritten = 0;               // mix thread only
+
+	// Common jam grid. The first received interval to play establishes ONE shared grid;
+	// every channel starts its intervals on it, so all players stay phase-aligned, and the
+	// audio thread re-phases the metronome/CV/TX grid onto it so the click matches the
+	// audio. gridAnchorSession_ = that interval's audible session-frame downbeat (published
+	// for the audio thread); gridOriginMix_ = the same instant on the mix-frame axis (mix
+	// thread only, used to quantize later starts). Both reset to "unset" on start / server
+	// tempo change / sample-rate change, so each grid generation re-anchors afresh.
+	std::atomic<int64_t> gridAnchorSession_{INT64_MIN}; // INT64_MIN = no interval has played yet
+	int64_t gridOriginMix_ = INT64_MIN;                 // mix thread only
 
 	std::atomic<bool> archiveOn{false}; // a Recorder is armed: carry wire bytes for it
 	std::atomic<bool> audioStarted_{false};
