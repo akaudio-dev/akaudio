@@ -29,10 +29,13 @@ void NjAudio::splitKey(const std::string& key, std::string& user, int& chidx) {
 }
 
 void NjAudio::flushOrphans() {
+	if (!haveOrphans_.load(std::memory_order_acquire))
+		return; // fast path: nothing parked (the common case — no per-interval lock)
 	std::vector<std::pair<std::string, ReadyInterval>> out;
 	{
 		std::lock_guard<std::mutex> lock(mu);
 		out.swap(orphaned_);
+		haveOrphans_.store(false, std::memory_order_relaxed);
 	}
 	if (out.empty() || !onIntervalReceived)
 		return;
@@ -80,8 +83,10 @@ void NjAudio::recomputeIntervalLocked() {
 		// their wire bytes for the archive (flushOrphans, run by the caller after mu).
 		for (auto& kv : channels) {
 			for (auto& ri : kv.second.ready)
-				if (!ri.ogg.empty())
+				if (!ri.ogg.empty()) {
 					orphaned_.emplace_back(kv.first, std::move(ri));
+					haveOrphans_.store(true, std::memory_order_release);
+				}
 			kv.second.ready.clear();
 		}
 	}
@@ -427,8 +432,10 @@ void NjAudio::enqueue(const std::string& key, std::vector<float>&& interval,
 		if (ch.ready.size() >= kMaxReady) {
 			// Mixer fell behind; drop the oldest from playout to bound latency/memory —
 			// but its wire bytes still reach the archive (flushed below, outside mu).
-			if (!ch.ready.front().ogg.empty())
+			if (!ch.ready.front().ogg.empty()) {
 				orphaned_.emplace_back(key, std::move(ch.ready.front()));
+				haveOrphans_.store(true, std::memory_order_release);
+			}
 			ch.ready.pop_front();
 		}
 		ReadyInterval ri;
@@ -576,8 +583,10 @@ void NjAudio::stop() {
 		// LAST intervals) are parked for the flush below before the channels go away.
 		for (auto& kv : channels)
 			for (auto& ri : kv.second.ready)
-				if (!ri.ogg.empty())
+				if (!ri.ogg.empty()) {
 					orphaned_.emplace_back(kv.first, std::move(ri));
+					haveOrphans_.store(true, std::memory_order_release);
+				}
 		channels.clear();
 		for (auto& kv : transfers)
 			closeTransfer(kv.second); // free any voice pushdata decoders
@@ -809,9 +818,10 @@ void NjAudio::mixLoop() {
 				regridded = true;
 				recomputeIntervalLocked();
 				// New tempo/rate → the shared grid re-anchors on the first interval that
-				// plays at the new length (mirrors the setTempo/setSampleRate resets).
+				// plays at the new length. Only gridOriginMix_ needs clearing here (it is
+				// mix-thread-only); gridAnchorSession_ was already cleared by setTempo/
+				// setSampleRate, before the audio thread could re-phase to a stale value.
 				gridOriginMix_ = INT64_MIN;
-				gridAnchorSession_.store(INT64_MIN, std::memory_order_relaxed);
 				for (auto& kv : channels) {
 					Channel& ch = kv.second;
 					ch.cur.clear();
@@ -852,6 +862,10 @@ void NjAudio::mixLoop() {
 		int active = 0;
 		{
 			std::lock_guard<std::mutex> lock(mu);
+			// The poly-slot roster only changes when a channel is erased or a new player
+			// takes a slot. Track that so refreshSlots() (O(users×channels)) runs then,
+			// not every block; per-channel slots are cached in Channel::slot.
+			bool rosterChanged = false;
 			for (auto it = channels.begin(); it != channels.end();) {
 				Channel& ch = it->second;
 				if (!ch.active && ch.voice) {
@@ -864,11 +878,21 @@ void NjAudio::mixLoop() {
 				bool drained = ch.ready.empty() && ch.cur.empty() && ch.silenceLeft == 0 && vEmpty;
 				if (!ch.active && drained) {
 					it = channels.erase(it); // gone and fully played out
+					rosterChanged = true;    // a slot may need freeing + nPoly recompute
 					continue;
 				}
 				if (ch.active) active++;
 				anything = true;
-				int slot = assignSlot(ch.user);
+				if (ch.slot < 0) {
+					// First time we see this channel: resolve its slot once and cache it
+					// (stable while the user is present). A brand-new user taking a slot
+					// changes nPoly → mark the roster dirty.
+					bool existed = userSlot.count(ch.user) > 0;
+					ch.slot = assignSlot(ch.user);
+					if (ch.slot >= 0 && !existed)
+						rosterChanged = true;
+				}
+				int slot = ch.slot;
 				float* out = slot >= 0 ? &block[(size_t) slot * 2] : nullptr; // wide-frame stride below
 				if (ch.voice) {
 					// Live FIFO with a small prebuffer; running dry re-arms the prebuffer.
@@ -1035,7 +1059,8 @@ void NjAudio::mixLoop() {
 				}
 				++it;
 			}
-			refreshSlots(); // free departed users' slots; update poly channel count
+			if (rosterChanged)
+				refreshSlots(); // free departed users' slots; update poly channel count
 		}
 		nActive.store(active, std::memory_order_relaxed);
 

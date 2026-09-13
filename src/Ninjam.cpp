@@ -1337,8 +1337,9 @@ struct RoomRow : HoverButton {
 struct RoomBrowser : ui::ScrollWidget {
 	Ninjam* module = nullptr;
 	ui::TextField* search = nullptr;
-	unsigned lastGen = (unsigned) -1;
-	std::string lastFilter = std::string(1, '\x01'); // force the first build
+	unsigned lastGen = (unsigned) -1;    // (unsigned)-1 forces the first rebuild
+	std::string lastRaw;                 // raw search text last seen (change detect, no per-frame alloc)
+	std::string lastFilter;              // lowercased filter rebuild() actually uses
 	int refreshTimer = 0;
 
 	void rebuild() {
@@ -1395,10 +1396,18 @@ struct RoomBrowser : ui::ScrollWidget {
 				module->directory.refresh();
 			}
 			unsigned g = module->directory.generation();
-			std::string f = search ? lower(search->text) : "";
-			if (g != lastGen || f != lastFilter) {
+			// Only lowercase (and allocate) when the raw search text actually changed — it
+			// rarely does, so the common per-frame path is just a non-allocating compare.
+			bool filterChanged;
+			if (search) {
+				filterChanged = search->text != lastRaw;
+				if (filterChanged) { lastRaw = search->text; lastFilter = lower(lastRaw); }
+			} else {
+				filterChanged = !lastRaw.empty();
+				if (filterChanged) { lastRaw.clear(); lastFilter.clear(); }
+			}
+			if (g != lastGen || filterChanged) {
 				lastGen = g;
-				lastFilter = f;
 				rebuild();
 				// A freshly filled list always presents from the top: rooms sort
 				// busiest-first, so the bottom is the dead end — and a shrunken list

@@ -192,6 +192,7 @@ private:
 		std::string user;
 		bool active = false;
 		bool voice = false; // NINJAM voice-chat channel (flags bit 2): played live
+		int slot = -1;      // cached poly slot (mix thread); -1 = not yet assigned
 		float gainL = 1.f, gainR = 1.f;
 		std::deque<ReadyInterval> ready;
 		// Interval-mode playhead (mix thread, under mu). Playback is ARRIVAL-LOCKED:
@@ -298,6 +299,11 @@ private:
 	// Received intervals dropped before they could play (backlog, re-grid, teardown),
 	// parked under mu for flushOrphans() to archive outside the lock.
 	std::vector<std::pair<std::string, ReadyInterval>> orphaned_;
+	// Fast-path guard so the per-interval flushOrphans() (called after every enqueue)
+	// skips taking mu when nothing was parked (the common case). Set true (release) at
+	// each park site — always under mu, and each park is followed by a same-thread
+	// flush, so the flush's acquire-load never misses its own parked work.
+	std::atomic<bool> haveOrphans_{false};
 	std::map<std::string, Channel> channels;
 	std::map<std::string, int> userSlot; // username -> poly slot
 	bool slotUsed[MAX_PLAYERS] = {false};

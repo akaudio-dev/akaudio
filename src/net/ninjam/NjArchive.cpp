@@ -168,12 +168,14 @@ void NjArchive::run() {
 		}
 		long id = seq++;
 		char name[128];
-		std::string rel;
+		std::string us; // slugged username (non-tx only); computed once, reused for name + stat
 		if (j.tx)
 			(void) std::snprintf(name, sizeof(name), "tx/%06ld_mix.ogg", id);
-		else
-			(void) std::snprintf(name, sizeof(name), "players/%06ld_%s_ch%d.ogg", id, slug(j.user).c_str(), j.chidx);
-		rel = name;
+		else {
+			us = slug(j.user);
+			(void) std::snprintf(name, sizeof(name), "players/%06ld_%s_ch%d.ogg", id, us.c_str(), j.chidx);
+		}
+		std::string rel = name;
 		// Atomic write: tmp then rename, so a reader never sees a half file.
 		std::string full = dir_ + "/" + rel;
 		std::string tmp = full + ".tmp";
@@ -210,7 +212,7 @@ void NjArchive::run() {
 			bumpStat("\x01tx", "you (tx)", true, (long) j.bytes.size());
 		else
 			bumpStat(j.user + "\n" + std::to_string(j.chidx),
-			         slug(j.user) + " / ch" + std::to_string(j.chidx), false, (long) j.bytes.size());
+			         us + " / ch" + std::to_string(j.chidx), false, (long) j.bytes.size());
 	}
 }
 
