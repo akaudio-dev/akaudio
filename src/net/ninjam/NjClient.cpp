@@ -288,6 +288,12 @@ int NjClient::recvFrame(uint8_t& type, std::vector<uint8_t>& payload) {
 void NjClient::run(std::string host, int port, std::string user, std::string pass) {
 	// Per-user subscribed-channel bitmask (SET_USERMASK); session-local by construction.
 	std::map<std::string, uint32_t> subMask;
+	// Last applied room tempo. A server may re-send SERVER_CONFIG_CHANGE with unchanged
+	// bpm/bpi (roster events, keepalive-adjacent, reconnect echoes); re-applying it would
+	// needlessly re-grid the audio + re-sync the beat clock, snapping the metronome's
+	// jam-lock back to join phase every time. Skip no-op configs; -1 = none yet (the
+	// first real config always applies). Reset here so a reconnect re-applies afresh.
+	int lastCfgBpm = -1, lastCfgBpi = -1;
 	setState(State::Connecting, host + ":" + std::to_string(port));
 
 	// Resolve + connect, abort-pollable (netResolveConnect) — a blocking
@@ -389,8 +395,15 @@ void NjClient::run(std::string host, int port, std::string user, std::string pas
 			case MSG_SERVER_CONFIG_CHANGE: {
 				ConfigChange cc;
 				if (parseConfigChange(payload.data(), payload.size(), cc)) {
-					audio.setTempo(cc.bpm, cc.bpi);
-					if (cb.onConfig) cb.onConfig(cc.bpm, cc.bpi);
+					// Ignore a re-sent, unchanged tempo: applying it would re-grid the
+					// audio and re-sync the beat clock, tearing down the metronome's
+					// jam-lock for no reason. Only a real change flows through.
+					if (cc.bpm != lastCfgBpm || cc.bpi != lastCfgBpi) {
+						lastCfgBpm = cc.bpm;
+						lastCfgBpi = cc.bpi;
+						audio.setTempo(cc.bpm, cc.bpi);
+						if (cb.onConfig) cb.onConfig(cc.bpm, cc.bpi);
+					}
 				}
 				break;
 			}
