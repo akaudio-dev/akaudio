@@ -4,6 +4,18 @@ All notable changes to **AK Audio** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow VCV Rack's
 scheme (`MAJOR.MINOR.REVISION`, with `MAJOR` = the Rack major version).
 
+## [2.0.10] — 2026-09-17
+
+### Fixed
+
+- **Ninjam**: the metronome, CV, and transmit now lock to the room's jam grid, so the
+  click and every player share one downbeat (it was audibly out of sync). A redundant
+  server config message no longer knocks the lock off.
+
+### Changed
+
+- **Ninjam**: internal efficiency tidy-up, no behavior change.
+
 ## [2.0.9] — 2026-09-03
 
 ### Changed
