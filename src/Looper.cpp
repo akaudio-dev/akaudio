@@ -66,8 +66,9 @@ inline NVGcolor lpRing()    { return akTheme(nvgRGB(0x1f, 0x1f, 0x1f), nvgRGB(0x
 // Ninjam; the "AK" mark sits at the shared AK_MARK_Y_MM.
 const float COL_X0 = 8.f, COL_W = 68.f;        // track columns: L+R jack pair reads as a pair
 const float SCENE_X = 558.f, SCENE_W = 34.f;   // scene column
-const float JACK_Y = 54.f, JACK_DX = 13.5f;    // L/R jack centers at colCx ± JACK_DX
-const float NAME_Y = 70.f, NAME_H = 14.f;      // editable track label (MindMeld-style)
+const float JACK_Y = 60.f, JACK_DX = 13.5f;    // L/R jack centers (lowered so the plated OUTS,
+                                               // level with them, clears the header bar)
+const float NAME_Y = 74.f, NAME_H = 14.f;      // editable track label (MindMeld-style)
 const float GRID_Y = 92.f, ROW_H = 29.f, BTN_H = 26.f, BTN_W = 64.f;
 const float STOP_GAP = 6.f;                    // whitespace between the grid and the stop row (= grid↔scenes gap)
 const float STOP_Y = GRID_Y + 7 * ROW_H + BTN_H + STOP_GAP; // bottoms align with the MIX plate (stopH())
@@ -99,15 +100,22 @@ inline float stopH() { return MIX_BOT - STOP_Y; } // stops grow down to Ninjam's
 // header status. Overdub moves up beside the "LOOPER" title to free the column. The clock
 // jacks + BPI dim when a Ninjam clock drives the grid (inert, but never hidden — §3.5).
 // Header width is trimmed so the status ends left of the stepper.
-const float DUB_X = 112.f, DUB_Y = 21.f;       // overdub button, right of the "LOOPER" title
-// Right column: OUTS + the CLK/RST/PH clock trio, four bare jacks stacked from the INS row.
-// All share the plate jack/label x, so OUTS/CLK/RST/PH/CUE/MIX line up on one vertical axis.
-const float RCOL_X = PLATE_JACK_X;             // jack x (== CUE/MIX jacks)
-const float RCOL_LAB_X = PLATE_LAB_X;          // label x (== CUE/MIX L/R labels)
-const float RCOL_Y0 = JACK_Y;                  // 54 — OUTS, aligned with INS / the track-input row
-const float RCOL_DY = 36.f;                    // OUTS 54, CLK 90, RST 126, PH 162
-const float BPI_X = 574.f, BPI_W = 74.f;       // BPI stepper (top-right; right edge aligns with the plates)
-const float BPI_Y = 21.f, BPI_H = 16.f;
+// LOOPER title, OVERDUB (button + label), the header status and the BPI stepper all share
+// one line (vertical center ≈ 23, inside the 41 px header bar — low enough that a BPI box
+// right-aligned to the OUTS plate still clears the top-right screw).
+const float DUB_X = 112.f, DUB_Y = 23.f;       // overdub button, right of the "LOOPER" title
+const float BPI_X = 576.f, BPI_W = 72.f;       // BPI stepper; right edge 648 == OUTS plate edge
+const float BPI_Y = 15.f, BPI_H = 16.f;        // center 23 → in line with LOOPER / OVERDUB
+// Right column, all jacks at RCOL_X: INS/OUTS on the channel-IN row (y 54), then the
+// CLK/RST/PH clock trio, then the CUE/MIX stereo plates. OUTS is a plated output (like
+// CUE/MIX); INS is a BARE poly input jack (like the channel INs), sitting just left of OUTS.
+const float RCOL_X = PLATE_JACK_X;             // 630: OUTS/CLK/RST/PH + CUE/MIX jacks
+const float RCOL_LAB_X = PLATE_LAB_X;          // 608: the OUTS/CLK/RST/PH left labels
+const float IO_Y = JACK_Y;                      // 60 — INS/OUTS level with the channel-IN jacks
+const float OUTS_CX = RX;                        // OUTS plate center (jack RX+7 = RCOL_X, label RX-15)
+const float IO_PLATE_TOP = 46.f, IO_PLATE_H = 28.f; // OUTS plate, below the header bar
+const float INS_X = RX - 48.f;                   // 575 — INS bare jack, left of the OUTS plate
+const float CLK_Y0 = 106.f, CLK_DY = 32.f;       // CLK 106, RST 138, PH 170
 
 // Track label: MindMeld's amber-on-black on the dark panel; black on grey on the light one.
 inline NVGcolor lpLabelBg()   { return akTheme(nvgRGB(0xc4, 0xc7, 0xcb), nvgRGB(0x1a, 0x1a, 0x1a)); }
@@ -928,35 +936,36 @@ struct LooperDecor : Widget {
 	Looper* lp = nullptr;
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
-		drawTxt(vg, FONT_BOLD, 10.f, 21.f, 15.f, lpText(), "LOOPER");
+		drawTxt(vg, FONT_BOLD, 10.f, 23.f, 15.f, lpText(), "LOOPER");
 		// OVERDUB moved up beside the title (its button is placed right of this label).
 		drawTxt(vg, FONT_BOLD, DUB_X + 18.f, DUB_Y, 8.5f, lpText(), "OVERDUB", NVG_ALIGN_LEFT);
-		// INS: the poly instrument input (its jack is a PolyPort with the gold collar ring).
-		drawTxt(vg, FONT_BOLD, SCENE_X + SCENE_W / 2, NAME_Y + NAME_H / 2, 9.f, lpText(), "INS", NVG_ALIGN_CENTER);
 
-		// Right-column labels, left of each jack: OUTS (per-track poly out — always active),
-		// then the CLK/RST/PH clock trio, which dims to ~40% when a Ninjam clock drives the
-		// grid (inert, but never hidden — §3.5).
-		bool nj = lp && lp->clockSource.load(std::memory_order_relaxed) == Looper::SRC_NINJAM;
-		NVGcolor cc = lpText(); if (nj) cc.a *= 0.4f;
-		drawTxt(vg, FONT_BOLD, RCOL_LAB_X, RCOL_Y0, 8.f, lpText(), "OUTS", NVG_ALIGN_CENTER);
-		const char* clab[3] = {"CLK", "RST", "PH"};
-		for (int i = 0; i < 3; i++)
-			drawTxt(vg, FONT_BOLD, RCOL_LAB_X, RCOL_Y0 + (i + 1) * RCOL_DY, 8.f, cc, clab[i], NVG_ALIGN_CENTER);
-
-		// ---- Controls column plates: CUE over MIX (Radio/Ninjam plate geometry, Theme.hpp) ----
+		// ---- Controls column: INS/OUTS poly pair, CLK/RST/PH, CUE/MIX (plate geometry) ----
 		const NVGcolor bd = nvgRGBA(0, 0, 0, 0x55);
-		auto plateBox = [&](float top, float h) {
+		auto plateBox = [&](float cx, float top, float h) {
 			nvgBeginPath(vg);
-			nvgRoundedRect(vg, RX - PLATE_W / 2, top, PLATE_W, h, mm2px(AK_PLATE_R_MM));
+			nvgRoundedRect(vg, cx - PLATE_W / 2, top, PLATE_W, h, mm2px(AK_PLATE_R_MM));
 			nvgFillColor(vg, akPlate());
 			nvgFill(vg);
 			nvgStrokeColor(vg, bd);
 			nvgStrokeWidth(vg, 1.f);
 			nvgStroke(vg);
 		};
+		// OUTS: a plated single-jack poly output (gold PolyPort), label left of the jack.
+		plateBox(OUTS_CX, IO_PLATE_TOP, IO_PLATE_H);
+		drawTxt(vg, FONT_BOLD, OUTS_CX - 15.f, IO_Y, 8.f, akPlateText(), "OUTS", NVG_ALIGN_CENTER);
+		// INS: a BARE poly input jack (like the channel INs), label to its left — no plate.
+		drawTxt(vg, FONT_BOLD, INS_X - 20.f, IO_Y, 8.f, lpText(), "INS", NVG_ALIGN_CENTER);
+		// CLK/RST/PH: bare clock-input jacks with left labels; dim to ~40% when a Ninjam clock
+		// drives the grid (inert, but never hidden — §3.5).
+		bool nj = lp && lp->clockSource.load(std::memory_order_relaxed) == Looper::SRC_NINJAM;
+		NVGcolor cc = lpText(); if (nj) cc.a *= 0.4f;
+		const char* clab[3] = {"CLK", "RST", "PH"};
+		for (int i = 0; i < 3; i++)
+			drawTxt(vg, FONT_BOLD, RCOL_LAB_X, CLK_Y0 + i * CLK_DY, 8.f, cc, clab[i], NVG_ALIGN_CENTER);
+		// CUE over MIX: two-jack stereo plates (L over R).
 		auto plate = [&](float top, const char* title, NVGcolor titleCol) {
-			plateBox(top, PLATE_H);
+			plateBox(RX, top, PLATE_H);
 			drawTxt(vg, FONT_BOLD, RX, top + PLATE_TITLE_DY, 11.f, titleCol, title, NVG_ALIGN_CENTER);
 			drawTxt(vg, FONT_BOLD, PLATE_LAB_X, plateLY(top), 11.f, akPlateText(), "L", NVG_ALIGN_CENTER);
 			drawTxt(vg, FONT_BOLD, PLATE_LAB_X, plateRY(top), 11.f, akPlateText(), "R", NVG_ALIGN_CENTER);
@@ -1445,10 +1454,12 @@ struct BpiStepper : Widget {
 		nvgFillColor(vg, akTheme(nvgRGBA(0x1f, 0x1f, 0x1f, 0x22), nvgRGBA(0x08, 0x08, 0x08, 0x99)));
 		nvgFill(vg);
 		NVGcolor tc = lpText(); tc.a *= a;
-		drawTxt(vg, FONT_BOLD, 6.f, h / 2, 8.f, tc, "BPI", NVG_ALIGN_LEFT);
-		drawTxt(vg, FONT_BOLD, w - 20.f, h / 2 + 0.5f, 13.f, tc, string::f("%d", curBpi()), NVG_ALIGN_RIGHT);
-		drawTxt(vg, FONT_BOLD, w - 5.f, h * 0.30f, 8.f, tc, "\xe2\x96\xb2", NVG_ALIGN_RIGHT); // ▲
-		drawTxt(vg, FONT_BOLD, w - 5.f, h * 0.74f, 8.f, tc, "\xe2\x96\xbc", NVG_ALIGN_RIGHT); // ▼
+		// "BPI", the number and the ▲/▼ are grouped tight against the right edge (no wide gaps),
+		// a touch larger than before. The box is right-aligned to the OUTS plate edge.
+		drawTxt(vg, FONT_BOLD, w - 54.f, h / 2, 9.f, tc, "BPI", NVG_ALIGN_LEFT);
+		drawTxt(vg, FONT_BOLD, w - 33.f, h / 2 + 0.5f, 14.f, tc, string::f("%d", curBpi()), NVG_ALIGN_LEFT);
+		drawTxt(vg, FONT_BOLD, w - 4.f, h * 0.30f, 8.5f, tc, "\xe2\x96\xb2", NVG_ALIGN_RIGHT); // ▲
+		drawTxt(vg, FONT_BOLD, w - 4.f, h * 0.74f, 8.5f, tc, "\xe2\x96\xbc", NVG_ALIGN_RIGHT); // ▼
 	}
 
 	void onButton(const ButtonEvent& e) override {
@@ -1522,7 +1533,7 @@ struct LooperWidget : ModuleWidget {
 		// the BPI stepper.
 		HeaderStatus* hs = new HeaderStatus;
 		hs->lp = module;
-		hs->box.pos = Vec(200.f, 8.f);
+		hs->box.pos = Vec(200.f, 10.f);
 		hs->box.size = Vec(245.f, 26.f);
 		addChild(hs);
 
@@ -1530,7 +1541,7 @@ struct LooperWidget : ModuleWidget {
 		// controls column (rows 1-3; OUTS is row 0). The BPI stepper sits top-right.
 		for (int i = 0; i < 3; i++) {
 			int in = i == 0 ? Looper::CLOCK_INPUT : i == 1 ? Looper::RESET_INPUT : Looper::PHASE_INPUT;
-			ClockPort* p = createInputCentered<ClockPort>(Vec(RCOL_X, RCOL_Y0 + (i + 1) * RCOL_DY), module, in);
+			ClockPort* p = createInputCentered<ClockPort>(Vec(RCOL_X, CLK_Y0 + i * CLK_DY), module, in);
 			p->lp = module;
 			addInput(p);
 		}
@@ -1566,7 +1577,8 @@ struct LooperWidget : ModuleWidget {
 			tx->box.size = Vec(18.f, stopH());
 			addParam(tx);
 		}
-		addInput(createInputCentered<PolyPort>(Vec(SCENE_X + SCENE_W / 2, JACK_Y), module, Looper::MULTI_INPUT));
+		// INS: the poly instrument input — bare jack, level with the channel INs, left of OUTS.
+		addInput(createInputCentered<PolyPort>(Vec(INS_X, IO_Y), module, Looper::MULTI_INPUT));
 		for (int s = 0; s < SLOTS; s++) {
 			GlyphButton* sc = createParam<GlyphButton>(Vec(SCENE_X, GRID_Y + s * ROW_H), module, Looper::SCENE_PARAM + s);
 			sc->box.size = Vec(SCENE_W, BTN_H); sc->kind = GlyphButton::SCENE; sc->lp = module; sc->idx = s; sc->momentary = true;
@@ -1576,8 +1588,8 @@ struct LooperWidget : ModuleWidget {
 		sa->box.size = Vec(SCENE_W, stopH()); sa->kind = GlyphButton::STOP_ALL; sa->lp = module; sa->momentary = true;
 		addParam(sa);
 
-		// Right column outputs: OUTS at the top (row 0, aligned with INS), then CUE / MIX plates.
-		addOutput(createOutputCentered<PolyPort>(Vec(RCOL_X, RCOL_Y0), module, Looper::POLY_OUTPUT));
+		// Right column outputs: OUTS at the top (paired with INS), then CUE / MIX plates.
+		addOutput(createOutputCentered<PolyPort>(Vec(OUTS_CX + 7.f, IO_Y), module, Looper::POLY_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(PLATE_JACK_X, plateLY(CUE_TOP)), module, Looper::CUE_L_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(PLATE_JACK_X, plateRY(CUE_TOP)), module, Looper::CUE_R_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(PLATE_JACK_X, plateLY(MIX_TOP)), module, Looper::MIX_L_OUTPUT));
