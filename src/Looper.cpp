@@ -14,6 +14,7 @@
 #include "JamClock.hpp"
 #include "RecorderLink.hpp"
 #include "looper/LooperEngine.hpp"
+#include "looper/ExtClock.hpp"
 #include "looper/Session.hpp"
 #include "looper/SessionMirror.hpp"
 
@@ -72,13 +73,11 @@ const float STOP_GAP = 6.f;                    // whitespace between the grid an
 const float STOP_Y = GRID_Y + 7 * ROW_H + BTN_H + STOP_GAP; // bottoms align with the MIX plate (stopH())
 // Controls column (x center RX), top → bottom.
 const float RX = 623.f;
-const float Y_DUB = 96.f;                      // overdub bezel button (label above, like Fundamental's PUSH),
-                                               // centered in the column gap above the OUTS plate
-// Three stacked output plates: OUTS (the per-track poly out) over CUE (private) over MIX
-// (to Ninjam). CUE/MIX are vertical stereo plates (L over R, jacks squeezed together but
-// with clear margins — room above for the title, beside for the L/R labels); OUTS is a
-// single poly jack (MindMeld-style gold ring). Spread to fill the column; the MIX plate
-// bottom aligns with Ninjam's lower output plate bottom, so the two modules line up.
+// Controls column, top → bottom: four bare label-left jacks (OUTS, then the CLK/RST/PH
+// clock trio) stacked from the INS row, then two stereo plates CUE (private) over MIX (to
+// Ninjam). The plates are vertical (L over R, clear margins — room above for the title,
+// beside for the L/R labels). MIX's bottom aligns with Ninjam's lower output plate bottom
+// so the two modules line up; the plates stack upward from there.
 const float PLATE_W = 50.f;                    // plate width (jack + L/R label to its left, with margins)
 const float PLATE_JDY = 28.f;                  // L→R jack spacing (close, but not touching)
 const float PLATE_TOPGAP = 27.f;               // plate top → L jack: room for the title, clear of the jack
@@ -86,19 +85,29 @@ const float PLATE_BOTGAP = 14.f;               // R jack → plate bottom (jack 
 const float PLATE_H = PLATE_TOPGAP + PLATE_JDY + PLATE_BOTGAP;
 const float PLATE_JACK_X = RX + 7.f, PLATE_LAB_X = RX - 15.f;
 const float PLATE_TITLE_DY = 7.f;              // title center below plate top (sits above the jack)
-const float OUTS_TOPGAP = 28.f;                // OUTS plate top → jack: room for title + the poly ring
-const float OUTS_BOTGAP = 16.f;
-const float OUTS_H = OUTS_TOPGAP + OUTS_BOTGAP;
 const float PLATE_GAP = 8.f;                   // gap between stacked plates
 // MIX bottom = Ninjam's lower (CV) output plate bottom → the modules line up; stack up.
 const float MIX_BOT = mm2px(AK_PLATE_TOP_MM + AK_PLATE_H_MM);
 const float MIX_TOP = MIX_BOT - PLATE_H;
 const float CUE_TOP = MIX_TOP - PLATE_GAP - PLATE_H;
-const float OUTS_TOP = CUE_TOP - PLATE_GAP - OUTS_H;
-const float OUTS_JACK_Y = OUTS_TOP + OUTS_TOPGAP;
 inline float plateLY(float top) { return top + PLATE_TOPGAP; }
 inline float plateRY(float top) { return top + PLATE_TOPGAP + PLATE_JDY; }
 inline float stopH() { return MIX_BOT - STOP_Y; } // stops grow down to Ninjam's output-plate bottom
+
+// Standalone clock (§3.5): CLOCK / RESET / PHASE are the three label-left jacks below OUTS
+// in the controls column (labelled CLK / RST / PH); a BPI stepper sits top-right beside the
+// header status. Overdub moves up beside the "LOOPER" title to free the column. The clock
+// jacks + BPI dim when a Ninjam clock drives the grid (inert, but never hidden — §3.5).
+// Header width is trimmed so the status ends left of the stepper.
+const float DUB_X = 112.f, DUB_Y = 21.f;       // overdub button, right of the "LOOPER" title
+// Right column: OUTS + the CLK/RST/PH clock trio, four bare jacks stacked from the INS row.
+// All share the plate jack/label x, so OUTS/CLK/RST/PH/CUE/MIX line up on one vertical axis.
+const float RCOL_X = PLATE_JACK_X;             // jack x (== CUE/MIX jacks)
+const float RCOL_LAB_X = PLATE_LAB_X;          // label x (== CUE/MIX L/R labels)
+const float RCOL_Y0 = JACK_Y;                  // 54 — OUTS, aligned with INS / the track-input row
+const float RCOL_DY = 36.f;                    // OUTS 54, CLK 90, RST 126, PH 162
+const float BPI_X = 574.f, BPI_W = 74.f;       // BPI stepper (top-right; right edge aligns with the plates)
+const float BPI_Y = 21.f, BPI_H = 16.f;
 
 // Track label: MindMeld's amber-on-black on the dark panel; black on grey on the light one.
 inline NVGcolor lpLabelBg()   { return akTheme(nvgRGB(0xc4, 0xc7, 0xcb), nvgRGB(0x1a, 0x1a, 0x1a)); }
@@ -133,12 +142,16 @@ struct Looper : Module {
 		STOP_ALL_PARAM,
 		ENUMS(TX_PARAM, TRACKS),            // latch: this track's live input goes to MIX (on air)
 		OVERDUB_PARAM,
+		BPI_PARAM,                          // standalone external clock: beats per interval (3..64, snap)
 		PARAMS_LEN
 	};
 	enum InputId {
 		ENUMS(IN_L_INPUT, TRACKS),
 		ENUMS(IN_R_INPUT, TRACKS),
-		MULTI_INPUT,   // poly: channels 2t, 2t+1 = track t L/R (a track's own L jack wins)
+		MULTI_INPUT,   // poly: channels 2t, 2t+1 = track t L/R (a track's own jack wins)
+		CLOCK_INPUT,   // standalone clock: beat pulses (§3.5)
+		RESET_INPUT,   // standalone clock: interval downbeat / boundary
+		PHASE_INPUT,   // standalone clock: 0–10 V ramp, one cycle per interval (preferred)
 		INPUTS_LEN
 	};
 	enum OutputId {
@@ -187,10 +200,16 @@ struct Looper : Module {
 	std::atomic<int> selected{-1};
 
 	// ---- Clock source ----
-	// A live Ninjam clock (expander message, either side, chained) wins; otherwise the
-	// simulated clock runs so the looper works with nothing else in the rack.
+	// Precedence (§3.5): a live Ninjam clock (expander message, either side, chained) wins;
+	// else a patched standalone CLOCK/RESET/PHASE via extClock; else the simulated clock,
+	// so the looper always works with nothing else in the rack.
+	akaudio::looper::ExtClock extClock;     // standalone external clock (CLOCK/RESET/PHASE)
+	enum ClockSrc { SRC_SIM = 0, SRC_EXT = 1, SRC_NINJAM = 2 };
+	std::atomic<int> clockSource{SRC_SIM};  // UI: which source is driving this frame
+	std::atomic<bool> extStopped{false};    // UI: external clock patched but frozen (idle)
+	int lastSrcKind = SRC_SIM;              // audio thread: detect source switches (gen bump)
 	std::atomic<int> simSecondsIdx{1};      // index into SIM_SECONDS (4 s)
-	std::atomic<bool> ninjamClock{false};   // UI: source LED / header
+	std::atomic<bool> ninjamClock{false};   // UI: source LED / header (true == SRC_NINJAM)
 	std::atomic<int> clockBpm{0}, clockBpi{0};
 	// Where each track's signal comes from (UI tag): 0 none, 1 own jack, 2 MULTI pair.
 	std::atomic<int> trackSource[TRACKS];
@@ -235,6 +254,16 @@ struct Looper : Module {
 			configInput(IN_R_INPUT + t, string::f("Track %d R (unpatched = mono)", t + 1));
 		}
 		configInput(MULTI_INPUT, "Multi (poly): channels 1-2 = track 1, 3-4 = track 2, â¦; a track's own jack wins its pair");
+		configInput(CLOCK_INPUT, "Clock (standalone): beat pulses");
+		configInput(RESET_INPUT, "Reset (standalone): interval downbeat / boundary");
+		configInput(PHASE_INPUT, "Phase (standalone): 0-10 V ramp, one cycle per interval");
+		// Beats per interval for the standalone clock. Snap integer; floor 3 (1-2 are
+		// musically meaningless, 3/4 and 3/8 are real); the hard cap is 64, further limited
+		// at play time by the buffer at the current tempo (ExtClock::maxBpi). Inert when a
+		// Ninjam clock drives the grid.
+		configParam(BPI_PARAM, akaudio::looper::ExtClock::MIN_BPI, akaudio::looper::ExtClock::HARD_MAX_BPI,
+			16.f, "Beats per interval (standalone clock)");
+		getParamQuantity(BPI_PARAM)->snapEnabled = true;
 		for (int s = 0; s < SLOTS; s++)
 			configButton(SCENE_PARAM + s, string::f("Scene %d", s + 1));
 		configButton(STOP_ALL_PARAM, "Stop all tracks");
@@ -270,8 +299,9 @@ struct Looper : Module {
 		engine.pressSlot(t, s, params[OVERDUB_PARAM].getValue() > 0.5f);
 	}
 
-	// Pick the clock for this frame: a live Ninjam message from either side, else the
-	// simulated clock. Fills the engine's ClockFrame.
+	// Pick the clock for this frame (precedence §3.5): a live Ninjam expander message wins;
+	// else a patched standalone CLOCK/RESET/PHASE via extClock; else the simulated clock.
+	// Fills the engine's ClockFrame.
 	akaudio::looper::ClockFrame tickClock(const ProcessArgs& args) {
 		const akaudio::JamClockMessage* src = nullptr;
 		for (int side = 0; side < 2; side++) {
@@ -283,10 +313,22 @@ struct Looper : Module {
 			lastSession[side] = m->sessionFrame;
 			if (live && !src) src = m;
 		}
-		akaudio::looper::ClockFrame c;
-		c.running = true;
+		const bool extPatched = inputs[PHASE_INPUT].isConnected() || inputs[CLOCK_INPUT].isConnected();
+		int kind = src ? SRC_NINJAM : (extPatched ? SRC_EXT : SRC_SIM);
+		// Source switch (generation discipline): entering external re-arms its measurement
+		// (onActivate bumps its generation); dropping back to the simulated grid bumps the
+		// sim generation; Ninjam carries its own gridGeneration.
+		if (kind != lastSrcKind) {
+			if (kind == SRC_EXT)
+				extClock.onActivate((int) std::lround(params[BPI_PARAM].getValue()), args.sampleRate);
+			else if (kind == SRC_SIM)
+				simGen++;
+		}
+
+		akaudio::looper::ClockFrame c{};
 		c.sampleRate = args.sampleRate;
-		if (src) {
+		if (kind == SRC_NINJAM) {
+			c.running = true;
 			c.intervalFrames = std::max(1, src->intervalFrames);
 			c.frameInInterval = src->frameInInterval;
 			c.downbeat = src->downbeat;
@@ -296,11 +338,22 @@ struct Looper : Module {
 			c.sessionFrame = src->sessionFrame;
 			c.bpm = src->bpm; c.bpi = src->bpi;
 			simFrame = -1;
-		} else {
-			if (lastNinjam) simGen++; // back to the simulated grid: a new generation
+			extStopped.store(false, std::memory_order_relaxed);
+		} else if (kind == SRC_EXT) {
+			// extClock fills c (running=false while warming up or frozen, which the engine
+			// treats as a hold — playback pauses, position held).
+			extClock.tick(
+				inputs[PHASE_INPUT].isConnected(), inputs[PHASE_INPUT].getVoltage(),
+				inputs[CLOCK_INPUT].isConnected(), inputs[CLOCK_INPUT].getVoltage(),
+				inputs[RESET_INPUT].isConnected(), inputs[RESET_INPUT].getVoltage(),
+				(int) std::lround(params[BPI_PARAM].getValue()), args.sampleRate, c);
+			simFrame = -1;
+			extStopped.store(extClock.stopped, std::memory_order_relaxed);
+		} else { // SRC_SIM
 			int64_t n = std::max<int64_t>(1,
 				(int64_t) (SIM_SECONDS[simSecondsIdx.load(std::memory_order_relaxed)] * args.sampleRate));
 			if (++simFrame >= n) simFrame = 0;
+			c.running = true;
 			c.intervalFrames = (int) n;
 			c.frameInInterval = (int) simFrame;
 			c.downbeat = simFrame == 0;
@@ -309,13 +362,22 @@ struct Looper : Module {
 			c.gridGeneration = simGen;
 			c.sessionFrame = simSession++;
 			c.bpm = 0; c.bpi = 0;
+			extStopped.store(false, std::memory_order_relaxed);
 		}
-		lastNinjam = src != nullptr;
+		lastSrcKind = kind;
+		lastNinjam = (kind == SRC_NINJAM);
+		clockSource.store(kind, std::memory_order_relaxed);
 		ninjamClock.store(lastNinjam, std::memory_order_relaxed);
 		clockBpm.store(c.bpm, std::memory_order_relaxed);
 		clockBpi.store(c.bpi, std::memory_order_relaxed);
-		phase.store((float) c.frameInInterval / (float) c.intervalFrames, std::memory_order_relaxed);
-		secsLeft.store((float) (c.intervalFrames - c.frameInInterval) / args.sampleRate, std::memory_order_relaxed);
+		// UI progress + countdown. External warmup/freeze reports intervalFrames == 0.
+		if (c.intervalFrames > 0) {
+			phase.store((float) c.frameInInterval / (float) c.intervalFrames, std::memory_order_relaxed);
+			secsLeft.store((float) (c.intervalFrames - c.frameInInterval) / args.sampleRate, std::memory_order_relaxed);
+		} else {
+			phase.store(0.f, std::memory_order_relaxed);
+			secsLeft.store(0.f, std::memory_order_relaxed);
+		}
 		return c;
 	}
 
@@ -863,16 +925,27 @@ struct Looper : Module {
 // Code-drawn panel decoration (NanoSVG ignores <text>): title, section labels, the
 // MIX output plate, and the AK mark.
 struct LooperDecor : Widget {
+	Looper* lp = nullptr;
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
 		drawTxt(vg, FONT_BOLD, 10.f, 21.f, 15.f, lpText(), "LOOPER");
+		// OVERDUB moved up beside the title (its button is placed right of this label).
+		drawTxt(vg, FONT_BOLD, DUB_X + 18.f, DUB_Y, 8.5f, lpText(), "OVERDUB", NVG_ALIGN_LEFT);
 		// INS: the poly instrument input (its jack is a PolyPort with the gold collar ring).
 		drawTxt(vg, FONT_BOLD, SCENE_X + SCENE_W / 2, NAME_Y + NAME_H / 2, 9.f, lpText(), "INS", NVG_ALIGN_CENTER);
 
-		// ---- Controls column: Radio/Ninjam plate geometry (Theme.hpp) ----
+		// Right-column labels, left of each jack: OUTS (per-track poly out — always active),
+		// then the CLK/RST/PH clock trio, which dims to ~40% when a Ninjam clock drives the
+		// grid (inert, but never hidden — §3.5).
+		bool nj = lp && lp->clockSource.load(std::memory_order_relaxed) == Looper::SRC_NINJAM;
+		NVGcolor cc = lpText(); if (nj) cc.a *= 0.4f;
+		drawTxt(vg, FONT_BOLD, RCOL_LAB_X, RCOL_Y0, 8.f, lpText(), "OUTS", NVG_ALIGN_CENTER);
+		const char* clab[3] = {"CLK", "RST", "PH"};
+		for (int i = 0; i < 3; i++)
+			drawTxt(vg, FONT_BOLD, RCOL_LAB_X, RCOL_Y0 + (i + 1) * RCOL_DY, 8.f, cc, clab[i], NVG_ALIGN_CENTER);
+
+		// ---- Controls column plates: CUE over MIX (Radio/Ninjam plate geometry, Theme.hpp) ----
 		const NVGcolor bd = nvgRGBA(0, 0, 0, 0x55);
-		drawTxt(vg, FONT_BOLD, RX, Y_DUB - 20.f, 11.f, lpText(), "OVERDUB", NVG_ALIGN_CENTER);
-		// Three stacked plates: OUTS (poly per-track out) over CUE (cyan) over MIX.
 		auto plateBox = [&](float top, float h) {
 			nvgBeginPath(vg);
 			nvgRoundedRect(vg, RX - PLATE_W / 2, top, PLATE_W, h, mm2px(AK_PLATE_R_MM));
@@ -888,10 +961,6 @@ struct LooperDecor : Widget {
 			drawTxt(vg, FONT_BOLD, PLATE_LAB_X, plateLY(top), 11.f, akPlateText(), "L", NVG_ALIGN_CENTER);
 			drawTxt(vg, FONT_BOLD, PLATE_LAB_X, plateRY(top), 11.f, akPlateText(), "R", NVG_ALIGN_CENTER);
 		};
-		// OUTS: a compact single-jack poly plate (per-track direct out); its jack is a
-		// PolyPort (gold collar ring).
-		plateBox(OUTS_TOP, OUTS_H);
-		drawTxt(vg, FONT_BOLD, RX, OUTS_TOP + PLATE_TITLE_DY, 11.f, akPlateText(), "OUTS", NVG_ALIGN_CENTER);
 		plate(CUE_TOP, "CUE", akCueCyan());
 		plate(MIX_TOP, "MIX", akPlateText());
 		// "AK" maker mark at the bottom, where Radio/Ninjam put it.
@@ -909,11 +978,20 @@ struct HeaderStatus : Widget {
 			s = "NINJAM interval looper"; // library/browser preview tagline
 		} else {
 			int sel = lp->selected.load(std::memory_order_relaxed);
-			if (lp->ninjamClock.load(std::memory_order_relaxed))
+			int kind = lp->clockSource.load(std::memory_order_relaxed);
+			if (kind == Looper::SRC_NINJAM)
 				s = string::f("NINJAM \xc2\xb7 %d BPM \xc2\xb7 %d BPI \xc2\xb7 next in %.1f s",
 					lp->clockBpm.load(std::memory_order_relaxed), lp->clockBpi.load(std::memory_order_relaxed),
 					lp->secsLeft.load(std::memory_order_relaxed));
-			else
+			else if (kind == Looper::SRC_EXT) {
+				if (lp->extStopped.load(std::memory_order_relaxed))
+					s = string::f("EXTERNAL CLOCK \xc2\xb7 %d BPI \xc2\xb7 stopped",
+						lp->clockBpi.load(std::memory_order_relaxed));
+				else
+					s = string::f("EXTERNAL CLOCK \xc2\xb7 %d BPM \xc2\xb7 %d BPI \xc2\xb7 next in %.1f s",
+						lp->clockBpm.load(std::memory_order_relaxed), lp->clockBpi.load(std::memory_order_relaxed),
+						lp->secsLeft.load(std::memory_order_relaxed));
+			} else
 				s = string::f("SIMULATED CLOCK \xc2\xb7 %d s interval \xc2\xb7 next in %.1f s",
 					SIM_SECONDS[lp->simSecondsIdx.load(std::memory_order_relaxed)],
 					lp->secsLeft.load(std::memory_order_relaxed));
@@ -922,10 +1000,13 @@ struct HeaderStatus : Widget {
 			if (sel >= 0) s += string::f(" \xc2\xb7 sel %d.%d", sel / SLOTS + 1, sel % SLOTS + 1);
 		}
 		drawTxt(args.vg, FONT_BOLD, box.size.x, box.size.y / 2, 9.f, lpTextDim(), s, NVG_ALIGN_RIGHT);
-		// Sync LED: green = locked to a Ninjam clock; dim = simulated / none.
+		// Sync LED: green = locked to a real clock (Ninjam or a running external); dim =
+		// simulated / none / external-but-frozen.
 		if (lp) {
 			float tw = textWidth(args.vg, FONT_BOLD, 9.f, s);
-			bool on = lp->ninjamClock.load(std::memory_order_relaxed);
+			int kind = lp->clockSource.load(std::memory_order_relaxed);
+			bool on = kind == Looper::SRC_NINJAM
+			          || (kind == Looper::SRC_EXT && !lp->extStopped.load(std::memory_order_relaxed));
 			nvgBeginPath(args.vg);
 			nvgCircle(args.vg, box.size.x - tw - 10.f, box.size.y / 2, 4.f);
 			nvgFillColor(args.vg, on ? lpGreen() : akShade(0x30));
@@ -1314,6 +1395,110 @@ struct PolyPort : ThemedPJ301MPort {
 	}
 };
 
+// Standalone-clock input jack that washes out when a Ninjam clock drives the grid — the
+// jack stays present and connected (we never hide it, §3.5), just reads as inactive.
+struct ClockPort : ThemedPJ301MPort {
+	Looper* lp = nullptr;
+	void draw(const DrawArgs& args) override {
+		ThemedPJ301MPort::draw(args);
+		if (lp && lp->clockSource.load(std::memory_order_relaxed) == Looper::SRC_NINJAM) {
+			nvgBeginPath(args.vg);
+			nvgRect(args.vg, 0, 0, box.size.x, box.size.y);
+			nvgFillColor(args.vg, akTheme(nvgRGBA(0xea, 0xeb, 0xec, 0xb0), nvgRGBA(0x1f, 0x1f, 0x1f, 0xb0)));
+			nvgFill(args.vg);
+		}
+	}
+};
+
+// BPI stepper (§3.5): ▲/▼ + a numeric readout, no knob. Click upper/lower half or scroll to
+// step; right-click to type an exact value. The floor is 3; the ceiling is ExtClock::maxBpi
+// at the live tempo (the seconds budget → sr-independent). Dimmed + inert under Ninjam.
+struct BpiStepper : Widget {
+	Looper* lp = nullptr;
+
+	int curBpi() const {
+		return lp ? (int) std::lround(lp->params[Looper::BPI_PARAM].getValue())
+		          : akaudio::looper::ExtClock::MIN_BPI;
+	}
+	int effMax() const {
+		return lp ? akaudio::looper::ExtClock::maxBpi((float) lp->clockBpm.load(std::memory_order_relaxed))
+		          : akaudio::looper::ExtClock::HARD_MAX_BPI;
+	}
+	bool dimmed() const {
+		return lp && lp->clockSource.load(std::memory_order_relaxed) == Looper::SRC_NINJAM;
+	}
+	void setBpi(int v) {
+		if (!lp) return;
+		int lo = akaudio::looper::ExtClock::MIN_BPI, hi = effMax();
+		if (hi < lo) hi = lo;
+		if (v < lo) v = lo;
+		if (v > hi) v = hi;
+		lp->params[Looper::BPI_PARAM].setValue((float) v);
+	}
+
+	void draw(const DrawArgs& args) override {
+		NVGcontext* vg = args.vg;
+		const float w = box.size.x, h = box.size.y;
+		const float a = dimmed() ? 0.4f : 1.f;
+		nvgBeginPath(vg);
+		nvgRoundedRect(vg, 0, 0, w, h, 3.f);
+		nvgFillColor(vg, akTheme(nvgRGBA(0x1f, 0x1f, 0x1f, 0x22), nvgRGBA(0x08, 0x08, 0x08, 0x99)));
+		nvgFill(vg);
+		NVGcolor tc = lpText(); tc.a *= a;
+		drawTxt(vg, FONT_BOLD, 6.f, h / 2, 8.f, tc, "BPI", NVG_ALIGN_LEFT);
+		drawTxt(vg, FONT_BOLD, w - 20.f, h / 2 + 0.5f, 13.f, tc, string::f("%d", curBpi()), NVG_ALIGN_RIGHT);
+		drawTxt(vg, FONT_BOLD, w - 5.f, h * 0.30f, 8.f, tc, "\xe2\x96\xb2", NVG_ALIGN_RIGHT); // ▲
+		drawTxt(vg, FONT_BOLD, w - 5.f, h * 0.74f, 8.f, tc, "\xe2\x96\xbc", NVG_ALIGN_RIGHT); // ▼
+	}
+
+	void onButton(const ButtonEvent& e) override {
+		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT) {
+			e.consume(this);
+			if (!dimmed())
+				setBpi(curBpi() + (e.pos.y < box.size.y / 2 ? 1 : -1));
+			return;
+		}
+		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_RIGHT) {
+			e.consume(this);
+			if (!dimmed()) typeIn();
+			return;
+		}
+		Widget::onButton(e);
+	}
+	void onHoverScroll(const HoverScrollEvent& e) override {
+		if (dimmed()) return;
+		if (e.scrollDelta.y > 0.f) { setBpi(curBpi() + 1); e.consume(this); }
+		else if (e.scrollDelta.y < 0.f) { setBpi(curBpi() - 1); e.consume(this); }
+	}
+	void typeIn();
+};
+
+struct BpiField : ui::TextField {
+	BpiStepper* st = nullptr;
+	BpiField() { box.size.x = 70.f; }
+	void onSelectKey(const SelectKeyEvent& e) override {
+		if (e.action == GLFW_PRESS && (e.key == GLFW_KEY_ENTER || e.key == GLFW_KEY_KP_ENTER)) {
+			if (st && !text.empty()) st->setBpi((int) std::strtol(text.c_str(), nullptr, 10));
+			ui::MenuOverlay* ov = getAncestorOfType<ui::MenuOverlay>();
+			if (ov) ov->requestDelete();
+			e.consume(this);
+			return;
+		}
+		ui::TextField::onSelectKey(e);
+	}
+};
+
+inline void BpiStepper::typeIn() {
+	ui::Menu* menu = createMenu();
+	menu->addChild(createMenuLabel(string::f("Beats per interval (%d\xe2\x80\x93%d)",
+		akaudio::looper::ExtClock::MIN_BPI, effMax())));
+	BpiField* f = new BpiField;
+	f->st = this;
+	f->text = string::f("%d", curBpi());
+	f->selectAll();
+	menu->addChild(f);
+}
+
 struct LooperWidget : ModuleWidget {
 	Looper* lp = nullptr;
 
@@ -1329,14 +1514,31 @@ struct LooperWidget : ModuleWidget {
 		addChild(createWidget<ThemedScrew>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
 		LooperDecor* decor = new LooperDecor;
+		decor->lp = module;
 		decor->box.size = box.size;
 		addChild(decor);
 
+		// Header status, trimmed so it starts right of the OVERDUB button and ends left of
+		// the BPI stepper.
 		HeaderStatus* hs = new HeaderStatus;
 		hs->lp = module;
-		hs->box.pos = Vec(100.f, 8.f);
-		hs->box.size = Vec(box.size.x - 100.f - 10.f, 26.f);
+		hs->box.pos = Vec(200.f, 8.f);
+		hs->box.size = Vec(245.f, 26.f);
 		addChild(hs);
+
+		// Standalone clock (§3.5): CLOCK / RESET / PHASE jacks stacked below OUTS in the
+		// controls column (rows 1-3; OUTS is row 0). The BPI stepper sits top-right.
+		for (int i = 0; i < 3; i++) {
+			int in = i == 0 ? Looper::CLOCK_INPUT : i == 1 ? Looper::RESET_INPUT : Looper::PHASE_INPUT;
+			ClockPort* p = createInputCentered<ClockPort>(Vec(RCOL_X, RCOL_Y0 + (i + 1) * RCOL_DY), module, in);
+			p->lp = module;
+			addInput(p);
+		}
+		BpiStepper* bpi = new BpiStepper;
+		bpi->lp = module;
+		bpi->box.pos = Vec(BPI_X, BPI_Y);
+		bpi->box.size = Vec(BPI_W, BPI_H);
+		addChild(bpi);
 
 		for (int t = 0; t < TRACKS; t++) {
 			TrackLabel* lab = new TrackLabel;
@@ -1374,15 +1576,15 @@ struct LooperWidget : ModuleWidget {
 		sa->box.size = Vec(SCENE_W, stopH()); sa->kind = GlyphButton::STOP_ALL; sa->lp = module; sa->momentary = true;
 		addParam(sa);
 
-		// Bottom I/O strip.
-		addOutput(createOutputCentered<PolyPort>(Vec(RX, OUTS_JACK_Y), module, Looper::POLY_OUTPUT));
+		// Right column outputs: OUTS at the top (row 0, aligned with INS), then CUE / MIX plates.
+		addOutput(createOutputCentered<PolyPort>(Vec(RCOL_X, RCOL_Y0), module, Looper::POLY_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(PLATE_JACK_X, plateLY(CUE_TOP)), module, Looper::CUE_L_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(PLATE_JACK_X, plateRY(CUE_TOP)), module, Looper::CUE_R_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(PLATE_JACK_X, plateLY(MIX_TOP)), module, Looper::MIX_L_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(Vec(PLATE_JACK_X, plateRY(MIX_TOP)), module, Looper::MIX_R_OUTPUT));
-		// Overdub: the component-library bezel button with a light (what Fundamental's
-		// PUSH uses), latching; red = overdub armed.
-		addParam(createLightParamCentered<VCVLightBezelLatch<RedLight>>(Vec(RX, Y_DUB), module,
+		// Overdub: the component-library bezel button with a light (what Fundamental's PUSH
+		// uses), latching; red = overdub armed. Moved up beside the "LOOPER" title.
+		addParam(createLightParamCentered<VCVLightBezelLatch<RedLight>>(Vec(DUB_X, DUB_Y), module,
 			Looper::OVERDUB_PARAM, Looper::OVERDUB_LIGHT));
 	}
 
@@ -1415,7 +1617,7 @@ struct LooperWidget : ModuleWidget {
 		Looper* m = lp;
 		if (!m) return;
 		menu->addChild(new MenuSeparator);
-		menu->addChild(createIndexSubmenuItem("Simulated interval (when no Ninjam clock)", {"2 s", "4 s", "8 s", "16 s", "32 s"},
+		menu->addChild(createIndexSubmenuItem("Simulated interval (no Ninjam / clock patched)", {"2 s", "4 s", "8 s", "16 s", "32 s"},
 			[m]() { return (size_t) m->simSecondsIdx.load(std::memory_order_relaxed); },
 			[m](size_t i) { m->simSecondsIdx.store((int) i, std::memory_order_relaxed); }));
 		menu->addChild(createIndexSubmenuItem("New clips: repeats",

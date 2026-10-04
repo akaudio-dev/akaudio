@@ -197,10 +197,123 @@ One struct per frame, ~100 bytes, copied by value.
 
 The engine consumes an `IntervalSource` yielding `JamClockMessage`-shaped frame
 state. v1 implements only the expander reader; no Ninjam ⇒ idle (§9.3 covers losing
-it mid-jam). A standalone source is deferred **without reserving a jack** (decided
-2026-08-22): its shape isn't settled — intervals may become per-track or per-take —
-and adding a jack later is patch-safe, whereas a global RESET jack now would presume
+it mid-jam). A standalone source was deferred **without reserving a jack** (decided
+2026-08-22): its shape wasn't settled — intervals may become per-track or per-take —
+and adding a jack later is patch-safe, whereas a global RESET jack then would presume
 one shared boundary. The engine keeps **N per track** from day one.
+
+**Resolved 2026-10-04 → §3.5.** The standalone source is now specified — CLOCK +
+RESET + PHASE inputs feeding the same `ClockFrame`, with an on-panel beats-per-interval
+stepper. Adding the jacks was patch-safe exactly as predicted (new `InputId`s append;
+old patches load with them unpatched → simulated fallback, unchanged). The shared-boundary
+worry is answered the other way round: the standalone grid *is* one shared boundary (that
+is what a RESET jack means), and cross-track polyrhythm still falls out of the
+free-running engine — takes keep their own recorded length and wrap at their own period
+regardless of the grid (§5, 2026-08-29 rework), so a 5-beat and a 7-beat take drift
+against each other with no per-track clock needed.
+
+---
+
+### 3.5 Standalone external clock (CLOCK / RESET / PHASE)  *(spec 2026-10-04 — GitHub #3)*
+
+The Looper already runs with no Ninjam on a free-running **simulated** clock. This adds
+a third clock tier so it syncs to the rest of the rack. The engine is **untouched** — a
+new source just fills the same `ClockFrame` (`LooperEngine.hpp`), exactly as the
+expander reader and the simulated clock do. `tickClock()` (`Looper.cpp`) grows one
+branch.
+
+**Source precedence (per frame):** live Ninjam expander → **PHASE** jack → **CLOCK**
+jack → simulated. "Live" = the signal is actually moving (see clock-stop below). The
+first live source wins; a patched-but-idle jack does not pre-empt the simulated clock.
+
+**Two external modes, auto-selected by what's patched:**
+
+- **PHASE (preferred — ZZC-style continuous ramp).** A 0–10 V sawtooth that wraps once
+  per interval *is* the position, directly: `phase01 = clamp(v/10, 0, 1)`,
+  `frameInInterval = round(phase01 · N)`. The **wrap** (a downward jump, `Δphase <
+  −0.5`) is the **downbeat**; `N` (`intervalFrames`) is latched at each wrap to the
+  frame count of the cycle just finished and held for the next, and `bpm` is derived
+  from `N` and BPI for display. Beats come from subdividing: `beatIndex =
+  floor(phase01 · bpi)`, `beat` fires when it increments. No period estimation, no
+  jitter — phase carries the position exactly. This is strictly cleaner than the
+  simulated clock and is why PHASE outranks CLOCK.
+- **CLOCK + RESET (traditional pulse mode, when PHASE is unpatched).** A Schmitt trigger
+  (~1 V hi / 0.1 V lo) on CLOCK marks **beats**; RESET marks the **downbeat / interval
+  boundary**. `N` = frames between the last two RESETs (or `bpi ×` the last measured
+  beat length when RESET is unpatched); beat length = frames between the last two CLOCK
+  edges. `frameInInterval` is reconstructed by counting frames since the last edge
+  against the last measured length — the same interpolation Ninjam hands us for free.
+
+**BPI control (on-panel, decided 2026-10-04).** External clocking needs a
+beats-per-interval value (the loop/bar length). It is a **▲/▼ stepper with a numeric
+readout**, *not* a knob — a knob would eat panel space we don't have, and a stepper is
+unambiguous. **Every integer from a floor of 3** (1–2 are musically meaningless, but **3**
+is real — 3/4, 3/8 — so the floor is 3, not 4; the full integer range, not a power-of-two
+lattice, so **polyrhythmic** and odd-meter lengths — 3, 5, 7, 9, 11, 13 … — are all
+reachable, which this audience wants). The **denominator lives upstream**: one CLOCK
+pulse = one beat, so 5/8 = eighth-note pulses with BPI 5, 7/4 = quarter pulses with BPI 7
+— the looper only counts beats, so a single flat count covers every meter. Hold-to-repeat
+for big jumps, right-click **type-in** for an exact value, default **16**. It is a real
+`param` (auto-persists, type-in + scroll + tooltip for free), active only in external
+mode; in PHASE mode it subdivides the interval into beats, in CLOCK mode it sets the
+interval length when RESET is unpatched. The **ceiling is not a constant** — it is
+derived from the buffer (next paragraph). Because that budget is fixed in *seconds*, the
+ceiling moves with **tempo only, not sample rate** — a 48 k and a 96 k user get the same
+maximum loop length in bars.
+
+**Clock stop = freeze (decided 2026-10-04).** When the external source goes idle —
+PHASE stationary, or no CLOCK edge for > ~2× the last beat — the Looper **holds**
+`frameInInterval` and stops advancing `sessionFrame`: the external transport stopped, so
+the loop holds its place rather than drifting or free-running. It resumes on the next
+edge / phase motion. (It does **not** fall back to the simulated clock mid-patch — that
+would lurch the grid.) The header shows the clock as stopped.
+
+**`gridGeneration` discipline.** Bump `gen` only on **source switch** (sim↔external,
+either direction), **BPI change**, and **sample-rate change** — **never** on ordinary
+tempo drift. Per the 2026-08-29 rework a take free-runs at its own recorded length and a
+tempo change never converts/stops/greys it, so letting `N` follow the measured period
+frame-to-frame is safe and must *not* trigger a regrid (which would tear down in-flight
+recordings and chains).
+
+**Interval cap — a seconds budget, raised for ambient.** `JamClock::intervalFrames` caps
+`N` at `1<<22` (≈ 87 s @ 48 k — a *frame* cap, so it silently halves to ≈ 44 s at 96 k).
+The standalone path replaces that with a **seconds** budget `MAX_INTERVAL_SECONDS`
+(→ `N_max = round(MAX_INTERVAL_SECONDS · sr)`), so the maximum loop length is the same
+musical duration at every sample rate and the 96 k RAM cost is the honest cost of 96 k.
+From it: the **BPI ceiling** = `floor(MAX_INTERVAL_SECONDS / beatSeconds)` where
+`beatSeconds` is the measured beat length of the live clock (`60/bpm`) — `sr` cancels, so
+the ceiling tracks tempo only. Pick `MAX_INTERVAL_SECONDS` against the worst case (all
+`tracks × slots` filled at full length: `N_max · slots · tracks · 2ch · 4 B`): e.g. a
+4-minute cap is ≈ 92 MB/slot @ 48 k, ≈ 184 MB @ 96 k — bounded, and real takes are far
+shorter since the worker allocates per committed take, not per slot. Keep a hard sanity
+clamp on `N` so a DC / 0 Hz "clock" (beatSeconds → ∞, or a stationary PHASE) can't demand
+an absurd allocation. A persisted BPI above the current ceiling (sample rate raised, or
+clock slowed) is clamped down on load / on read.
+
+**UI / persistence.** Header status (`Looper.cpp`, the `NINJAM` / `SIMULATED CLOCK`
+line) gains an `EXTERNAL CLOCK · <bpm> BPM · <bpi> BPI` state (and a `· stopped`
+suffix when frozen); the sync LED is green when locked to *any* real clock (Ninjam or
+external), dim only on simulated/none. New `InputId`s `CLOCK_INPUT`, `RESET_INPUT`,
+`PHASE_INPUT` append to the enum; three jacks + the stepper go on the panel near MULTI
+(44 HP, 660×380 — room bottom-right). BPI persists like `simSecondsIdx`; the active
+source is runtime-derived from patched cables, not persisted.
+
+**Ninjam overrides the jacks — dim, don't hide (decided 2026-10-04).** When an adjacent
+Ninjam's clock is live it already wins by precedence, so the CLOCK/RESET/PHASE jacks and
+the BPI stepper are inert. Reflect that by **drawing them dimmed** (reduced opacity),
+*not* by hiding the ports. Rack panels are static SVG; hiding a port on a neighbour's
+presence shape-shifts the panel (surprising) and, worse, **orphans any cable already
+patched into it** (Rack keeps the connection to an invisible port). There is no
+core "disabled input" state either — a port just does or doesn't carry a cable, and we
+simply ignore it. So: jacks always present, greyed while Ninjam drives the clock, fully
+lit otherwise. Low-surprise and consistent with the "grey out inactive controls" idiom.
+
+**Factoring + tests.** Pull the external-source logic out of the `Module` into a small
+Rack-free helper (phase→`ClockFrame` and pulse-period→`ClockFrame`) so it unit-tests
+without Rack, mirroring `JamClock`: assert phase-wrap produces one downbeat + `bpi`
+beats at the right frames, the latched `N` matches the measured cycle, pulse-mode
+reconstruction of `frameInInterval`, the freeze-on-idle hold, and the `gen`-bump rules
+(BPI change bumps, tempo drift does not). Add it to `make unittest`.
 
 ---
 
@@ -845,6 +958,7 @@ Resample takes on sample-rate change. Recorder: decode-on-demand preview per pla
 |    | *Status 2026-08-23: implemented* — `src/looper/Session.{hpp,cpp}` (Rack-free `LooperSink`) + `test/session_test.cpp` (passes). Commits enqueue `SAVE`/`CLEAR_FILE` on the worker's SPSC queue; the worker encodes each take with the vendored OGG-Vorbis encoder and writes `t<t>_s<s>.ogg` atomically (tmp+rename), retiring an overwritten/cleared file into `history/`, and rewrites `session.json`. Buffer lifetime proven under ASan (`looper_engine_test` MockSink). The Looper borrows Ninjam's exact jam folder via `RecorderLink` when a Recorder is armed (else its own `<stamp>_session`), frozen after the first write. `sessionBase` (default `~/Music/jams`) is menu-configurable + persisted templated. The **clip loader** (§11) is also built: `Session::enqueueLoad`/`nextLoad` decode a saved OGG (stb_vorbis) on the worker, an SPSC `LoadInstall` hands it to the audio thread, and the persisted `sessionDir` triggers restore on patch load. `make unittest` builds + runs `session_test` (incl. the decode round-trip). | |
 | M5 | Looper panel: thumbnail slot widget with live fill, header, context menu (quality, memory) | the UI |
 | M6 | Docs (MANUAL.md, CHANGELOG), Library release | ship |
+| M7 | **Standalone clock** (§3.5, GitHub #3): `CLOCK`/`RESET`/`PHASE` inputs + a BPI stepper feeding the same `ClockFrame` behind the expander reader; PHASE continuous / CLOCK+RESET pulse modes; seconds-based interval cap (sr-independent BPI ceiling, floor 3); freeze-on-stop; `EXTERNAL CLOCK` header state + dimmed-jacks-under-Ninjam | the Looper syncs to the rest of the rack with no Ninjam |
 
 Tests (`test/`, no Rack link):
 - `jamclock_test.cpp` *(built, passes)* — the integer `JamClock`: N vs NjAudio's
@@ -869,5 +983,11 @@ Tests (`test/`, no Rack link):
   (incl. a silence interval that writes no file) with changing session frames; assert
   the per-player/tx files, verbatim bytes, JSONL index entries, and stats. `make unittest`
   builds + runs jamclock/looper_engine/archive together.
+- `extclock_test.cpp` *(M7, planned)* — the Rack-free standalone-clock helper
+  (§3.5): a PHASE ramp wrapping produces one downbeat + `bpi` beats at the right frames,
+  the latched `N` matches the measured cycle; CLOCK+RESET pulse mode reconstructs
+  `frameInInterval` between edges; freeze-on-idle holds position and `sessionFrame`;
+  the `gridGeneration` bump rules (BPI change / sr change / source switch bump, tempo
+  drift does not); the seconds-based cap gives the same BPI ceiling at 48 k and 96 k.
 - Existing `enc_test.cpp`: add the silence-size assertion (≲ 8 KB per 20 s).
 - Manual: Looper + Ninjam + Recorder on a real room; REAPER import of `clipsort.log`.

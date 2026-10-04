@@ -141,6 +141,7 @@ build/ut_ogg/%.o: %.c
 unittest: $(UT_OGG_OBJ)
 	@mkdir -p build
 	$(CXX) -std=c++11 -O1 -I src test/jamclock_test.cpp -o build/jamclock_test && build/jamclock_test
+	$(CXX) -std=c++11 -O1 -I src test/extclock_test.cpp -o build/extclock_test && build/extclock_test
 	$(CXX) -std=c++11 -O1 -I src test/looper_engine_test.cpp src/looper/LooperEngine.cpp \
 	  src/looper/LooperWorker.cpp -lpthread -o build/looper_engine_test && build/looper_engine_test
 	rm -rf build/session_test_out
