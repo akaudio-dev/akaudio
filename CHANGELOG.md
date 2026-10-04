@@ -4,6 +4,26 @@ All notable changes to **AK Audio** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow VCV Rack's
 scheme (`MAJOR.MINOR.REVISION`, with `MAJOR` = the Rack major version).
 
+## [2.0.11] — 2026-10-04
+
+### Added
+
+- **Looper** runs **standalone**, with no Ninjam. Patch **CLOCK** (add **RESET** for the
+  downbeat, or feed a ZZC-style **PHASE** ramp instead) and set the loop length with the
+  new **BPI** stepper; with nothing patched it free-runs on a simulated clock. Beats per
+  interval come from BPI, not the clock rate, so any clock works. A context-menu **Launch
+  / record quantize** (every beat … the whole interval) sets how finely cells commit.
+  Resolves [#3](https://github.com/akaudio-dev/akaudio/issues/3).
+- **Recorder** parks next to a **Looper** when there's no Ninjam: arming rolls the Looper
+  onto a fresh session folder and stopping exports it as a `.als`. The jams folder is
+  shared, and the Ableton export works offline either way.
+
+### Changed
+
+- **Looper** panel reworked for the clock inputs: INS/OUTS paired at the top of the
+  controls column, CLOCK/RESET/PHASE and the BPI stepper added, OVERDUB moved beside the
+  title. README, MANUAL, and the Looper screenshot updated.
+
 ## [2.0.10] — 2026-09-17
 
 ### Fixed
