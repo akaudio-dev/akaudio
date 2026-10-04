@@ -108,6 +108,33 @@ static void testPulseNoReset() {
 	CHECK(measuredPeriod == bpi * B, "pulse: downbeat period == one interval");
 }
 
+// --- Pulse mode subdivides the interval into BPI beats, so the action grid is set by BPI,
+// NOT the clock rate: a fast CLOCK with RESET marking the loop still yields exactly bpi beats
+// per interval (like Ninjam), not one per CLOCK edge. ---
+static void testPulseSubdivides() {
+	ExtClock ec;
+	ec.onActivate(4, SR);
+	const int B = 100, R = 2000, bpi = 4; // 20 CLOCK edges per RESET interval
+	int beatsThisInterval = 0, maxBeatIdx = -1;
+	int measured = -1; // beats counted in one fully-warmed interval
+	int lastDbK = -1;
+	for (int k = 0; k <= 8 * R; k++) {
+		float clk = (k % B == 0) ? 5.f : 0.f;
+		float rst = (k % R == 0) ? 5.f : 0.f;
+		ClockFrame c{};
+		ec.tick(false, 0.f, true, clk, true, rst, bpi, SR, c);
+		if (!c.running) continue;
+		if (c.downbeat) {
+			if (lastDbK >= 0 && measured < 0 && k >= 4 * R) measured = beatsThisInterval;
+			beatsThisInterval = 0;
+			lastDbK = k;
+		}
+		if (c.beat) { beatsThisInterval++; if (c.beatIndex > maxBeatIdx) maxBeatIdx = c.beatIndex; }
+	}
+	CHECK(measured == bpi, "pulse subdivide: exactly BPI beats per interval, not one per CLOCK edge");
+	CHECK(maxBeatIdx == bpi - 1, "pulse subdivide: beatIndex spans 0..bpi-1");
+}
+
 // --- CLOCK wins over PHASE: when BOTH are patched, the pulse path drives (a stray/held
 // PHASE signal must not hijack a working CLOCK+RESET rig and freeze it). ---
 static void testClockBeatsPhase() {
@@ -235,6 +262,7 @@ int main() {
 	testPhaseFreeze();
 	testPulseNoReset();
 	testPulseWithReset();
+	testPulseSubdivides();
 	testClockBeatsPhase();
 	testNStability();
 	testGenDiscipline();

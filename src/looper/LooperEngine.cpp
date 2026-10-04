@@ -464,6 +464,32 @@ int LooperEngine::framesToNextBeat(const ClockFrame& c) {
 	return next - c.frameInInterval;
 }
 
+// Launch/record quantize. Step in beats, clamped to [1, bpi]; 0 (interval) → bpi, i.e. only
+// the downbeat (beatIndex 0) is on the grid.
+int LooperEngine::gridStep(const ClockFrame& c) const {
+	int bpi = c.bpi > 0 ? c.bpi : 1;
+	int q = launchQuantize.load(std::memory_order_relaxed);
+	if (q <= 0 || q > bpi) return bpi;
+	return q;
+}
+// This beat is a commit point when its index is a multiple of the step (the downbeat, index
+// 0, always is). A beat-less clock (sim) has only the downbeat anyway.
+bool LooperEngine::onCommitGrid(const ClockFrame& c) const {
+	if (c.bpi <= 1) return true;
+	return c.beatIndex % gridStep(c) == 0;
+}
+// Frames to the start of the next commit beat — the pre-roll writer aims here so a coarse
+// quantize folds the pickup against the actual commit point, not the next raw beat.
+int LooperEngine::framesToNextCommit(const ClockFrame& c) const {
+	const int n = c.intervalFrames;
+	if (n <= 0) return 0;
+	if (c.bpi <= 1) return n - c.frameInInterval;
+	const int q = gridStep(c);
+	const int nb = (c.beatIndex / q + 1) * q; // next multiple of q strictly after this beat
+	const int next = nb >= c.bpi ? n : (int) (((long long) nb * n + c.bpi - 1) / c.bpi);
+	return next - c.frameInInterval;
+}
+
 // Beat boundary (incl. the downbeat): the ACTION grid. Commit pending LAUNCH / STOP,
 // start pending recordings, and commit pending FINISHes.
 void LooperEngine::beatCommit(const ClockFrame& c, double now) {
@@ -769,8 +795,8 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 	if (c.running && c.intervalFrames > 0) {
 		if (!haveGrid || c.gridGeneration != gen || c.intervalFrames != N || c.sampleRate != sr)
 			regrid(c);
-		if (c.beat)
-			beatCommit(c, now); // the action grid: launches, stops, record start/finish
+		if (c.beat && onCommitGrid(c))
+			beatCommit(c, now); // the action grid: launches, stops, record start/finish (quantized)
 		if (c.downbeat)
 			boundary(now); // rest cells count their repeats per interval
 	}
@@ -779,7 +805,7 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 	const bool inGrid = grid && f >= 0 && f < N;
 
 	const bool declick = declickEnabled.load(std::memory_order_relaxed) && declickN > 0;
-	int remToBeat = -1; // framesToNextBeat(c), computed once on demand (tick-invariant)
+	int remToBeat = -1; // framesToNextCommit(c), computed once on demand (tick-invariant)
 
 	float mixL = 0.f, mixR = 0.f, cuL = 0.f, cuR = 0.f;
 	for (int t = 0; t < MAX_TRACKS; t++) {
@@ -825,7 +851,7 @@ void LooperEngine::tick(const ClockFrame& c, const TrackIn* in, int nTracks, dou
 					// N - (frames remaining to the start beat) — faded in so the fold
 					// can't click at its left edge.
 					if (remToBeat < 0)
-						remToBeat = framesToNextBeat(c);
+						remToBeat = framesToNextCommit(c);
 					const int rem = remToBeat;
 					if (rem >= 1 && rem <= N) {
 						const int pos = N - rem;

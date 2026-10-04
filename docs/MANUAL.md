@@ -98,8 +98,10 @@ a shared `.vcv` leaks nothing (see [Privacy](../README.md#privacy)).
 ## Looper
 
 An 8×8 grid of loops — Ableton Session view for a NINJAM jam. Put it right next to a
-**Ninjam** module (either side) and it locks onto the room's grid; on its own it runs
-on a simulated clock (interval length in the context menu).
+**Ninjam** module (either side) and it locks onto the room's grid; **standalone**,
+drive it from any clock through its **CLOCK / RESET / PHASE** inputs (see
+[Standalone clock](#standalone-clock)); with nothing patched it free-runs on a
+simulated clock (interval length in the context menu).
 
 Two things to know, and the rest follows:
 
@@ -109,7 +111,7 @@ Two things to know, and the rest follows:
 - **Loops run free.** A launched loop cycles at its own recorded length and speed,
   wherever the grid goes afterwards.
 
-![A Looper session mid-jam: named tracks, chained takes, one cell playing, the NINJAM clock at 80 BPM · 32 BPI](images/Looper-session.png)
+![A Looper running standalone: chained takes across tracks, the CLK / RST / PH clock inputs patched, EXTERNAL CLOCK at 16 BPI](images/Looper-session.png)
 
 ### Panel
 
@@ -117,6 +119,8 @@ Two things to know, and the rest follows:
 |---|---|
 | **INS** (poly) | Your instruments: channels 1/2 = track 1 L/R, 3/4 = track 2, … Best fed from a mixer's poly **insert send** (see [With a mixer](#with-a-mixer)); direct-outs work too (a MindMeld MixMaster maps 1:1). |
 | Per-track jacks | Per-track stereo inputs, if you'd rather not use INS (a track prefers its own jacks when connected). |
+| **CLOCK / RESET / PHASE** | Standalone clock inputs — greyed out while a Ninjam drives the grid. See [Standalone clock](#standalone-clock). |
+| **BPI** | Beats per interval for the standalone clock (3–64) — the loop length. ▲/▼ or scroll; right-click to type a value. |
 | **Track label** | Click to rename (4 characters, like MixMaster). With a MixMaster feeding INS, names sync both ways automatically. |
 | **Grid cells** | Empty: press, and recording starts on the next **beat** (what you play just *before* it folds into the loop's tail — pickups survive). Filled: press to launch on the next beat; press again while playing to stop. Recording: press to **finish** — the take commits on the next beat, at however many beats it is, and starts looping (a chain replays from its first cell); press again to keep recording instead. The waveform fills in live while recording. |
 | **▶ scene** | Launch a whole row: filled cells play, empty cells stop their track. Latest scene press wins. |
@@ -124,6 +128,23 @@ Two things to know, and the rest follows:
 | **OVERDUB** | Latch: the selected playing cell keeps layering until you let go of the latch. |
 | **TX lamps** | Per-track on-air toggle: green = in the MIX (the room hears it), cyan = private — the live input goes to CUE instead. |
 | **OUTS / CUE / MIX** | Per-track poly out, private monitor out, and the stereo submix (cable MIX into Ninjam's IN to transmit it). |
+
+### Standalone clock
+
+No Ninjam? Drive the Looper from any clock:
+
+- **CLOCK + RESET.** CLOCK is the beat; **RESET** marks each interval's downbeat (the
+  loop start). Set how many beats make a loop with **BPI**. Clock CLOCK at whatever
+  rate suits you — *BPI, not the clock rate, decides how many launch/record points you
+  get per interval*, so one pulse per loop works as well as a fast beat clock.
+- **PHASE.** Instead of pulses, feed a 0–10 V ramp that rises once per interval
+  (ZZC-style) — it carries the position directly. PHASE is used only when CLOCK is
+  unpatched; if you patch both, CLOCK wins.
+- **Stop = hold.** If the external clock stops, the Looper freezes in place (playback
+  pauses) and resumes when it moves again. The header shows the live source —
+  `NINJAM` / `EXTERNAL CLOCK` / `SIMULATED` — with BPM, BPI and the countdown.
+- **Launch / record quantize** (context menu) sets how finely cells commit: every
+  beat (finest) through the whole interval. Applies to any clock.
 
 ### With a mixer
 
@@ -176,6 +197,13 @@ records.
 
 Nothing is ever written, and nothing of the room is captured, unless the Recorder
 sits armed next to a joined Ninjam — recording is always your explicit choice.
+
+**No Ninjam?** Park the Recorder next to a **Looper** instead. There are no remote
+players to archive, so arming **RECORD** rolls the Looper onto a fresh session folder
+and marks it; stopping exports that session as a `.als` (below). The panel shows the
+Looper session — take count and folder — instead of the per-player rows. The jams
+folder is shared, and the **Export Ableton Live set…** menu item works offline either
+way (it just reads a jam folder on disk).
 
 ### Ableton Live export
 

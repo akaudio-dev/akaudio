@@ -49,6 +49,16 @@ static const std::vector<std::string>& decayLabels() {
 const int SIM_SECONDS[] = {2, 4, 8, 16, 32};
 const int N_SIM_SECONDS = 5;
 
+// Launch/record quantize choices: beats per commit step (0 = interval = downbeat only),
+// with matching menu labels. Clamped to the live bpi at use (engine.gridStep).
+const int QUANT_BEATS[] = {1, 2, 4, 8, 16, 0};
+const int N_QUANT = 6;
+inline int quantIndex(int q) {
+	for (int i = 0; i < N_QUANT; i++)
+		if (QUANT_BEATS[i] == q) return i;
+	return 0; // default: Beat
+}
+
 inline NVGcolor lpText()    { return akTheme(nvgRGB(0x24, 0x27, 0x2b), nvgRGB(0xed, 0xed, 0xed)); }
 inline NVGcolor lpTextDim() { return akTheme(nvgRGB(0x5c, 0x61, 0x68), nvgRGB(0x9a, 0xa0, 0xa6)); }
 inline NVGcolor lpGreen()   { return akTheme(nvgRGB(0x2a, 0xa8, 0x55), nvgRGB(0x3a, 0xd0, 0x6a)); }
@@ -840,6 +850,7 @@ struct Looper : Module, public akaudio::LooperRecLink {
 		json_object_set_new(root, "defRepeats", json_integer(engine.defRepeats.load()));
 		json_object_set_new(root, "defDecayDb", json_real(engine.defDecayDb.load()));
 		json_object_set_new(root, "autoAdvance", json_boolean(engine.autoAdvance.load()));
+		json_object_set_new(root, "launchQuantize", json_integer(engine.launchQuantize.load()));
 		json_t* names = json_array();
 		for (int t = 0; t < TRACKS; t++)
 			json_array_append_new(names, json_string(trackNames[t].c_str()));
@@ -868,6 +879,8 @@ struct Looper : Module, public akaudio::LooperRecLink {
 		if (j) engine.defDecayDb.store((float) json_number_value(j));
 		j = json_object_get(root, "autoAdvance");
 		if (json_is_boolean(j)) engine.autoAdvance.store(json_boolean_value(j));
+		j = json_object_get(root, "launchQuantize");
+		if (j) engine.launchQuantize.store((int) json_integer_value(j));
 		// ("repitch" from older patches is deliberately ignored: tempo conversion was
 		// removed 2026-08-29 — takes free-run at their recorded speed.)
 		j = json_object_get(root, "trackNames");
@@ -1658,6 +1671,12 @@ struct LooperWidget : ModuleWidget {
 		menu->addChild(createIndexSubmenuItem("Simulated interval (no Ninjam / clock patched)", {"2 s", "4 s", "8 s", "16 s", "32 s"},
 			[m]() { return (size_t) m->simSecondsIdx.load(std::memory_order_relaxed); },
 			[m](size_t i) { m->simSecondsIdx.store((int) i, std::memory_order_relaxed); }));
+		// How finely launch/record commit on the action grid: every beat (finest) … the whole
+		// interval (coarsest). Applies to any clock; the beat count is BPI subdivisions.
+		menu->addChild(createIndexSubmenuItem("Launch / record quantize",
+			{"Beat", "2 beats", "4 beats", "8 beats", "16 beats", "Interval"},
+			[m]() { return (size_t) quantIndex(m->engine.launchQuantize.load(std::memory_order_relaxed)); },
+			[m](size_t i) { m->engine.launchQuantize.store(QUANT_BEATS[i], std::memory_order_relaxed); }));
 		menu->addChild(createIndexSubmenuItem("New clips: repeats",
 			repeatLabels(),
 			[m]() { return (size_t) repeatsIndex(m->engine.defRepeats.load(std::memory_order_relaxed)); },

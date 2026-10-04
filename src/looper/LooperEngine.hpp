@@ -327,6 +327,10 @@ public:
 	// escape hatch for never-silent sources (drones/pads), where the chain would
 	// otherwise eat the whole column.
 	std::atomic<bool> autoAdvance{true};
+	// Launch/record quantize: beats per commit step on the action grid (1 = every beat, the
+	// finest; 0 = interval, i.e. the downbeat only). Clamped to [1, bpi] at use. Default 1
+	// keeps the historical "commit on every beat" behaviour (Ninjam, the tests).
+	std::atomic<int> launchQuantize{1};
 	std::atomic<int> intervalFrames{0};  // current N (UI)
 	std::atomic<long> allocations{0};    // buffers allocated by the worker (diagnostics/test)
 
@@ -344,6 +348,12 @@ private:
 	void commitCapture(int t, int s, bool finishing, const ClockFrame& c, double now);
 	// Frames from c's frame to the start of the next beat (N - frame when beat-less).
 	static int framesToNextBeat(const ClockFrame& c);
+	// Launch/record quantize (reads launchQuantize): the effective step in beats clamped to
+	// [1, bpi]; whether this beat is on the commit grid; and frames to the next commit beat
+	// (the pre-roll aims there, not merely at the next beat).
+	int gridStep(const ClockFrame& c) const;
+	bool onCommitGrid(const ClockFrame& c) const;
+	int framesToNextCommit(const ClockFrame& c) const;
 	void drainReplies();
 	void drainIntents();
 	void requestSpare(int t);

@@ -39,10 +39,16 @@ chat, and a voice mode for talking between takes.
 
 ### Looper
 
-![A Looper session mid-jam: named tracks, chained takes, one cell playing, the NINJAM clock at 80 BPM · 32 BPI](docs/images/Looper-session.png)
+![A Looper running standalone: chained takes across tracks, the CLK / RST / PH clock inputs patched, EXTERNAL CLOCK at 16 BPI](docs/images/Looper-session.png)
 
-An 8×8 looper that runs on the jam's clock (it's a Ninjam expander; on its own it
-uses a simulated clock). Everything is quantized to the beat: press an empty cell and
+An 8×8 looper that runs on the jam's clock (it's a Ninjam expander) — or **standalone**
+off a plain clock: patch **CLOCK** (add **RESET** for the downbeat, or feed a ZZC-style
+**PHASE** ramp instead) and set the loop length with the **BPI** stepper. With nothing
+patched it free-runs on a simulated clock. Beats per interval come from BPI, not the
+clock rate, so any clock works; a right-click **Launch / record quantize** sets how
+finely cells commit (every beat … the whole interval).
+
+Everything is quantized to the beat: press an empty cell and
 recording starts on the next beat; press it again and the take ends there — any whole
 number of beats, up to one interval. Loops play back at whatever speed they were
 recorded at, and if the room changes tempo they just keep going — nothing gets
@@ -68,7 +74,10 @@ channels: the export needs tracks 7 and 8 for the bounced players and the TX mix
 
 Records the jam. It sits next to Ninjam and, while armed, writes every player's
 intervals (and your own transmitted mix) to disk as the raw OGG bytes — no
-re-encoding, nothing thrown away. When you stop recording, it builds an Ableton Live
+re-encoding, nothing thrown away. With no Ninjam it parks next to a **Looper** instead:
+arming rolls the Looper onto a fresh session folder, and stopping exports that session
+— so a standalone looper rig gets one-click capture and Ableton export too. When you
+stop recording, it builds an Ableton Live
 set out of the whole session: the looper grid as Session clips, what-played-when on
 each track's Arrangement lane, everyone's audio on the timeline, tempo set. A menu
 choice targets full Live (a track per player) or Live Lite (everything fitted into

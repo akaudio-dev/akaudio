@@ -261,8 +261,14 @@ private:
 		if (fi >= N) fi = N - 1; // clock slower than N implies: hold at the boundary
 		if (fi < 0) fi = 0;
 		frameInInterval = fi;
-		beatIndex = pulseBeat;
+		// The action grid is BPI even subdivisions of the interval (like Ninjam and PHASE) —
+		// NOT the raw CLOCK-edge count. So BPI, not the clock rate, sets the beat granularity:
+		// clock CLK at any rate (even one pulse per interval, with RESET marking the loop) and
+		// still get BPI launch/record points per interval. `pulseBeat` only locates the
+		// downbeat in the no-RESET case now.
+		beatIndex = (int) ((long long) fi * bpi / N);
 		if (beatIndex >= bpi) beatIndex = bpi - 1;
+		if (beatIndex < 0) beatIndex = 0;
 		return true;
 	}
 };
