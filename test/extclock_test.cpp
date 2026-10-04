@@ -61,10 +61,10 @@ static void testPhaseFreeze() {
 		ClockFrame c{};
 		ec.tick(true, (float) (k % Np) / Np * 10.f, false, 0.f, false, 0.f, 4, SR, c);
 	}
-	// Hold phase constant well past the 0.25 s threshold (12000 frames @ 48k).
+	// Hold phase constant well past the 0.5 s threshold (24000 frames @ 48k).
 	ClockFrame c{};
 	bool runningLate = true;
-	for (int k = 0; k < 15000; k++)
+	for (int k = 0; k < 30000; k++)
 		ec.tick(true, 5.f, false, 0.f, false, 0.f, 4, SR, c);
 	runningLate = c.running;
 	CHECK(!runningLate, "phase freeze: a stationary ramp halts the clock");
@@ -106,6 +106,26 @@ static void testPulseNoReset() {
 	}
 	CHECK(downbeats >= 2, "pulse: downbeats fire");
 	CHECK(measuredPeriod == bpi * B, "pulse: downbeat period == one interval");
+}
+
+// --- CLOCK wins over PHASE: when BOTH are patched, the pulse path drives (a stray/held
+// PHASE signal must not hijack a working CLOCK+RESET rig and freeze it). ---
+static void testClockBeatsPhase() {
+	ExtClock ec;
+	ec.onActivate(4, SR);
+	const int B = 500, bpi = 4;
+	bool ranPulse = false;
+	for (int k = 0; k <= 10 * B; k++) {
+		float clk = (k % B == 0) ? 5.f : 0.f;
+		ClockFrame c{};
+		// PHASE patched but HELD at 5 V (not a ramp) — must be ignored in favour of CLOCK.
+		ec.tick(true, 5.f, true, clk, false, 0.f, bpi, SR, c);
+		if (c.running) {
+			ranPulse = c.intervalFrames == bpi * B; // pulse-derived N, not phase-derived
+			CHECK(!ec.stopped, "clock>phase: a held PHASE does not freeze a running CLOCK");
+		}
+	}
+	CHECK(ranPulse, "clock>phase: CLOCK+RESET drives when both are patched");
 }
 
 // --- CLOCK + RESET patched: RESET defines the interval length (its period), independent of
@@ -215,6 +235,7 @@ int main() {
 	testPhaseFreeze();
 	testPulseNoReset();
 	testPulseWithReset();
+	testClockBeatsPhase();
 	testNStability();
 	testGenDiscipline();
 	testMaxBpi();

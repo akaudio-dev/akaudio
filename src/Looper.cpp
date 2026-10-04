@@ -142,7 +142,7 @@ int decayIndex(float db) {
 
 } // namespace
 
-struct Looper : Module {
+struct Looper : Module, public akaudio::LooperRecLink {
 	enum ParamId {
 		ENUMS(SLOT_PARAM, TRACKS * SLOTS), // index = track * SLOTS + slot
 		ENUMS(SCENE_PARAM, SLOTS),
@@ -601,6 +601,32 @@ struct Looper : Module {
 		if (r && r->model == modelNinjam) return dynamic_cast<akaudio::RecorderLink*>(r);
 		return nullptr;
 	}
+
+	// ---- LooperRecLink (a Recorder parked next to us, no Ninjam — §7.5) ----
+	// The jam root is the parent of our `.../looper` dir; the Recorder targets it for export.
+	std::string loopJamRoot() const override {
+		static const std::string tail = "/looper";
+		if (resolvedSessionDir.size() > tail.size() &&
+		    resolvedSessionDir.compare(resolvedSessionDir.size() - tail.size(), tail.size(), tail) == 0)
+			return resolvedSessionDir.substr(0, resolvedSessionDir.size() - tail.size());
+		return resolvedSessionDir; // empty, or an unexpected shape — hand it back as-is
+	}
+	std::string loopSessionName() const override {
+		std::string root = loopJamRoot();
+		size_t p = root.find_last_of('/');
+		return p == std::string::npos ? root : root.substr(p + 1);
+	}
+	int loopTakeCount() const override {
+		int n = 0;
+		for (int t = 0; t < TRACKS; t++)
+			for (int s = 0; s < SLOTS; s++)
+				if (engine.tracks[t].slots[s].state.load(std::memory_order_relaxed) != akaudio::looper::EMPTY)
+					n++;
+		return n;
+	}
+	std::string loopJamsBase() const override { return sessionBase; }
+	void setLoopJamsBase(const std::string& b) override { if (!b.empty()) sessionBase = b; }
+	void loopNewSession() override { newSession(true); } // carry the grid into the fresh folder
 
 	// Point the session at the right `.../looper` folder and keep its manifest metadata
 	// current (UI thread, from the widget's step()). While a Recorder RECORDS, its jam

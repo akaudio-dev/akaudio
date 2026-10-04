@@ -118,10 +118,15 @@ struct ExtClock {
 		bool running;
 		int beatIndex = 0;
 		bool downbeat = false;
-		if (phasePatched)
-			running = tickPhase(phaseV, bpi, Nmax, beatIndex, downbeat);
-		else
+		// CLOCK (+ RESET) is the primary source: when a clock cable is patched it wins, even
+		// if PHASE is also patched. PHASE drives ONLY when there is no CLOCK (a pure phase-ramp
+		// rig). (Precedence reworked 2026-10-04 — CLOCK-first is far more predictable: most
+		// clock modules emit gate pulses, not a 0-10 V ramp, so a non-ramp signal on PHASE must
+		// not hijack a working CLOCK+RESET setup and freeze the grid.)
+		if (clockPatched)
 			running = tickPulse(clockV, resetPatched, resetV, bpi, Nmax, beatIndex, downbeat);
+		else
+			running = tickPhase(phaseV, bpi, Nmax, beatIndex, downbeat);
 
 		// Beat flag: the beat index changed this frame (incl. the downbeat).
 		bool beat = running && (downbeat || beatIndex != lastBeatIndex);
@@ -188,9 +193,11 @@ private:
 			phaseWrap = frame;
 			downbeat = true;
 		}
-		// Freeze: the ramp has stopped moving.
-		stationary = (std::fabs(dp) < 1e-6f) ? stationary + 1 : 0;
-		stopped = stationary > (int) std::lround(lastSr * 0.25); // 0.25 s stationary = stopped
+		// Freeze: the ramp is genuinely HELD (transport stopped). The threshold is near float
+		// epsilon so only an unchanging value counts — a slow-but-moving ramp (even a
+		// multi-minute interval) keeps a dp above it and is NOT mistaken for stopped.
+		stationary = (std::fabs(dp) < 1e-7f) ? stationary + 1 : 0;
+		stopped = stationary > (int) std::lround(lastSr * 0.5); // held ~0.5 s = stopped
 
 		// N: the latched cycle, or a slope estimate until the first wrap lands.
 		int n = phaseN;

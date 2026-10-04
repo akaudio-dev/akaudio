@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Andrei Kozlov
 
-// Recorder — a Ninjam expander that saves the jam. It has NO audio path and reads no
-// clock: it is a control panel for Ninjam's wire archive (docs/LOOPER_DESIGN.md §7),
-// which writes every received per-player interval and our transmitted mix to disk as
-// the raw OGG bytes they already are (per-player .ogg files + a JSON-lines index on
-// the session timeline) — so a DAW can later reassemble the whole jam. All the work is
-// in Ninjam/NjArchive; this module is the REC arm, the "record own TX" toggle, and the
-// live per-player status. It reaches Ninjam through the RecorderLink interface by
-// dynamic_cast on its adjacent module — no expander messages, no cables.
+// Recorder — a control panel that saves the jam. It has NO audio path and reads no clock.
+// It parks next to EITHER module (docs/LOOPER_DESIGN.md §7):
+//   * Ninjam  — drives Ninjam's wire archive (RecorderLink): every received per-player
+//     interval + our transmitted mix written to disk as the raw OGG bytes they already are
+//     (per-player .ogg + a JSON-lines index on the session timeline). Work is in
+//     Ninjam/NjArchive; this module is the REC arm, the "record own TX" toggle, and status.
+//   * Looper  — with no Ninjam, parks beside the Looper (LooperRecLink, §7.5): arming rolls
+//     the Looper onto a fresh session folder and marks it for the .als export; the status
+//     panel shows the Looper session; the jams folder is shared. No wire archive (there are
+//     no remote players) — the value is one-click session capture + Ableton export.
+// Both links are found by dynamic_cast on the adjacent module — no expander messages, no
+// cables. The .als export itself is offline (reads a jam folder on disk), so it needs
+// neither neighbour. Ninjam wins when both are adjacent.
 
 #include "plugin.hpp"
 #include "Theme.hpp"
@@ -95,6 +100,16 @@ struct Recorder : Module {
 		return nullptr;
 	}
 
+	// An adjacent Looper, for the no-Ninjam use: park the Recorder beside a Looper to export
+	// its session and share the jams folder (§7.5). Ninjam wins when both are present.
+	akaudio::LooperRecLink* looperLink() {
+		Module* l = leftExpander.module;
+		if (l && l->model == modelLooper) return dynamic_cast<akaudio::LooperRecLink*>(l);
+		Module* r = rightExpander.module;
+		if (r && r->model == modelLooper) return dynamic_cast<akaudio::LooperRecLink*>(r);
+		return nullptr;
+	}
+
 	// Buttons are handled in the widget step (UI thread), not process(), since they act
 	// on the RecorderLink (thread ops). process() does nothing — no audio path.
 	void process(const ProcessArgs& args) override {}
@@ -165,6 +180,24 @@ struct RecStatusView : Widget {
 		else                    (void) std::snprintf(c, sizeof(c), "%ld B", b);
 		return c;
 	}
+	// Looper-parked status (§7.5): READY/RECORDING badge, take count, session folder name.
+	void drawLooper(NVGcontext* vg, float w, akaudio::LooperRecLink* ll) {
+		bool armed = rec && rec->params[Recorder::REC_PARAM].getValue() > 0.5f;
+		float y = 13.f;
+		NVGcolor sc = armed ? rcRed() : akTheme(nvgRGB(0x2a, 0xa8, 0x55), nvgRGB(0x3a, 0xd0, 0x6a));
+		nvgBeginPath(vg); nvgCircle(vg, 9, y, 3.f); nvgFillColor(vg, sc); nvgFill(vg);
+		drawTxt(vg, FONT_BOLD, 16, y, 9.f, sc, armed ? "RECORDING" : "READY", NVG_ALIGN_LEFT, w - 20);
+		y += 15.f;
+		drawTxt(vg, FONT_REG, 8, y, 8.f, rcTextDim(), "Looper session", NVG_ALIGN_LEFT, w - 16);
+		y += 13.f;
+		int takes = ll->loopTakeCount();
+		char sum[48]; (void) std::snprintf(sum, sizeof(sum), "%d take%s", takes, takes == 1 ? "" : "s");
+		drawTxt(vg, FONT_BOLD, 8, y, 8.5f, rcText(), sum, NVG_ALIGN_LEFT, w - 16);
+		y += 13.f;
+		std::string name = ll->loopSessionName();
+		drawTxt(vg, FONT_REG, 8, y, 8.f, rcTextDim(), name.empty() ? "no session yet" : name, NVG_ALIGN_LEFT, w - 16);
+	}
+
 	void draw(const DrawArgs& args) override {
 		NVGcontext* vg = args.vg;
 		const float w = box.size.x;
@@ -175,11 +208,16 @@ struct RecStatusView : Widget {
 		nvgStrokeColor(vg, rcBorder());
 		nvgStroke(vg);
 
-		const akaudio::RecorderLink* lk = rec ? rec->link() : nullptr;
+		akaudio::RecorderLink* lk = rec ? rec->link() : nullptr;
 		float y = 13.f;
 		if (!lk) {
-			drawTxt(vg, FONT_BOLD, w / 2, box.size.y / 2 - 6, 8.5f, rcTextDim(), "Place next", NVG_ALIGN_CENTER, w - 8);
-			drawTxt(vg, FONT_BOLD, w / 2, box.size.y / 2 + 6, 8.5f, rcTextDim(), "to Ninjam", NVG_ALIGN_CENTER, w - 8);
+			// No Ninjam — a Looper parked next to us gives the alternative session view (§7.5).
+			if (akaudio::LooperRecLink* ll = rec ? rec->looperLink() : nullptr) {
+				drawLooper(vg, w, ll);
+				return;
+			}
+			drawTxt(vg, FONT_BOLD, w / 2, box.size.y / 2 - 6, 8.5f, rcTextDim(), "Place next to", NVG_ALIGN_CENTER, w - 8);
+			drawTxt(vg, FONT_BOLD, w / 2, box.size.y / 2 + 6, 8.5f, rcTextDim(), "Ninjam / Looper", NVG_ALIGN_CENTER, w - 8);
 			return;
 		}
 		bool active = lk->recActive();
@@ -276,34 +314,66 @@ struct RecorderWidget : ModuleWidget {
 	void step() override {
 		ModuleWidget::step();
 		if (!rec) return;
-		akaudio::RecorderLink* lk = rec->link();
+		if (akaudio::RecorderLink* lk = rec->link()) { stepNinjam(lk); return; }   // wire archive
+		if (akaudio::LooperRecLink* ll = rec->looperLink()) { stepLooper(ll); return; } // §7.5
+		stepIdle();
+	}
+
+	// Ninjam adjacent: the arm/TX truth lives in Ninjam; mirror it into the latch params
+	// (so they stay MIDI-mappable), drive the LED, and auto-export on disarm.
+	void stepNinjam(akaudio::RecorderLink* lk) {
 		auto reconcile = [&](int pid, bool& prev, bool state, void (akaudio::RecorderLink::*setter)(bool)) {
 			bool pOn = rec->params[pid].getValue() > 0.5f;
-			if (pOn != prev) { prev = pOn; if (lk) (lk->*setter)(pOn); }
-			else if (lk && state != pOn) { rec->params[pid].setValue(state ? 1.f : 0.f); prev = state; }
-			else if (!lk && pOn) { rec->params[pid].setValue(0.f); prev = false; }
+			if (pOn != prev) { prev = pOn; (lk->*setter)(pOn); }
+			else if (state != pOn) { rec->params[pid].setValue(state ? 1.f : 0.f); prev = state; }
 		};
-		reconcile(Recorder::REC_PARAM, rec->prevRec, lk && lk->recArmed(), &akaudio::RecorderLink::setRecArmed);
-		reconcile(Recorder::TX_PARAM, rec->prevTx, lk ? lk->recordOwnTx() : true, &akaudio::RecorderLink::setRecordOwnTx);
-		if (lk && lk->sessionBase() != rec->sessionBase) lk->setSessionBase(rec->sessionBase);
-		bool active = lk && lk->recActive();
-		float b = active ? 1.f : ((lk && lk->recArmed()) ? 0.35f : 0.f);
-		rec->lights[Recorder::REC_LIGHT].setBrightness(b);
-
-		// Auto-export the Live set when recording stops. The jam root is cached once at
-		// the arm edge (the folder name is stamped per arm and constant while recording;
-		// the Ninjam module may be detached by the time recording ends). The export
-		// waits a wall-clock grace so the Looper's worker can flush the disarm-boundary
-		// take — NjArchive::stop() already joined its writer, so index.jsonl is
-		// complete — and runs on its own thread (multi-MB build; step() must not stall).
+		reconcile(Recorder::REC_PARAM, rec->prevRec, lk->recArmed(), &akaudio::RecorderLink::setRecArmed);
+		reconcile(Recorder::TX_PARAM, rec->prevTx, lk->recordOwnTx(), &akaudio::RecorderLink::setRecordOwnTx);
+		if (lk->sessionBase() != rec->sessionBase) lk->setSessionBase(rec->sessionBase);
+		bool active = lk->recActive();
+		rec->lights[Recorder::REC_LIGHT].setBrightness(active ? 1.f : (lk->recArmed() ? 0.35f : 0.f));
 		if (active && !rec->prevActive) {
-			// Re-armed while an export was still pending: the finished jam's folder is
-			// complete, so export it NOW — before lastJamRoot is repointed below.
 			if (rec->exportAt >= 0.0 && !rec->lastJamRoot.empty())
 				launchAutoExport(rec->lastJamRoot, rec->liteExport);
 			rec->exportAt = -1.0;
 			rec->lastJamRoot = akaudio::expandHome(lk->sessionBase()) + "/" + lk->recSessionName();
 		}
+		runExportTail(active);
+	}
+
+	// Looper adjacent, no Ninjam (§7.5): the REC latch is owned HERE. Arming rolls the Looper
+	// onto a fresh session folder and marks it for export; disarming auto-exports that folder.
+	// We also share our jams folder with the Looper so both write under the same base.
+	void stepLooper(akaudio::LooperRecLink* ll) {
+		if (ll->loopJamsBase() != rec->sessionBase) ll->setLoopJamsBase(rec->sessionBase);
+		bool active = rec->params[Recorder::REC_PARAM].getValue() > 0.5f;
+		rec->lights[Recorder::REC_LIGHT].setBrightness(active ? 1.f : 0.f);
+		if (active && !rec->prevActive) {
+			if (rec->exportAt >= 0.0 && !rec->lastJamRoot.empty())
+				launchAutoExport(rec->lastJamRoot, rec->liteExport);
+			rec->exportAt = -1.0;
+			ll->loopNewSession(); // fresh folder, loops carried over
+		}
+		// Track the Looper's current jam root even when idle, so the manual "Export .als…"
+		// defaults to it (and the auto-export on disarm targets the right folder).
+		std::string root = ll->loopJamRoot();
+		if (!root.empty()) rec->lastJamRoot = root;
+		rec->prevRec = active;
+		runExportTail(active);
+	}
+
+	// No link: keep the latch off and the LED dark; still let a pending export fire.
+	void stepIdle() {
+		if (rec->params[Recorder::REC_PARAM].getValue() > 0.5f) rec->params[Recorder::REC_PARAM].setValue(0.f);
+		rec->prevRec = false;
+		rec->lights[Recorder::REC_LIGHT].setBrightness(0.f);
+		runExportTail(false);
+	}
+
+	// Auto-export the Live set when recording stops: a short wall-clock grace lets the
+	// Looper's worker flush the disarm-boundary take, then the export runs on its own thread
+	// (multi-MB build; step() must not stall). Shared by both modes.
+	void runExportTail(bool active) {
 		if (rec->prevActive && !active && rec->autoExportAls && !rec->lastJamRoot.empty())
 			rec->exportAt = system::getTime() + 1.5;
 		rec->prevActive = active;
@@ -345,13 +415,20 @@ struct RecorderWidget : ModuleWidget {
 			[m]() { return m->liteExport ? 1 : 0; },
 			[m](int i) { m->liteExport = i == 1; }));
 		menu->addChild(new MenuSeparator);
-		if (!lk) {
-			menu->addChild(createMenuLabel("Place directly next to a Ninjam module"));
-			return;
+		// What are we parked next to? Ninjam → wire archive; else a Looper → its session (§7.5).
+		if (lk) {
+			menu->addChild(createMenuLabel("Saves raw NINJAM intervals to disk (no re-encode)"));
+			if (lk->recActive())
+				menu->addChild(createMenuLabel("Recording: " + lk->recSessionName()));
+		} else if (akaudio::LooperRecLink* ll = m->looperLink()) {
+			menu->addChild(createMenuLabel("Parked next to the Looper \xe2\x80\x94 records + exports its session"));
+			std::string nm = ll->loopSessionName();
+			if (!nm.empty())
+				menu->addChild(createMenuLabel("Session: " + nm));
+		} else {
+			menu->addChild(createMenuLabel("Place directly next to a Ninjam or Looper module"));
 		}
-		menu->addChild(createMenuLabel("Saves raw NINJAM intervals to disk (no re-encode)"));
-		if (lk->recActive())
-			menu->addChild(createMenuLabel("Recording: " + lk->recSessionName()));
+		// Jams folder (owned here, shared with the neighbour) — always available.
 		menu->addChild(new MenuSeparator);
 		menu->addChild(createMenuLabel("Jams folder: " + m->sessionBase));
 		menu->addChild(createMenuItem("Choose folder\xe2\x80\xa6", "", [m]() {

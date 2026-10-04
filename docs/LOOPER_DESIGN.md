@@ -222,27 +222,34 @@ new source just fills the same `ClockFrame` (`LooperEngine.hpp`), exactly as the
 expander reader and the simulated clock do. `tickClock()` (`Looper.cpp`) grows one
 branch.
 
-**Source precedence (per frame):** live Ninjam expander → **PHASE** jack → **CLOCK**
+**Source precedence (per frame):** live Ninjam expander → **CLOCK** jack → **PHASE**
 jack → simulated. "Live" = the signal is actually moving (see clock-stop below). The
 first live source wins; a patched-but-idle jack does not pre-empt the simulated clock.
+**CLOCK outranks PHASE** (reworked 2026-10-04, GitHub #3 field report): a user wiring
+CLK + RESET + PHASE from a clock module expects the *clock* to drive, and most clock
+modules emit gate pulses — a non-ramp signal on PHASE must not hijack a working
+CLOCK+RESET rig and freeze the grid. PHASE drives only when **no** CLOCK is patched (a
+pure phase-ramp rig).
 
 **Two external modes, auto-selected by what's patched:**
 
-- **PHASE (preferred — ZZC-style continuous ramp).** A 0–10 V sawtooth that wraps once
-  per interval *is* the position, directly: `phase01 = clamp(v/10, 0, 1)`,
-  `frameInInterval = round(phase01 · N)`. The **wrap** (a downward jump, `Δphase <
-  −0.5`) is the **downbeat**; `N` (`intervalFrames`) is latched at each wrap to the
-  frame count of the cycle just finished and held for the next, and `bpm` is derived
-  from `N` and BPI for display. Beats come from subdividing: `beatIndex =
-  floor(phase01 · bpi)`, `beat` fires when it increments. No period estimation, no
-  jitter — phase carries the position exactly. This is strictly cleaner than the
-  simulated clock and is why PHASE outranks CLOCK.
-- **CLOCK + RESET (traditional pulse mode, when PHASE is unpatched).** A Schmitt trigger
-  (~1 V hi / 0.1 V lo) on CLOCK marks **beats**; RESET marks the **downbeat / interval
-  boundary**. `N` = frames between the last two RESETs (or `bpi ×` the last measured
-  beat length when RESET is unpatched); beat length = frames between the last two CLOCK
-  edges. `frameInInterval` is reconstructed by counting frames since the last edge
-  against the last measured length — the same interpolation Ninjam hands us for free.
+- **CLOCK + RESET (pulse mode — the primary, used whenever CLOCK is patched).** A Schmitt
+  trigger (~1 V hi / 0.1 V lo) on CLOCK marks **beats**; RESET marks the **downbeat /
+  interval boundary**. `N` = frames between the last two RESETs (or `bpi ×` the last
+  measured beat length when RESET is unpatched); beat length = frames between the last
+  two CLOCK edges. `frameInInterval` is reconstructed by counting frames since the last
+  edge against the last measured length — the same interpolation Ninjam hands us for free.
+- **PHASE (ZZC-style continuous ramp — used only when CLOCK is unpatched).** A 0–10 V
+  sawtooth that wraps once per interval *is* the position, directly:
+  `phase01 = clamp(v/10, 0, 1)`, `frameInInterval = round(phase01 · N)`. The **wrap** (a
+  downward jump, `Δphase < −0.5`) is the **downbeat**; `N` (`intervalFrames`) is latched
+  at each wrap to the frame count of the cycle just finished and held for the next, and
+  `bpm` is derived from `N` and BPI for display. Beats come from subdividing:
+  `beatIndex = floor(phase01 · bpi)`, `beat` fires when it increments. No period
+  estimation, no jitter — phase carries the position exactly. Cleaner than the simulated
+  clock, but **not** the default when a clock cable is present (robustness beats
+  smoothness). Freeze = the ramp is genuinely *held* (Δphase below float epsilon for
+  ~0.5 s), so a slow-but-moving ramp is never mistaken for stopped.
 
 **BPI control (on-panel, decided 2026-10-04).** External clocking needs a
 beats-per-interval value (the loop/bar length). It is a **▲/▼ stepper with a numeric
@@ -668,6 +675,31 @@ TX; name + interval count). 6 HP, with the "AK" mark. The jams folder defaults t
 Open jams folder), persisted in the Recorder's patch data. Status comes from
 `RecorderLink` (dynamic_cast on the adjacent Ninjam); no Ninjam adjacent ⇒ the panel
 says so.
+
+### 7.5 Parking next to a Looper (no Ninjam)  *(2026-10-04 — GitHub #3 follow-up)*
+
+Once the Looper runs standalone on an external clock (§3.5), a Recorder next to a *Ninjam*
+is no use to that player — so the Recorder also parks next to a **Looper**. There are no
+remote players and no wire archive here (nothing to archive); the value is **one-click
+session capture + Ableton export** for a Looper jam.
+
+- **`LooperRecLink`** (`src/RecorderLink.hpp`) — a second, smaller interface the **Looper**
+  implements (multiple inheritance; found by `dynamic_cast` on the neighbour, like
+  `RecorderLink`): `loopJamRoot()` (parent of the Looper's `.../looper` dir), `loopSessionName()`,
+  `loopTakeCount()`, `loopJamsBase()`/`setLoopJamsBase()`, `loopNewSession()`.
+- **Recorder behaviour** (`stepLooper`): precedence is **Ninjam wins**, else a Looper. In
+  Looper mode the REC latch is owned by the Recorder itself (no external truth to reconcile).
+  Arming **rolls the Looper onto a fresh session folder** (`loopNewSession()` → the Looper's
+  `newSession(keepLoops=true)`, grid carried over) and marks `lastJamRoot` for export;
+  disarming fires the same **auto-export** path as Ninjam (1.5 s grace → `exportJamAls` on a
+  worker thread). The Recorder's jams folder is pushed to the Looper (`setLoopJamsBase`), so
+  both write under one base; the Recorder then reads `loopJamRoot()` back as the export target.
+- **Why the `.als` export already fits:** `exportJamAls` reads `looper/session.json` +
+  `looper/events.jsonl` + `index.jsonl`, all **optional** (at least one must yield content).
+  A Looper-only jam has the first two and no `index.jsonl`, so the grid + "as played" lanes
+  export with no player/TX lanes — no export change needed.
+- **Status panel:** a READY / RECORDING badge, the take count, and the session folder name
+  (vs. the Ninjam per-player rows). The jams-folder menu items are available in both modes.
 
 ---
 

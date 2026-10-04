@@ -66,6 +66,21 @@ struct RecStatusRow {
 	bool tx = false;
 };
 
+// Implemented by the Looper, so a Recorder can be parked next to it with NO Ninjam
+// (docs/LOOPER_DESIGN.md §7.5). The Recorder finds it by dynamic_cast on the adjacent
+// module and uses it to: show the Looper session in its status panel, auto-target that
+// session's jam root for the .als export, share the jams folder, and (on REC arm) roll
+// the Looper onto a fresh session folder. UI-thread only, same as RecorderLink.
+struct LooperRecLink {
+	virtual ~LooperRecLink() {}
+	virtual std::string loopJamRoot() const = 0;      // <base>/<name> (parent of looper/); "" if none yet
+	virtual std::string loopSessionName() const = 0;  // folder basename, for display
+	virtual int loopTakeCount() const = 0;            // filled slots, for status
+	virtual std::string loopJamsBase() const = 0;     // where the Looper creates session folders
+	virtual void setLoopJamsBase(const std::string&) = 0;
+	virtual void loopNewSession() = 0;                // REC arm → fresh session folder (loops kept)
+};
+
 struct RecorderLink {
 	virtual ~RecorderLink() {}
 	virtual bool recArmed() const = 0;         // the Recorder's REC latch (owned here)
